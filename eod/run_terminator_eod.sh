@@ -5,13 +5,13 @@
 set -e
 
 # --- CONFIG ---
-VM_HOST="spt-vm" # Tailscale hostname or IP
+VM_HOST="production-server" # Tailscale hostname or IP
 LOCAL_GIT_DIR="/Users/fw/Git/terminator_prod"
 REMOTE_SESSION_DIR="/home/fw/terminator_prod/server"
 DATE_STR=$(date +%Y%m%d)
 TEMP_SESSION="/tmp/vm_session_$DATE_STR.json"
 
-echo "--- SPT v4 EOD Report Flow ---"
+echo "--- Terminator EOD Report Flow ---"
 echo "Date: $DATE_STR"
 
 # 1. Pull session state from VM

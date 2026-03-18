@@ -1,4 +1,4 @@
-# live/spt_v4/session_manager.py
+# live/terminator/session_manager.py
 
 import json
 import os

@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-async def send_push(topic: str, message: str, title: str = "SPT v4 Alert", priority: str = "default"):
+async def send_push(topic: str, message: str, title: str = "Terminator Alert", priority: str = "default"):
     """Send push notification via ntfy.sh"""
     if not topic:
         return
@@ -73,7 +73,7 @@ def send_email_alert(config: Dict, subject: str, body: str):
     except Exception as e:
         logger.error(f"Failed to send email alert: {e}")
 
-async def notify_all(config: Dict, message: str, title: str = "SPT v4 Alert", email_body: Optional[str] = None):
+async def notify_all(config: Dict, message: str, title: str = "Terminator Alert", email_body: Optional[str] = None):
     """Convenience helper to send both push and email"""
     # 1. Push (Async)
     if config.get('ntfy_enabled', True):

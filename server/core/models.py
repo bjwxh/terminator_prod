@@ -1,4 +1,4 @@
-# live/spt_v4/models.py
+# live/terminator/models.py
 
 from dataclasses import dataclass, field
 from datetime import datetime, time

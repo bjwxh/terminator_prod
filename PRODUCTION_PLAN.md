@@ -1,4 +1,4 @@
-# SPT v4 — Production Deployment Plan
+# Terminator — Production Deployment Plan
 
 **Status:** Planning
 **Last Updated:** 2026-03-18
@@ -52,7 +52,7 @@ terminator_prod/
 │   │   ├── __init__.py
 │   │   ├── routes.py              # All REST endpoint handlers
 │   │   └── ws.py                  # WebSocket broadcaster (500ms push to clients)
-│   ├── core/                      # Trading logic — ported from terminator/live/spt_v4
+│   ├── core/                      # Trading logic — ported from terminator/live/terminator
 │   │   ├── __init__.py
 │   │   ├── monitor.py             # LiveTradingMonitor (unchanged logic)
 │   │   ├── models.py              # OptionLeg, Trade, Portfolio, SubStrategy
@@ -66,11 +66,11 @@ terminator_prod/
 │       └── style.css              # Dark theme, mobile responsive
 │
 ├── eod/                           # Runs on MacBook
-│   ├── eod_report.py              # Ported from terminator/live/spt_v4/eod_report.py
+│   ├── eod_report.py              # Ported from terminator/live/terminator/eod_report.py
 │   └── run_eod.sh                 # scp session from VM → run eod_report.py locally
 │
 ├── deploy/                        # Infrastructure / ops
-│   ├── spt_v4.service             # systemd unit file (copy to /etc/systemd/system/ on VM)
+│   ├── terminator.service             # systemd unit file (copy to /etc/systemd/system/ on VM)
 │   ├── setup_vm.sh                # One-time VM provisioning script
 │   └── update.sh                  # Rolling update: git pull + systemctl restart
 │
@@ -115,7 +115,7 @@ No secrets ever touch git. On the VM, credentials live at:
 │                  GCP VM  (us-central1)              │
 │                                                     │
 │   ┌──────────────────────────────────────────────┐  │
-│   │           spt_v4_server.service  (systemd)   │  │
+│   │           terminator_server.service  (systemd)   │  │
 │   │                                              │  │
 │   │   FastAPI app (port 8080)                    │  │
 │   │   ├── /api/*       REST endpoints            │  │
@@ -260,7 +260,7 @@ Clients reconnect automatically on disconnect (exponential backoff, cap 30s).
 ### 5.3 Key Files
 
 ```
-live/spt_v4/
+live/terminator/
 ├── server/
 │   ├── main_server.py       # Entry point: FastAPI + monitor in shared event loop
 │   ├── api_routes.py        # All REST route handlers
@@ -311,7 +311,7 @@ No React/Node — keeps the stack simple and deployable without a build pipeline
 The initial OAuth flow requires a browser. The workflow:
 
 1. **Locally (MacBook):** Run `python -c "import schwab; schwab.auth.client_from_login_flow(...)"` to authorize and generate `sli_token.json`
-2. **Upload to VM:** `scp sli_token.json user@vm-tailscale-ip:~/spt_v4/`
+2. **Upload to VM:** `scp sli_token.json user@vm-tailscale-ip:~/terminator/`
 3. **VM auto-refresh:** schwab-py handles token refresh transparently on every API call
 4. **Token expiry:** Schwab tokens typically last 7 days. If the refresh fails (network blip, Schwab outage), the monitor triggers its existing error alert (email + sound) and pauses trading. Re-authorize locally and re-upload.
 
@@ -324,7 +324,7 @@ The initial OAuth flow requires a browser. The workflow:
 ```
 [EOD trigger — MacBook cron at 15:15 ET]
   │
-  ├── scp vm-tailscale-ip:~/spt_v4/session_state.json /tmp/vm_session_$(date +%Y%m%d).json
+  ├── scp vm-tailscale-ip:~/terminator/session_state.json /tmp/vm_session_$(date +%Y%m%d).json
   │
   └── python eod_report.py --session /tmp/vm_session_$(date +%Y%m%d).json
         │
@@ -346,10 +346,10 @@ The `--session` flag is already supported by `eod_report.py`. The MacBook keeps 
 #!/bin/bash
 set -e
 SESSION_DATE=$(date +%Y%m%d)
-VM_HOST="spt-vm"  # Tailscale hostname or IP
-scp $VM_HOST:~/spt_v4/session_state.json /tmp/vm_session_$SESSION_DATE.json
+VM_HOST="production-server"  # Tailscale hostname or IP
+scp $VM_HOST:~/terminator/session_state.json /tmp/vm_session_$SESSION_DATE.json
 cd /Users/fw/Git/terminator
-python live/spt_v4/eod_report.py --session /tmp/vm_session_$SESSION_DATE.json
+python live/terminator/eod_report.py --session /tmp/vm_session_$SESSION_DATE.json
 ```
 
 ---
@@ -377,7 +377,7 @@ python live/spt_v4/eod_report.py --session /tmp/vm_session_$SESSION_DATE.json
 
 **Config additions to `config.py`:**
 ```python
-ntfy_topic: str = ""            # e.g. "spt-v4-abc123xyz" — keep secret
+ntfy_topic: str = ""            # e.g. "terminator-abc123xyz" — keep secret
 ntfy_enabled: bool = True
 ```
 
@@ -423,22 +423,22 @@ pip install fastapi uvicorn
 mkdir -p ~/.api_keys/gmail
 scp local-machine:~/.api_keys/gmail/fw_trd_key.json ~/.api_keys/gmail/
 scp local-machine:~/path/to/sli_api.json ~/.api_keys/
-scp local-machine:~/path/to/sli_token.json ~/terminator/live/spt_v4/
+scp local-machine:~/path/to/sli_token.json ~/terminator/live/terminator/
 ```
 
 ### 9.2 Systemd Service
 
-**`/etc/systemd/system/spt_v4.service`:**
+**`/etc/systemd/system/terminator.service`:**
 ```ini
 [Unit]
-Description=SPT v4 Trading Server
+Description=Terminator Trading Server
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=fw
-WorkingDirectory=/home/fw/terminator/live/spt_v4
+WorkingDirectory=/home/fw/terminator/live/terminator
 ExecStart=/home/fw/terminator/.venv/bin/python server/main_server.py
 Restart=on-failure
 RestartSec=30
@@ -452,8 +452,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable spt_v4
-sudo systemctl start spt_v4
+sudo systemctl enable terminator
+sudo systemctl start terminator
 ```
 
 **Restart behavior:** `Restart=on-failure` with 30s delay. On restart, `session_manager.py` restores session from `session_state.json` and trading resumes. Catch-up simulation is skipped (no DB on VM) — live trading proceeds immediately from restored state.
@@ -464,7 +464,7 @@ sudo systemctl start spt_v4
 # On VM
 cd ~/terminator
 git pull
-sudo systemctl restart spt_v4
+sudo systemctl restart terminator
 ```
 
 ---
@@ -489,7 +489,7 @@ sudo systemctl restart spt_v4
 
 ### Phase 0 — Repo Bootstrap (half day)
 - [ ] `git init ~/Git/terminator_prod` and create remote on GitHub (private)
-- [ ] Copy `core/` files from `terminator/live/spt_v4/` (`monitor.py`, `models.py`, `config.py`, `session_manager.py`, `utils.py`)
+- [ ] Copy `core/` files from `terminator/live/terminator/` (`monitor.py`, `models.py`, `config.py`, `session_manager.py`, `utils.py`)
 - [ ] Create `requirements.txt`, `.gitignore`, `config.example.py`, `README.md`
 - [ ] Verify no secrets or research artifacts are included
 
@@ -534,10 +534,10 @@ sudo systemctl restart spt_v4
 
 | Question | Decision |
 |----------|---------|
-| Config edits | SSH into VM, edit `config.py`, `sudo systemctl restart spt_v4` |
+| Config edits | SSH into VM, edit `config.py`, `sudo systemctl restart terminator` |
 | Sound alerts | Disabled on VM (no audio device); replaced by email + ntfy push |
 | Push notifications | ntfy.sh hosted (free tier); iOS ntfy app + macOS ntfy app / Safari web push |
 | Runtime config changes | None — all config via file + restart |
 | Manual order UI | Full free-form leg builder (same capability as tkinter order_window.py) |
-| Log aggregation | journald on VM; daily archive to `~/logs/archive/`; `journalctl -u spt_v4 -f` for live tailing |
+| Log aggregation | journald on VM; daily archive to `~/logs/archive/`; `journalctl -u terminator -f` for live tailing |
 | Option chain DB on VM | Not needed — live trading uses Schwab API only; catch-up sim skipped on restart |

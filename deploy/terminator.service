@@ -1,5 +1,5 @@
 [Unit]
-Description=SPT v4 Trading Server
+Description=Terminator Trading Server
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

@@ -1,4 +1,4 @@
-# live/spt_v4/config.py
+# live/terminator/config.py
 
 import os
 from datetime import time

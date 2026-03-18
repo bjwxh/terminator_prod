@@ -1,4 +1,4 @@
-# live/spt_v4/monitor.py
+# live/terminator/monitor.py
 
 import asyncio
 import logging
@@ -139,7 +139,7 @@ class LiveTradingMonitor:
         try:
             async with asyncio.TaskGroup() as tg:
                 # 0. Startup notification
-                await notify_all(self.config, "Monitor Started", title="SPT v4 Live")
+                await notify_all(self.config, "Monitor Started", title="Terminator Live")
                 
                 # 1. Start Support Tasks
                 tg.create_task(self.run_broker_heartbeat())
@@ -159,7 +159,7 @@ class LiveTradingMonitor:
                 self.status = f"Fatal Error: {str(e)}"
                 self.logger.error(f"Fatal task failure in TaskGroup: {e}\n{traceback.format_exc()}")
             self.is_running = False
-            asyncio.create_task(notify_all(self.config, f"Monitor Stopped: {self.status}", title="SPT v4 Live", priority="urgent"))
+            asyncio.create_task(notify_all(self.config, f"Monitor Stopped: {self.status}", title="Terminator Live", priority="urgent"))
 
     async def run_reconciliation_loop(self):
         """Unified path for execution: Waits for 'pokes' or runs periodically on timeout."""
@@ -427,7 +427,7 @@ class LiveTradingMonitor:
                 self.heartbeat_failures += 1
                 if self.heartbeat_failures == 3: # Send alert only on initial failure threshold
                     self.broker_connected = False
-                    await notify_all(self.config, "Broker Connection Lost!", title="SPT v4 Critical", priority="urgent")
+                    await notify_all(self.config, "Broker Connection Lost!", title="Terminator Critical", priority="urgent")
                     self.client = None # Reset client to force a fresh initialization attempt next cycle
                 elif self.heartbeat_failures > 3:
                      self.broker_connected = False

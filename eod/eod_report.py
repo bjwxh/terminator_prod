@@ -18,13 +18,13 @@ import argparse
 
 # Add project root to sys.path
 dir_path = os.path.dirname(os.path.realpath(__file__))
-root_dir = os.path.abspath(os.path.join(dir_path, "..", ".."))
+root_dir = os.path.abspath(os.path.join(dir_path, "..")) # Back to terminator_prod root
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from live.spt_v4.monitor import LiveTradingMonitor
-from live.spt_v4.config import CONFIG
-from live.spt_v4.models import TradePurpose
+from server.core.monitor import LiveTradingMonitor
+from server.core.config import CONFIG
+from server.core.models import TradePurpose
 
 # ReportLab imports
 from reportlab.lib.pagesizes import letter
@@ -38,7 +38,7 @@ INTRADAY_CHART_PATH = "/tmp/v4_intraday_analysis.png"
 PDF_PATH = "/tmp/v4_eod_report.pdf"
 
 async def run_simulation(target_date: date, live_trades=None):
-    """Run the V4 logic against target_date's DB data"""
+    """Run the Terminator logic against target_date's DB data"""
     start_dt = datetime.combine(target_date, time(8, 30))
     end_dt = datetime.combine(target_date, time(15, 0))
     
@@ -261,7 +261,7 @@ def generate_pdf(df, today_data, target_date: date):
     styles = getSampleStyleSheet()
     
     # Title
-    story.append(Paragraph(f"<b>Terminator v4 EOD Report</b>", styles['Title']))
+    story.append(Paragraph(f"<b>Terminator Terminator EOD Report</b>", styles['Title']))
     story.append(Paragraph(f"Date: {target_date.isoformat()}", styles['Normal']))
     story.append(Spacer(1, 20))
     
@@ -339,14 +339,14 @@ def send_email(target_date: date):
         email_config = json.load(f)
     
     recipients = CONFIG.get('email_recipients', ['frankwang.alert@gmail.com'])
-    subject = f"Terminator v4 EOD Report - {target_date.isoformat()}"
+    subject = f"Terminator Terminator EOD Report - {target_date.isoformat()}"
     
     msg = MIMEMultipart()
     msg['From'] = email_config['from_email']
     msg['To'] = ", ".join(recipients)
     msg['Subject'] = subject
     
-    body = f"Attached is the SPX 0DTE v4 End-of-Day report for {date.today().isoformat()}."
+    body = f"Attached is the SPX 0DTE Terminator End-of-Day report for {date.today().isoformat()}."
     msg.attach(MIMEText(body, 'plain'))
     
     # Attach PDF
@@ -369,7 +369,7 @@ def send_email(target_date: date):
 async def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    parser = argparse.ArgumentParser(description="Generate V4 EOD Report")
+    parser = argparse.ArgumentParser(description="Generate Terminator EOD Report")
     parser.add_argument("--date", type=str, help="Target date (YYYY-MM-DD)", default=date.today().isoformat())
     parser.add_argument("--session", type=str, help="Path to session state JSON", default=None)
     args = parser.parse_args()

@@ -25,10 +25,10 @@ logging.basicConfig(
         logging.FileHandler("server.log")
     ]
 )
-logger = logging.getLogger("SPT_Server")
+logger = logging.getLogger("Terminator_Server")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-app = FastAPI(title="SPT v4 Production Server")
+app = FastAPI(title="Terminator Production Server")
 
 # Disable CORS for local development/VPN access
 app.add_middleware(
@@ -54,7 +54,7 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
 @app.on_event("startup")
 async def startup_event():
     """Start the monitor and broadcast background tasks on server startup"""
-    logger.info("Initializing SPT v4 Server...")
+    logger.info("Initializing Terminator Server...")
     
     # 1. Start the monitor loop in the background
     asyncio.create_task(monitor_instance.run_live_monitor())
@@ -66,7 +66,7 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    return {"msg": "SPT v4 Production Server is Running. Accessible via /api/status or /ws"}
+    return {"msg": "Terminator Production Server is Running. Accessible via /api/status or /ws"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)

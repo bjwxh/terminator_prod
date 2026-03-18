@@ -1,4 +1,4 @@
-# SPT v4 Production Trading Server
+# Terminator Production Trading Server
 
 Production-grade deployment of the Live Options Trading system.
 
@@ -25,7 +25,7 @@ terminator_prod/
 │   └── run_eod.sh                 # Automation script
 │
 ├── deploy/                        # Infrastructure
-│   └── spt_v4.service             # systemd unit file
+│   └── terminator.service             # systemd unit file
 │
 ├── config.example.py              # Template for config.py
 └── requirements.txt
