@@ -1,0 +1,22 @@
+# Production Trading Server
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+schwab-py==1.5.1
+httpx==0.28.1
+atomicwrites==1.4.0
+pandas==2.2.3
+numpy==1.26.4
+typing_extensions==4.12.2
+tenacity==9.0.0
+python-multipart==0.0.20
+jinja2==3.1.5
+
+# Notifications
+google-auth==2.38.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.160.0
+
+# EOD Reporting (Runs on MacBook)
+matplotlib==3.10.0
+seaborn==0.13.2
+jinja2==3.1.5

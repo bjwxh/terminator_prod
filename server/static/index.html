@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SPT v4 | Production Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body class="dark-theme">
+    <header class="main-header">
+        <div class="logo-section">
+            <span class="logo-text">SPT <span class="v-tag">v4</span></span>
+        </div>
+        
+        <div class="status-center">
+            <div id="connection-status" class="status-pill offline">
+                <span class="dot"></span>
+                <span class="label">Connecting...</span>
+            </div>
+            <div id="broker-status" class="status-pill disconnected">
+                <span class="dot"></span>
+                <span class="label">Broker: Offline</span>
+            </div>
+        </div>
+
+        <div class="pnl-quickview">
+            <div class="pnl-item">
+                <span class="pnl-label">Sim PnL</span>
+                <span id="sim-pnl" class="pnl-value">$0.00</span>
+            </div>
+            <div class="pnl-item">
+                <span class="pnl-label">Live PnL</span>
+                <span id="live-pnl" class="pnl-value">$0.00</span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="toggle-trading" class="btn btn-secondary">Enable Trading</button>
+            <button id="system-action" class="btn btn-primary">Start Monitor</button>
+        </div>
+    </header>
+
+    <main class="dashboard-grid">
+        <!-- Summary Section -->
+        <section class="card portfolio-card">
+            <div class="card-header">
+                <h2>Portfolio</h2>
+                <div class="tabs">
+                    <button class="tab-btn active" data-tab="live-tab">Live</button>
+                    <button class="tab-btn" data-tab="sim-tab">Sim</button>
+                </div>
+            </div>
+            <div class="card-content">
+                <div id="live-tab" class="tab-content active">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Strike</th>
+                                <th>Side</th>
+                                <th>Qty</th>
+                                <th>Delta</th>
+                                <th>Price</th>
+                            </tr>
+                        </thead>
+                        <tbody id="live-positions-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="sim-tab" class="tab-content">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Strike</th>
+                                <th>Side</th>
+                                <th>Qty</th>
+                                <th>Delta</th>
+                                <th>Price</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sim-positions-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Strategies Accordion -->
+        <section class="card strategies-card">
+            <div class="card-header">
+                <h2>Sub-Strategies</h2>
+            </div>
+            <div id="strategies-accordion" class="card-content accordion">
+                <!-- Populated by JS -->
+            </div>
+        </section>
+
+        <!-- Orders Section -->
+        <section class="card orders-card">
+            <div class="card-header">
+                <h2>Working Orders</h2>
+            </div>
+            <div class="card-content">
+                <div id="working-orders-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Trade History -->
+        <section class="card history-card">
+            <div class="card-header">
+                <h2>Trade History</h2>
+            </div>
+            <div class="card-content">
+                <div id="trade-history-list" class="history-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="main-footer">
+        <span id="last-update">Last update: --:--:--</span>
+        <span id="server-status">Server Status: Unknown</span>
+    </footer>
+
+    <!-- Overlay for Manual Order and Error Popups if needed -->
+    <div id="overlay" class="hidden"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# Local env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Credentials (NEVER COMMIT)
+*.json
+!config.example.json  # If any
+
+# Session state
+session_state*.json
+v4_eod_history.csv
+
+# Logs
+*.log
+logs/
+server/logs/
+
+# MacOS
+.AppleDouble
+.LSOverride
+Icon

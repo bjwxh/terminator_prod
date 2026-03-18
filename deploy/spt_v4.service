@@ -1,0 +1,18 @@
+[Unit]
+Description=SPT v4 Trading Server
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fw
+WorkingDirectory=/home/fw/terminator_prod/server
+ExecStart=/home/fw/terminator_prod/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
