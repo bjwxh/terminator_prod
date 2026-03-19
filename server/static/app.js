@@ -243,7 +243,7 @@ function updateStrategies(strategies) {
                 </div>
                 <span class="strat-pnl ${pnlClass}">${formatUSD(s.pnl)}</span>
             </div>
-            <div class="metrics-grid" style="grid-template-columns: repeat(2, 1fr);">
+            <div class="metrics-grid" style="grid-template-columns: repeat(4, 1fr);">
                 <div class="metric-card">
                     <span class="label">Positions</span>
                     <span class="value">${posCount}</span>
