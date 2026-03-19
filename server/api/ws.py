@@ -19,35 +19,90 @@ async def broadcast_state(monitor):
                 await asyncio.sleep(1) # Sleep longer if no one listening
                 continue
             
-            # Prepare state snapshot
-            # This follows the format in §5.2.2 of PRODUCTION_PLAN.md
+            # Prepare detailed state snapshot
+            sim_p = monitor.combined_portfolio
+            live_p = monitor.live_combined_portfolio
+            
             state = {
                 "ts": datetime.now().isoformat(),
                 "status": monitor.status,
                 "broker_connected": monitor.broker_connected,
                 "trading_enabled": monitor.trading_enabled,
-                "live_pnl": 0.0, # (compute live PNL) 
-                "sim_pnl": 0.0, # (compute sim PNL)
                 "heartbeat_failures": monitor.heartbeat_failures,
-                # Add more fields from monitor as needed for the UI
+                "working_orders": monitor.working_orders,
+                "stats": {
+                    "total_trades": monitor.stats.total_trades,
+                    "winners": monitor.stats.winners,
+                    "losers": monitor.stats.losers,
+                    "win_rate": monitor.stats.win_rate,
+                    "total_pnl": round(monitor.stats.total_pnl, 2),
+                    "max_drawdown": round(monitor.stats.max_drawdown, 2),
+                    "avg_duration": round(monitor.stats.avg_duration_minutes, 1)
+                },
+                "sim": {
+                    "pnl": round(sim_p.current_pnl, 2),
+                    "fees": round(sum(t.commission for t in sim_p.trades), 2),
+                    "net_pnl": round(sim_p.current_pnl - sum(t.commission for t in sim_p.trades), 2),
+                    "trades": len(sim_p.trades),
+                    "recent_trades": [
+                        {
+                            "ts": t.timestamp.isoformat(),
+                            "purpose": t.purpose.value,
+                            "credit": round(t.credit, 2),
+                            "strategy": t.strategy_id,
+                            "legs": [{"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side} for l in t.legs]
+                        } for t in sim_p.trades[-10:]
+                    ],
+                    "delta": round(sim_p.total_delta, 4),
+                    "theta": round(sim_p.total_theta, 2),
+                    "positions": [
+                        {"symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, "pnl": round(p.current_day_pnl, 2)}
+                        for p in sim_p.positions
+                    ]
+                },
+                "live": {
+                    "pnl": round(live_p.current_pnl, 2),
+                    "fees": round(sum(t.commission for t in live_p.trades), 2),
+                    "net_pnl": round(live_p.current_pnl - sum(t.commission for t in live_p.trades), 2),
+                    "trades": len(live_p.trades),
+                    "recent_trades": [
+                        {
+                            "ts": t.timestamp.isoformat(),
+                            "purpose": t.purpose.value,
+                            "credit": round(t.credit, 2),
+                            "strategy": t.strategy_id,
+                            "legs": [{"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side} for l in t.legs]
+                        } for t in live_p.trades[-10:]
+                    ],
+                    "delta": round(live_p.total_delta, 4),
+                    "theta": round(live_p.total_theta, 2),
+                    "positions": [
+                        {"symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, "pnl": round(p.current_day_pnl, 2)}
+                        for p in live_p.positions
+                    ]
+                },
+                "strategies": {},
+                "logs": list(monitor.logs)
             }
             
-            # Simple PnL computation for now
-            # (Need to reach into monitor.combined_portfolio/live_combined_portfolio)
-            try:
-                # Combined Sim PnL
-                sim_gross = monitor.combined_portfolio.cash
-                for p in monitor.combined_portfolio.positions:
-                    sim_gross += p.price * p.quantity * 100
-                state["sim_pnl"] = round(sim_gross, 2)
-                
-                # Live PnL
-                live_gross = monitor.live_combined_portfolio.cash
-                for p in monitor.live_combined_portfolio.positions:
-                    live_gross += p.price * p.quantity * 100
-                state["live_pnl"] = round(live_gross, 2)
-            except Exception as e:
-                logger.error(f"Error computing PnL for WS: {e}")
+            # Add sub-strategy level data
+            for sid, s in monitor.sub_strategies.items():
+                state["strategies"][sid] = {
+                    "pnl": round(s.portfolio.current_pnl, 2),
+                    "traded": s.has_traded_today,
+                    "positions": [
+                        {"symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, "pnl": round(p.current_day_pnl, 2)}
+                        for p in s.portfolio.positions
+                    ],
+                    "history": [
+                        {
+                            "ts": t.timestamp.isoformat(),
+                            "purpose": t.purpose.value,
+                            "credit": round(t.credit, 2),
+                            "legs": [{"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side} for l in t.legs]
+                        } for t in s.portfolio.trades[-5:]
+                    ]
+                }
 
             message = json.dumps(state)
             

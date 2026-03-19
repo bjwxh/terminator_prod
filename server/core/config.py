@@ -4,7 +4,7 @@ import os
 from datetime import time
 
 CONFIG = {
-    # === Strategy Parameters (from backtester_v4.py) ===
+    # === Strategy Parameters ===
     'init_wing_delta': 0.16,           # How far OTM the long legs are
     'initial_sum_delta': 0.35,         # Target delta for short legs (both sides combined)
     'rebalance_threshold': 0.075,      # Rebalance when short delta drifts this much
@@ -45,5 +45,5 @@ CONFIG = {
     # === Schwab API ===
     'account_id': '22229895', # SLI account
     'credentials_file': os.path.expanduser('~/.api_keys/sli_api.json'),
-    'token_file': 'sli_token.json', # Usually local to app for auto-refresh
+    'token_file': os.path.expanduser('~/.api_keys/sli_token.json'), # Absolute path for VM
 }

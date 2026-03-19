@@ -3,134 +3,249 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Terminator | Production Dashboard</title>
+    <title>Terminator Production Dashboard</title>
     <link rel="stylesheet" href="style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
 </head>
 <body class="dark-theme">
-    <header class="main-header">
-        <div class="logo-section">
-            <span class="logo-text">Terminator <span class="v-tag">v4</span></span>
+    <div id="status-bar">
+        <div class="status-item">
+            <span class="label">System:</span>
+            <span id="system-status" class="value status-connecting">Connecting...</span>
         </div>
-        
-        <div class="status-center">
-            <div id="connection-status" class="status-pill offline">
-                <span class="dot"></span>
-                <span class="label">Connecting...</span>
-            </div>
-            <div id="broker-status" class="status-pill disconnected">
-                <span class="dot"></span>
-                <span class="label">Broker: Offline</span>
+        <div class="status-item">
+            <span class="label">Broker:</span>
+            <span id="broker-status" class="value status-disconnected">OFFLINE</span>
+        </div>
+        <div class="status-item">
+            <span class="label">Trading:</span>
+            <span id="trading-status" class="value status-disabled">DISABLED</span>
+        </div>
+        <div class="actions">
+            <button id="toggle-trading-btn" class="btn btn-secondary">Enable trading</button>
+            <button id="reconnect-broker-btn" class="btn btn-secondary">Reconnect Broker</button>
+        </div>
+    </div>
+
+    <nav class="tab-nav">
+        <button class="tab-link active" onclick="openTab(event, 'Dashboard')">Dashboard</button>
+        <button class="tab-link" onclick="openTab(event, 'Strategies')">Sub-Strategies</button>
+        <button class="tab-link" onclick="openTab(event, 'Stats')">Session Stats</button>
+        <button class="tab-link" onclick="openTab(event, 'Logs')">System Logs</button>
+    </nav>
+
+    <main class="container">
+        <!-- Dashboard Tab -->
+        <div id="Dashboard" class="tab-content active">
+            <section class="summary-section">
+                <!-- Live Summary Row -->
+                <div class="summary-row live-row">
+                    <div class="row-label">LIVE PORTFOLIO</div>
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <span class="label">Net PnL</span>
+                            <span id="live-net-pnl" class="value green">$0.00</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Gross PnL</span>
+                            <span id="live-gross-pnl" class="value">$0.00</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Fees</span>
+                            <span id="live-fees" class="value">$0.00</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Trades</span>
+                            <span id="live-trades-count" class="value">0</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Delta</span>
+                            <span id="live-total-delta" class="value">0.000</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Theta</span>
+                            <span id="live-total-theta" class="value">0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sim Summary Row -->
+                <div class="summary-row sim-row">
+                    <div class="row-label">SIM (IDEAL)</div>
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <span class="label">Net PnL</span>
+                            <span id="sim-net-pnl" class="value green">$0.00</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Gross PnL</span>
+                            <span id="sim-gross-pnl" class="value">$0.00</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Fees</span>
+                            <span id="sim-fees" class="value">$0.00</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Trades</span>
+                            <span id="sim-trades-count" class="value">0</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Delta</span>
+                            <span id="sim-total-delta" class="value">0.000</span>
+                        </div>
+                        <div class="metric-card">
+                            <span class="label">Theta</span>
+                            <span id="sim-total-theta" class="value">0.00</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="data-section">
+                <div class="data-group">
+                    <h3>Aggregated Positions</h3>
+                    <div class="table-container">
+                        <table id="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>Account</th>
+                                    <th>Side</th>
+                                    <th>Strike</th>
+                                    <th>Qty</th>
+                                    <th>PnL (Day)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-tbody">
+                                <!-- Data injected via JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Working Orders -->
+                <div class="data-group">
+                    <h3>Working Orders (Broker)</h3>
+                    <div class="table-container">
+                        <table id="orders-table">
+                            <thead>
+                                <tr>
+                                    <th>Order ID</th>
+                                    <th>Symbol</th>
+                                    <th>Side</th>
+                                    <th>Qty</th>
+                                    <th>Price</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="orders-tbody">
+                                <!-- Data injected via JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Recent Trades -->
+                <div class="data-group">
+                    <div class="split-header">
+                        <h3>Recent Trades</h3>
+                        <div class="trade-legend">
+                            <span class="legend-item live">LIVE</span>
+                            <span class="legend-item sim">SIM</span>
+                        </div>
+                    </div>
+                    <div class="trades-grid">
+                        <div class="table-container">
+                            <div class="table-label live">Live Trades</div>
+                            <table id="live-trades-table">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Symbol</th>
+                                        <th>Qty</th>
+                                        <th>Price</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="live-trades-tbody">
+                                    <!-- Data injected via JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="table-container">
+                            <div class="table-label sim">Sim Trades</div>
+                            <table id="sim-trades-table">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Symbol</th>
+                                        <th>Qty</th>
+                                        <th>Price</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sim-trades-tbody">
+                                    <!-- Data injected via JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Sub-Strategies Tab -->
+        <div id="Strategies" class="tab-content">
+            <h3>Active Sub-Strategies</h3>
+            <div id="strategy-grid" class="strategy-grid">
+                <!-- Cards injected via JS -->
             </div>
         </div>
 
-        <div class="pnl-quickview">
-            <div class="pnl-item">
-                <span class="pnl-label">Sim PnL</span>
-                <span id="sim-pnl" class="pnl-value">$0.00</span>
-            </div>
-            <div class="pnl-item">
-                <span class="pnl-label">Live PnL</span>
-                <span id="live-pnl" class="pnl-value">$0.00</span>
+        <!-- Session Stats Tab -->
+        <div id="Stats" class="tab-content">
+            <h3>Session Performance Statistics</h3>
+            <div class="stats-grid">
+                <div class="metric-card">
+                    <span class="label">Total Finished</span>
+                    <span id="stats-total" class="value">0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Winning Strat</span>
+                    <span id="stats-winners" class="value green">0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Losing Strat</span>
+                    <span id="stats-losers" class="value red">0</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Win Rate</span>
+                    <span id="stats-winrate" class="value">0%</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Session PnL (Sim)</span>
+                    <span id="stats-pnl" class="value">$0.00</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Max Drawdown</span>
+                    <span id="stats-drawdown" class="value red">$0.00</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Avg Duration</span>
+                    <span id="stats-duration" class="value">0 mins</span>
+                </div>
             </div>
         </div>
 
-        <div class="controls">
-            <button id="toggle-trading" class="btn btn-secondary">Enable Trading</button>
-            <button id="system-action" class="btn btn-primary">Start Monitor</button>
+        <!-- Logs Tab -->
+        <div id="Logs" class="tab-content">
+            <div class="log-header">
+                <h3>System Logs</h3>
+                <button onclick="clearLogs()" class="btn btn-small">Clear View</button>
+            </div>
+            <div id="log-console" class="log-console">
+                <!-- Logs injected via JS -->
+            </div>
         </div>
-    </header>
-
-    <main class="dashboard-grid">
-        <!-- Summary Section -->
-        <section class="card portfolio-card">
-            <div class="card-header">
-                <h2>Portfolio</h2>
-                <div class="tabs">
-                    <button class="tab-btn active" data-tab="live-tab">Live</button>
-                    <button class="tab-btn" data-tab="sim-tab">Sim</button>
-                </div>
-            </div>
-            <div class="card-content">
-                <div id="live-tab" class="tab-content active">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Strike</th>
-                                <th>Side</th>
-                                <th>Qty</th>
-                                <th>Delta</th>
-                                <th>Price</th>
-                            </tr>
-                        </thead>
-                        <tbody id="live-positions-body">
-                            <!-- Populated by JS -->
-                        </tbody>
-                    </table>
-                </div>
-                <div id="sim-tab" class="tab-content">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Strike</th>
-                                <th>Side</th>
-                                <th>Qty</th>
-                                <th>Delta</th>
-                                <th>Price</th>
-                            </tr>
-                        </thead>
-                        <tbody id="sim-positions-body">
-                            <!-- Populated by JS -->
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </section>
-
-        <!-- Strategies Accordion -->
-        <section class="card strategies-card">
-            <div class="card-header">
-                <h2>Sub-Strategies</h2>
-            </div>
-            <div id="strategies-accordion" class="card-content accordion">
-                <!-- Populated by JS -->
-            </div>
-        </section>
-
-        <!-- Orders Section -->
-        <section class="card orders-card">
-            <div class="card-header">
-                <h2>Working Orders</h2>
-            </div>
-            <div class="card-content">
-                <div id="working-orders-list">
-                    <!-- Populated by JS -->
-                </div>
-            </div>
-        </section>
-
-        <!-- Trade History -->
-        <section class="card history-card">
-            <div class="card-header">
-                <h2>Trade History</h2>
-            </div>
-            <div class="card-content">
-                <div id="trade-history-list" class="history-list">
-                    <!-- Populated by JS -->
-                </div>
-            </div>
-        </section>
     </main>
-
-    <footer class="main-footer">
-        <span id="last-update">Last update: --:--:--</span>
-        <span id="server-status">Server Status: Unknown</span>
-    </footer>
-
-    <!-- Overlay for Manual Order and Error Popups if needed -->
-    <div id="overlay" class="hidden"></div>
 
     <script src="app.js"></script>
 </body>

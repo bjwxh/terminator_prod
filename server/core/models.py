@@ -67,6 +67,23 @@ class Portfolio:
         
         self._position_dict: Dict[Tuple[str, int, str], OptionLeg] = {}
 
+    @property
+    def total_delta(self) -> float:
+        return sum(p.delta * p.quantity for p in self.positions)
+
+    @property
+    def total_theta(self) -> float:
+        return sum(p.theta * p.quantity for p in self.positions)
+
+    @property
+    def current_pnl(self) -> float:
+        """Returns the current unrealized + realized PnL of this portfolio."""
+        pnl = self.cash
+        for p in self.positions:
+            # PnL = (Current Price * Quantity * 100)
+            pnl += p.price * p.quantity * 100
+        return pnl
+
     def calculate_standard_margin(self) -> float:
         """
         Calculate the standard Schwab Reg-T margin requirement for the portfolio.

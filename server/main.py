@@ -69,4 +69,4 @@ async def root():
     return {"msg": "Terminator Production Server is Running. Accessible via /api/status or /ws"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=80)

@@ -54,6 +54,21 @@ class LiveTradingMonitor:
         self.trade_signal_callback = trade_signal_callback
         self.logger = logging.getLogger("LiveTradingMonitor")
         
+        # --- Real-time Logs for Web UI ---
+        from collections import deque
+        self.logs = deque(maxlen=200) # Keep last 200 logs
+        class WSLogHandler(logging.Handler):
+            def __init__(self, buffer):
+                super().__init__()
+                self.buffer = buffer
+            def emit(self, record):
+                msg = self.format(record)
+                self.buffer.append(msg)
+        
+        log_handler = WSLogHandler(self.logs)
+        log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
+        self.logger.addHandler(log_handler)
+
         # Initialize sub-strategies
         self.sub_strategies: Dict[str, SubStrategy] = {}
         self._initialize_sub_strategies()
@@ -216,9 +231,16 @@ class LiveTradingMonitor:
                     except Exception as e:
                         self.logger.warning(f"Could not parse session timestamp: {e}")
             
-            if now > catch_up_start:
+            # 1. Catch-up via simulation (Sim Mode)
+            db_path = self.config.get('db_path')
+            if now > catch_up_start and db_path and os.path.exists(db_path) and db_path != '/dev/null':
                 self.status = "Catching up..."
-                await self._run_historical_simulation(catch_up_start, now)
+                try:
+                    await self._run_historical_simulation(catch_up_start, now)
+                except Exception as e:
+                    self.logger.error(f"Catch-up simulation failed: {e}")
+            else:
+                self.logger.info("Skipping historical catch-up (Live mode or no Database).")
             
             self.status = "Running"
 

@@ -32,10 +32,10 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.lib.styles import getSampleStyleSheet
 
-HIST_CSV_PATH = os.path.join(dir_path, "v4_eod_history.csv")
-CHART_PATH = "/tmp/v4_equity_curve.png"
-INTRADAY_CHART_PATH = "/tmp/v4_intraday_analysis.png"
-PDF_PATH = "/tmp/v4_eod_report.pdf"
+HIST_CSV_PATH = os.path.join(dir_path, "terminator_eod_history.csv")
+CHART_PATH = "/tmp/terminator_equity_curve.png"
+INTRADAY_CHART_PATH = "/tmp/terminator_intraday_analysis.png"
+PDF_PATH = "/tmp/terminator_eod_report.pdf"
 
 async def run_simulation(target_date: date, live_trades=None):
     """Run the Terminator logic against target_date's DB data"""
@@ -169,7 +169,7 @@ def generate_equity_curve(df):
     plt.plot(x_indices, df['sim_cum_pnl'], label='Sim (v4)', color='blue', marker='o', markersize=4)
     plt.plot(x_indices, df['real_cum_pnl'], label='Real (v4)', color='green', marker='s', markersize=4)
     
-    plt.title('SPX 0DTE v4: Cumulative Net PnL (Sim vs Real)')
+    plt.title('SPX 0DTE Terminator: Cumulative Net PnL (Sim vs Real)')
     plt.xlabel('Date')
     plt.ylabel('Cumulative PnL ($)')
     plt.legend()
@@ -354,7 +354,7 @@ def send_email(target_date: date):
         part = MIMEBase('application', 'octet-stream')
         part.set_payload(attachment.read())
         encoders.encode_base64(part)
-        part.add_header('Content-Disposition', f"attachment; filename= v4_eod_report_{target_date.isoformat()}.pdf")
+        part.add_header('Content-Disposition', f"attachment; filename= terminator_eod_report_{target_date.isoformat()}.pdf")
         msg.attach(part)
         
     try:
