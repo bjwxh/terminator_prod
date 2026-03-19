@@ -96,7 +96,10 @@ function updateUI(state) {
     // 8. Session Stats
     updateStats(state.stats);
 
-    // 9. Logs
+    // 9. Config Table
+    updateConfigTable(state.config);
+
+    // 10. Logs
     updateLogs(state.logs);
 }
 
@@ -123,15 +126,15 @@ function updatePositionTable(livePos, simPos) {
 
     Object.values(merged).forEach(p => {
         const row = document.createElement('tr');
-        const badgeClass = p.account === 'LIVE' ? 'badge-live' : (p.account === 'SIM' ? 'badge-sim' : '');
-        const qtyDisplay = p.account === 'BOTH' ? `${p.qty} (Live) / ${p.qty_sim} (Sim)` : p.qty;
+        const simQty = p.account === 'SIM' || p.account === 'BOTH' ? (p.qty_sim || p.qty) : '-';
+        const liveQty = p.account === 'LIVE' || p.account === 'BOTH' ? (p.qty) : '-';
         
         row.innerHTML = `
             <td>${p.symbol}</td>
-            <td><span class="badge ${badgeClass}">${p.account}</span></td>
             <td class="${p.side === 'CALL' ? 'primary' : 'orange'}">${p.side}</td>
             <td>${p.strike}</td>
-            <td>${qtyDisplay}</td>
+            <td class="${simQty === '-' ? '' : 'primary'}">${simQty}</td>
+            <td class="${liveQty === '-' ? '' : 'green'}">${liveQty}</td>
             <td class="${p.pnl >= 0 ? 'green' : 'red'}">${formatUSD(p.pnl)}</td>
         `;
         tbody.appendChild(row);
@@ -192,6 +195,27 @@ function updateStats(stats) {
     document.getElementById('stats-pnl').className = 'value ' + (stats.total_pnl >= 0 ? 'green' : 'red');
     document.getElementById('stats-drawdown').textContent = formatUSD(stats.max_drawdown);
     document.getElementById('stats-duration').textContent = stats.avg_duration.toFixed(1) + ' mins';
+}
+
+let configRendered = false;
+function updateConfigTable(config) {
+    if (!config || configRendered) return;
+    const tbody = document.getElementById('config-tbody');
+    tbody.innerHTML = '';
+    
+    const sortedKeys = Object.keys(config).sort();
+    sortedKeys.forEach(key => {
+        const row = document.createElement('tr');
+        let val = config[key];
+        if (typeof val === 'object') val = JSON.stringify(val);
+        
+        row.innerHTML = `
+            <td><code>${key}</code></td>
+            <td style="word-break: break-all;">${val}</td>
+        `;
+        tbody.appendChild(row);
+    });
+    configRendered = true; // Only render once or on significant change if you wish
 }
 
 function updateStrategies(strategies) {

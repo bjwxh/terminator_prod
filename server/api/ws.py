@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from datetime import datetime
 from typing import List, Set
+from core.config import CONFIG
 
 router = APIRouter()
 logger = logging.getLogger("API_WS")
@@ -82,7 +83,8 @@ async def broadcast_state(monitor):
                     ]
                 },
                 "strategies": {},
-                "logs": list(monitor.logs)
+                "logs": list(monitor.logs),
+                "config": CONFIG
             }
             
             # Add sub-strategy level data

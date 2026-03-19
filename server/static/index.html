@@ -109,10 +109,10 @@
                             <thead>
                                 <tr>
                                     <th>Symbol</th>
-                                    <th>Account</th>
                                     <th>Side</th>
                                     <th>Strike</th>
-                                    <th>Qty</th>
+                                    <th>Sim Qty</th>
+                                    <th>Live Qty</th>
                                     <th>PnL (Day)</th>
                                 </tr>
                             </thead>
@@ -231,6 +231,24 @@
                 <div class="metric-card">
                     <span class="label">Avg Duration</span>
                     <span id="stats-duration" class="value">0 mins</span>
+                </div>
+            </div>
+
+            <!-- Configuration Window -->
+            <div class="data-group" style="margin-top: 2rem;">
+                <h3>Active Configuration</h3>
+                <div class="table-container">
+                    <table id="config-table">
+                        <thead>
+                            <tr>
+                                <th>Setting</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody id="config-tbody">
+                            <!-- Data injected via JS -->
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
