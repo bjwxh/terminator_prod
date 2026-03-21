@@ -6,6 +6,8 @@
     <title>Terminator Production Dashboard</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body class="dark-theme">
     <div id="status-bar">
@@ -38,64 +40,111 @@
         <!-- Dashboard Tab -->
         <div id="Dashboard" class="tab-content active">
             <section class="summary-section">
-                <!-- Live Summary Row -->
-                <div class="summary-row live-row">
-                    <div class="row-label">LIVE PORTFOLIO</div>
-                    <div class="metrics-grid">
-                        <div class="metric-card">
-                            <span class="label">Net PnL</span>
-                            <span id="live-net-pnl" class="value green">$0.00</span>
+                <!-- Side-by-Side Sim/Live View -->
+                <div class="dashboard-summary-container">
+                    <!-- Sim Summary (Left) -->
+                    <div id="sim-portfolio-card" class="summary-row sim-row foldable-card collapsed">
+                        <div class="summary-header" onclick="togglePortfolioFold('sim')">
+                            <div class="header-left">
+                                <span class="fold-icon">▼</span>
+                                <span class="row-label">SIM (MIDPRICE)</span>
+                            </div>
+                            <div class="header-right header-summary">
+                                <span id="sim-net-pnl-summary" class="value green">$0.00</span>
+                            </div>
                         </div>
-                        <div class="metric-card">
-                            <span class="label">Gross PnL</span>
-                            <span id="live-gross-pnl" class="value">$0.00</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Fees</span>
-                            <span id="live-fees" class="value">$0.00</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Trades</span>
-                            <span id="live-trades-count" class="value">0</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Delta</span>
-                            <span id="live-total-delta" class="value">0.000</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Theta</span>
-                            <span id="live-total-theta" class="value">0.00</span>
+                        <div id="sim-portfolio-body" class="summary-body">
+                            <div class="metrics-grid dynamic-grid">
+                                <div class="metric-card">
+                                    <span class="label">Total Margin</span>
+                                    <span id="sim-margin" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">No. Trades</span>
+                                    <span id="sim-trades-count" class="value">0</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Pnl</span>
+                                    <span id="sim-net-pnl" class="value green">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Delta</span>
+                                    <span id="sim-total-delta" class="value">0.000</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Fees</span>
+                                    <span id="sim-fees" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Gross PnL</span>
+                                    <span id="sim-gross-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Realized PnL</span>
+                                    <span id="sim-realized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Unrealized PnL</span>
+                                    <span id="sim-unrealized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Theta</span>
+                                    <span id="sim-total-theta" class="value">0.00</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                </div>
 
-                <!-- Sim Summary Row -->
-                <div class="summary-row sim-row">
-                    <div class="row-label">SIM (IDEAL)</div>
-                    <div class="metrics-grid">
-                        <div class="metric-card">
-                            <span class="label">Net PnL</span>
-                            <span id="sim-net-pnl" class="value green">$0.00</span>
+                    <!-- Live Summary (Right) -->
+                    <div id="live-portfolio-card" class="summary-row live-row foldable-card collapsed">
+                        <div class="summary-header" onclick="togglePortfolioFold('live')">
+                            <div class="header-left">
+                                <span class="fold-icon">▼</span>
+                                <span class="row-label">LIVE PORTFOLIO</span>
+                            </div>
+                            <div class="header-right header-summary">
+                                <span id="live-net-pnl-summary" class="value green">$0.00</span>
+                            </div>
                         </div>
-                        <div class="metric-card">
-                            <span class="label">Gross PnL</span>
-                            <span id="sim-gross-pnl" class="value">$0.00</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Fees</span>
-                            <span id="sim-fees" class="value">$0.00</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Trades</span>
-                            <span id="sim-trades-count" class="value">0</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Delta</span>
-                            <span id="sim-total-delta" class="value">0.000</span>
-                        </div>
-                        <div class="metric-card">
-                            <span class="label">Theta</span>
-                            <span id="sim-total-theta" class="value">0.00</span>
+                        <div id="live-portfolio-body" class="summary-body">
+                            <div class="metrics-grid dynamic-grid">
+                                <div class="metric-card">
+                                    <span class="label">Total Margin</span>
+                                    <span id="live-margin" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">No. Trades</span>
+                                    <span id="live-trades-count" class="value">0</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net PnL</span>
+                                    <span id="live-net-pnl" class="value green">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Delta</span>
+                                    <span id="live-total-delta" class="value">0.000</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Fees</span>
+                                    <span id="live-fees" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Gross PnL</span>
+                                    <span id="live-gross-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Realized PnL</span>
+                                    <span id="live-realized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Unrealized PnL</span>
+                                    <span id="live-unrealized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Theta</span>
+                                    <span id="live-total-theta" class="value">0.00</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -108,12 +157,14 @@
                         <table id="positions-table">
                             <thead>
                                 <tr>
-                                    <th>Symbol</th>
-                                    <th>Side</th>
                                     <th>Strike</th>
+                                    <th>Side</th>
                                     <th>Sim Qty</th>
                                     <th>Live Qty</th>
-                                    <th>PnL (Day)</th>
+                                    <th>Diff</th>
+                                    <th>Delta</th>
+                                    <th>Bid</th>
+                                    <th>Ask</th>
                                 </tr>
                             </thead>
                             <tbody id="positions-tbody">
@@ -234,6 +285,21 @@
                 </div>
             </div>
 
+            <div class="charts-container">
+                <div class="chart-box">
+                    <h3>SPX Price (Underlying)</h3>
+                    <div class="canvas-wrapper">
+                        <canvas id="spx-chart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-box">
+                    <h3>Net PnLs (Live vs Sim)</h3>
+                    <div class="canvas-wrapper">
+                        <canvas id="pnl-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
             <!-- Configuration Window -->
             <div class="data-group" style="margin-top: 2rem;">
                 <h3>Active Configuration</h3>
@@ -266,5 +332,34 @@
     </main>
 
     <script src="app.js"></script>
+    <div id="trade-modal" class="modal-backdrop">
+        <div class="modal-content">
+            <div id="modal-timer-bar" class="timer-progress"></div>
+            <div class="modal-header">
+                <h3>⚠️ Confirm Live Trade</h3>
+                <span id="modal-timer-stat" class="timer-stat">Auto-sending in 10s</span>
+            </div>
+            <div class="modal-body">
+                <div class="trade-info-header">
+                    <div id="modal-strat-title" class="trade-main-title">Strategy Execution: SPX-DEMO</div>
+                    <div class="trade-sub-desc">Multi-order Confirmation Requested</div>
+                </div>
+                
+                <div id="modal-order-list" class="order-list-container">
+                    <!-- Orders will be injected here as .trade-details-box -->
+                </div>
+
+                <div id="modal-total-section" class="total-summary-box">
+                    <span class="label">Total Est. Credit</span>
+                    <span id="modal-total-credit" class="value highlight">$0.00</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="dismissTrade()">Dismiss Trade</button>
+                <button id="modal-pause-btn" class="btn btn-secondary" onclick="toggleTradeTimer()">Pause Timer</button>
+                <button id="modal-confirm-btn" class="btn btn-primary" onclick="confirmLiveTrade()">🚀 Send Order Now</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

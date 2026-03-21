@@ -103,6 +103,11 @@ class LiveTradingMonitor:
         self.broker_connected = False
         self.heartbeat_failures = 0
         self.heartbeat_running = False
+        
+        # Trade Confirmation State (Interactive Modal Support)
+        self.pending_trade: Optional[Trade] = None
+        self._pending_trade_confirmed = False
+        self.confirmation_event = asyncio.Event()
 
         # Session persistence
         self.startup_time = datetime.now()
@@ -115,8 +120,10 @@ class LiveTradingMonitor:
         self._recon_task = None
         self.status = "Stopped" 
         self._option_cache = OrderedDict() # Issue 11: LRU-style cache
-        self.order_queue = queue.Queue()
+        self.order_queue = asyncio.Queue()
         self.stats = TradeStats() # Enhancement 2: Trading Statistics
+        self._last_snap: Optional[pd.DataFrame] = None # Cache for Greeks
+        self._greek_cache: Dict[Tuple[str, int, str], Tuple[float, float]] = {} # (symbol, strike, side) -> (delta, theta)
         
         # Resolve DB path relative to project root if it's relative
         db_path = self.config.get('db_path', 'data/spx_0dte.db')
@@ -124,7 +131,26 @@ class LiveTradingMonitor:
             root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
             db_path = os.path.join(root, db_path)
         self.config['db_path'] = db_path
+        self._peak_equity = 0.0 # Initializing peak equity for stats
+        self.session_history: List[Dict] = [] # Time-series for charts: {ts, spx, sim_pnl, live_pnl}
+        self._last_spx_price: Optional[float] = None # Latest SPX estimate
         self.logger.info(f"Monitor initialized with DB: {db_path}")
+
+    def _broadcast_alert(self, level: str, title: str, message: str):
+        """Helper to broadcast alerts via WebSocket for UI sound and notifications."""
+        try:
+            from api.ws import manager
+            if hasattr(self, '_loop') and self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast({
+                        "type": "alert",
+                        "level": level,
+                        "title": title,
+                        "message": message
+                    }), self._loop
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to broadcast alert: {e}")
 
     def _initialize_sub_strategies(self):
         start_dt = datetime.strptime(self.config['portfolio_start_time'], '%H:%M:%S')
@@ -146,7 +172,8 @@ class LiveTradingMonitor:
             curr += interval
 
     async def run_live_monitor(self):
-        """Main loop for live monitoring using TaskGroup (Python 3.11+)"""
+        """Main lifecycle entry point for the background monitor."""
+        self._loop = asyncio.get_running_loop()
         self.is_running = True
         self.logger.info("Starting live monitor thread...")
         self.status = "Initializing..."
@@ -168,6 +195,9 @@ class LiveTradingMonitor:
 
                 # 4. High-Frequency Broker Sync (5s cadence)
                 tg.create_task(self._broker_sync_loop())
+
+                # 5. Order Execution Loop (Option A - Auto-execute)
+                tg.create_task(self.run_order_execution_loop())
                 
         except Exception as e:
             if not isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):
@@ -212,6 +242,92 @@ class LiveTradingMonitor:
                 self.logger.error(f"Error in reconciliation loop: {e}")
                 await asyncio.sleep(1)
 
+    async def run_order_execution_loop(self):
+        """Drains the order_queue and executes trades with interactive confirmation."""
+        self.logger.info("Order Execution Loop started.")
+        while self.is_running:
+            try:
+                # Use a timeout to occasionally check if self.is_running changed
+                try:
+                    trade = await asyncio.wait_for(self.order_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
+                # Interactive Confirmation Loop
+                self.pending_trade = trade
+                self._pending_trade_confirmed = False
+                self.confirmation_event.clear()
+                
+                self.logger.info(f"Awaiting confirmation for trade: {trade.strategy_id} ({trade.purpose})")
+                
+                # Build REFINED payload for showTradeModal in app.js
+                plan = self.create_execution_plan(trade)
+                orders_data = []
+                
+                # 1. New Orders being submitted
+                for i, chunk in enumerate(plan['to_submit']):
+                    rolled = self._roll_legs(chunk)
+                    chunk_credit = sum(-l.quantity * l.price for l in rolled) * 100
+                    leg_qtys = [abs(l.quantity) for l in rolled]
+                    num_units = leg_qtys[0]
+                    for q in leg_qtys[1:]: num_units = math.gcd(num_units, q)
+                    
+                    leg_texts = []
+                    for l in rolled:
+                        side = "SHORT" if l.quantity < 0 else "LONG"
+                        leg_texts.append(f"{side} {l.side} {int(l.strike)} x{abs(l.quantity)//num_units}")
+                    
+                    orders_data.append({
+                        "type": "TRADE",
+                        "qty": num_units,
+                        "desc": " | ".join(leg_texts),
+                        "credit": f"${abs(chunk_credit/100.0/num_units):.2f} {'Cr' if chunk_credit >= 0 else 'Db'} (ea)"
+                    })
+                
+                # 2. Orders being cancelled
+                for wo in plan['to_cancel']:
+                    orders_data.append({
+                        "type": "CANCEL",
+                        "qty": wo.get('quantity'),
+                        "desc": f"Order ID: {wo.get('orderId')}",
+                        "credit": "N/A"
+                    })
+
+                # Notify UI to show modal
+                from api.ws import manager
+                if manager.active_connections:
+                    asyncio.create_task(manager.broadcast({
+                        "type": "trade_signal",
+                        "strat_id": trade.strategy_id,
+                        "purpose": trade.purpose.value,
+                        "total_credit": f"${abs(trade.credit/100.0):.2f} {'Credit' if trade.credit >= 0 else 'Debit'}",
+                        "orders": orders_data
+                    }))
+                
+                # Wait for UI confirmation (or auto-send from UI countdown)
+                await self.confirmation_event.wait()
+                
+                if self._pending_trade_confirmed:
+                    self.logger.info(f"Confirmed! Executing trade for {trade.strategy_id}...")
+                    await self.execute_net_trade(trade)
+                    # Broadcast success alert
+                    self._broadcast_alert("success", "Trade Confirmed", f"Sent {len(trade.legs)} legs for {trade.strategy_id}.")
+                else:
+                    self.logger.info(f"Trade for {trade.strategy_id} was dismissed correctly.")
+                    # POKE reconciliation again to re-evaluate the GAP
+                    self.reconciliation_event.set()
+                    self._broadcast_alert("info", "Trade Dismissed", f"Trade for {trade.strategy_id} was cancelled by user.")
+                
+                # Cleanup
+                self.pending_trade = None
+                self.order_queue.task_done()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error in order_execution_loop: {e}\n{traceback.format_exc()}")
+                await asyncio.sleep(1)
+
     async def _monitoring_loop(self):
         """Isolated monitoring logic extracted for TaskGroup context"""
         try:
@@ -236,7 +352,10 @@ class LiveTradingMonitor:
             if now > catch_up_start and db_path and os.path.exists(db_path) and db_path != '/dev/null':
                 self.status = "Catching up..."
                 try:
-                    await self._run_historical_simulation(catch_up_start, now)
+                    history = await self._run_historical_simulation(catch_up_start, now, collect_history=True)
+                    with self._data_lock:
+                        # Ensure we only keep history from 8:30 AM onwards for today
+                        self.session_history = history if history else []
                 except Exception as e:
                     self.logger.error(f"Catch-up simulation failed: {e}")
             else:
@@ -259,6 +378,17 @@ class LiveTradingMonitor:
                 # Runs at 30s cadence (from config check_interval_minutes)
                 await self._monitor_step()
                 self._update_stats() # Enhancement 2: Update session stats
+                
+                # Record history point for charts (30s cadence)
+                with self._data_lock:
+                    # Estimate SPX if not already done in monitor_step
+                    spx = self._last_spx_price if hasattr(self, '_last_spx_price') else None
+                    self.session_history.append({
+                        'ts': datetime.now().isoformat(),
+                        'spx': spx,
+                        'sim_pnl': round(self.combined_portfolio.net_pnl, 2),
+                        'live_pnl': round(self.live_combined_portfolio.net_pnl, 2)
+                    })
                 
                 try:
                     interval = self.config['check_interval_minutes'] * 60
@@ -295,7 +425,7 @@ class LiveTradingMonitor:
                 if broker_trades is not None:
                     self.live_combined_portfolio.trades = broker_trades
                     # Recalculate live cash from trades to show PnL correctly
-                    self.live_combined_portfolio.cash = sum(t.credit - t.commission for t in broker_trades)
+                    self.live_combined_portfolio.cash = sum(t.credit for t in broker_trades)
 
                 if working_orders is not None:
                     self.working_orders = working_orders # Cache for GUI
@@ -312,6 +442,7 @@ class LiveTradingMonitor:
 
         except Exception as e:
             self.logger.error(f"Error in _sync_broker_data: {e}")
+            self._broadcast_alert("error", "Broker Sync Error", str(e))
 
     async def _broker_sync_loop(self):
         """High-frequency loop to keep account state fresh (5s)"""
@@ -589,6 +720,7 @@ class LiveTradingMonitor:
         
         # Issue 14: Pull SNAP early and use it for pricing to avoid redundant API calls
         snap = await self.get_live_options_data()
+        self._last_snap = snap # Cache for higher frequency position syncs
         if snap is None or snap.empty:
             self.logger.warning("Failed to fetch option chain. Aborting monitor step to avoid stale state.")
             return
@@ -663,6 +795,7 @@ class LiveTradingMonitor:
         decay_p = calculate_delta_decay(ts, 'PUT', self.config['initial_sum_delta']/2, start_time_obj, end_time_obj)
         t_short = (decay_c + decay_p) / 2
         spx = self.estimate_spx_price(snap)
+        self._last_spx_price = spx # Cache for history recorder
 
         t_trades = defaultdict(list)
         
@@ -1009,8 +1142,12 @@ class LiveTradingMonitor:
                         p.bid_price = row['bidprice']
                         p.ask_price = row['askprice']
                         p.price = row['mid_price']
-                        p.delta = row['delta']
+                        delta_val = row['delta']
+                        p.delta = float(delta_val) if not pd.isna(delta_val) else 0.0
+                        theta_val = row['theta']
                         p.theta = float(row['theta']) if not pd.isna(row['theta']) else 0.0
+                        # Update sticky cache
+                        self._greek_cache[(p.symbol, int(round(p.strike)), p.side)] = (p.delta, p.theta)
                         found = True
                 
                 # 2. Fallback to Symbol matching in quotes (for non-SPX or snapshot misses)
@@ -1244,7 +1381,7 @@ class LiveTradingMonitor:
                 email_config['smtp_server'] = 'smtp.gmail.com'
                 email_config['smtp_port'] = 587
 
-            recipients = self.config.get('email_recipients', [])
+            recipients = self.config.get('email_recipients', ['frankwang.alert@gmail.com'])
             if not recipients:
                 self.logger.warning("No email recipients configured, skipping alert")
                 return
@@ -1252,7 +1389,7 @@ class LiveTradingMonitor:
             msg = MIMEMultipart()
             msg['From'] = email_config['from_email']
             msg['To'] = ", ".join(recipients)
-            msg['Subject'] = "Terminaotr Alert: New Trade"
+            msg['Subject'] = "Terminator Alert: New Trade"
             
             # Create email body
             body = self._format_alert_body(trade, report_data)
@@ -1329,7 +1466,7 @@ class LiveTradingMonitor:
         lines.append(f"    Margin:    ${data.get('live_margin', 0.0):,.2f}")
         lines.append("")
         
-        lines.append("Action required: Please confirm or dismiss the trade in the Terminaotr UI.")
+        lines.append("Action required: Please confirm or dismiss the trade in the Terminator UI.")
         return "\n".join(lines)
 
     def signal_completed(self, trade: Trade):
@@ -1341,12 +1478,53 @@ class LiveTradingMonitor:
             if ct.strategy_id in self.active_order_signals:
                 self.active_order_signals.remove(ct.strategy_id)
 
+    async def confirm_live_trade(self, strategy_id: str):
+        """Manual confirmation of a pending trade for a strategy."""
+        if self.pending_trade and self.pending_trade.strategy_id == strategy_id:
+            self.logger.info(f"Manual confirmation received for strategy: {strategy_id}")
+            self._pending_trade_confirmed = True
+            self.confirmation_event.set()
+        else:
+            self.logger.warning(f"Unexpected confirmation received for {strategy_id} - no pending trade matches.")
+
+    async def dismiss_live_trade(self, strategy_id: str):
+        """Manual dismissal of a pending trade for a strategy."""
+        if self.pending_trade and self.pending_trade.strategy_id == strategy_id:
+            self.logger.info(f"Manual dismissal received for strategy: {strategy_id}")
+            self._pending_trade_confirmed = False
+            self.confirmation_event.set()
+        else:
+            self.logger.warning(f"Unexpected dismissal received for {strategy_id} - no pending trade matches.")
+
 
 
     def _update_live_portfolio(self, broker_positions: List[Dict]):
-        """Update live_combined_portfolio with actual broker positions"""
+        """Update live_combined_portfolio with actual broker positions, using sticky Greeks."""
         self.live_combined_portfolio.positions = []
         for bp in broker_positions:
+            strike_val = int(round(bp['strike']))
+            side_val = bp['side']
+            k = (bp['symbol'], strike_val, side_val)
+            
+            # Read EXCLUSIVELY from the Sticky Cache (populated by 30s cadence) or Latest SNAP
+            delta, theta = self._greek_cache.get(k, (0.0, 0.0))
+            
+            # If not in cache, attempt one last look at the last snapshot
+            # Bug 6c Fix: Use 'not in' check instead of zero-check to avoid sentinel confusion
+            if k not in self._greek_cache and self._last_snap is not None:
+                # Bug 6a/6b Fix: Write fallback results back to _greek_cache to warm it
+                r = self._last_snap[(self._last_snap['strike_price'].round().astype(int) == int(round(bp['strike']))) & (self._last_snap['side'] == bp['side'])]
+                if not r.empty:
+                    delta = float(r['delta'].iloc[0])
+                    theta_val = r['theta'].iloc[0] if 'theta' in r.columns else 0.0
+                    theta = float(theta_val) if not pd.isna(theta_val) else 0.0
+                    self._greek_cache[k] = (delta, theta)
+                    self.logger.debug(f"Warmed Greek cache for {k} from last_snap: {delta}, {theta}")
+                else:
+                    delta, theta = 0.0, 0.0
+            else:
+                delta, theta = self._greek_cache.get(k, (0.0, 0.0))
+
             self.live_combined_portfolio.positions.append(OptionLeg(
                 symbol=bp['symbol'],
                 strike=bp['strike'],
@@ -1356,9 +1534,10 @@ class LiveTradingMonitor:
                 entry_price=bp.get('avg_price', bp['price']), 
                 bid_price=bp['bid'],
                 ask_price=bp['ask'],
-                current_day_pnl=bp.get('current_day_pnl', 0.0)
+                current_day_pnl=bp.get('current_day_pnl', 0.0),
+                delta=delta,
+                theta=theta
             ))
-        # Recalculate margin
         self.live_combined_portfolio.max_margin = self.live_combined_portfolio.calculate_standard_margin()
 
     async def _check_reconciliation(self, snap: pd.DataFrame):
@@ -1400,7 +1579,7 @@ class LiveTradingMonitor:
 
         # Use a lock to check queue state without blocking
         with self._order_lock:
-            in_queue = any(t.purpose == TradePurpose.RECONCILIATION for t in list(self.order_queue.queue))
+            in_queue = any(t.purpose == TradePurpose.RECONCILIATION for t in list(self.order_queue._queue))
 
         self.logger.info(f"RECONCILIATION DISCREPANCY: Found {len(needed_adjustments)} legs mismatch. Generating Gap Sync Trade.")
         
@@ -1470,12 +1649,15 @@ class LiveTradingMonitor:
                         self.logger.info("Reconciliation GAP_SYNC generated, but broker already has matching orders. Suppressing pop.")
                         return
 
-                    self.logger.info(f"Adding Reconciliation Trade to order queue: {len(legs)} legs")
-                    self.order_queue.put(recon_trade)
+                    self.logger.info(f"Adding RECON trade to queue for strategy {recon_trade.strategy_id} with {len(recon_trade.legs)} legs")
+                    self.order_queue.put_nowait(recon_trade)
+                    self._broadcast_alert("chime", "New Trade Signal", f"Reconciliation trade queued for {recon_trade.strategy_id}")
                 else:
-                    self.logger.debug("Updated reconciliation trade available for GUI sync.")
+                    self.logger.info(f"Updated reconciliation trade available for GUI sync (Already in queue: {recon_trade.strategy_id})")
             else:
                 self.logger.warning(f"Sim divergence detected but trading is disabled. GAP_SYNC updated for {len(legs)} legs.")
+        else:
+            self.logger.info("Reconciliation built NO legs. Skipping trade creation.")
 
 
     async def _run_historical_simulation(self, start_dt: datetime, end_dt: datetime, live_trades: List[Trade] = None, collect_history: bool = False) -> List[Dict]:
@@ -1593,22 +1775,11 @@ class LiveTradingMonitor:
                 sim_d = self.combined_portfolio.get_all_deltas(snap)
                 live_d = self.live_combined_portfolio.get_all_deltas(snap)
                 
-                sim_mv = sum(l.price * l.quantity * 100 for l in self.combined_portfolio.positions)
-                live_mv = sum(l.price * l.quantity * 100 for l in self.live_combined_portfolio.positions)
-                
                 history.append({
-                    'timestamp': ts,
+                    'ts': ts.isoformat(),
                     'spx': spx,
-                    'sim_sc_strike': float(self.combined_portfolio.short_call_strike) if self.combined_portfolio.short_call_strike else None,
-                    'sim_sp_strike': float(self.combined_portfolio.short_put_strike) if self.combined_portfolio.short_put_strike else None,
-                    'live_sc_strike': float(self.live_combined_portfolio.short_call_strike) if self.live_combined_portfolio.short_call_strike else None,
-                    'live_sp_strike': float(self.live_combined_portfolio.short_put_strike) if self.live_combined_portfolio.short_put_strike else None,
-                    'sim_sc_delta': sim_d['abs_short_call_delta'],
-                    'sim_sp_delta': sim_d['abs_short_put_delta'],
-                    'live_sc_delta': live_d['abs_short_call_delta'],
-                    'live_sp_delta': live_d['abs_short_put_delta'],
-                    'sim_pnl': self.combined_portfolio.cash + sim_mv,
-                    'live_pnl': self.live_combined_portfolio.cash + live_mv
+                    'sim_pnl': round(self.combined_portfolio.net_pnl, 2),
+                    'live_pnl': round(self.live_combined_portfolio.net_pnl, 2)
                 })
 
         self.logger.info(f"Historical simulation complete. Combined Portfolio Trades: {len(self.combined_portfolio.trades)}")
@@ -1896,8 +2067,9 @@ class LiveTradingMonitor:
         return sig
 
     def create_execution_plan(self, trade: Trade) -> Dict:
-        """Create a plan of what to keep, cancel, and submit based on broker state."""
+        self.logger.info(f"Creating execution plan for trade {trade.strategy_id} with {len(trade.legs)} legs")
         chunks = self._get_smart_chunks(trade.legs)
+        self.logger.info(f"Formed {len(chunks)} smart chunks from {len(trade.legs)} legs")
         to_submit = []
         matched_broker_orders = []
         matched_ids = set()
@@ -1924,6 +2096,7 @@ class LiveTradingMonitor:
             if self.order_to_strategy.get(wid) == trade.strategy_id or trade.purpose == TradePurpose.RECONCILIATION:
                 to_cancel.append(wo)
 
+        self.logger.info(f"Execution plan result: {len(to_submit)} to submit, {len(matched_broker_orders)} to keep, {len(to_cancel)} to cancel")
         return {
             'to_keep': matched_broker_orders,
             'to_submit': to_submit,
