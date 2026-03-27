@@ -70,10 +70,17 @@ async def broadcast_state(monitor):
                 broker_connected = monitor.broker_connected
                 trading_enabled = monitor.trading_enabled
                 heartbeat_failures = monitor.heartbeat_failures
-                working_orders = [
-                    {"id": o.get('orderId'), "symbol": o.get('symbol'), "qty": o.get('quantity'), "price": o.get('price'), "status": o.get('status')}
-                    for o in monitor.working_orders
-                ]
+                working_orders = []
+                for o in monitor.working_orders:
+                    legs_coll = o.get('orderLegCollection', [{}])
+                    sym = legs_coll[0].get('instrument', {}).get('symbol', 'N/A')
+                    working_orders.append({
+                        "id": o.get('orderId'), 
+                        "symbol": sym, 
+                        "qty": o.get('quantity'), 
+                        "price": o.get('price'), 
+                        "status": o.get('status')
+                    })
                 logs = list(monitor.logs)
                 
                 # Helper to snapshot portfolio metrics

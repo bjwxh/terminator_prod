@@ -834,10 +834,13 @@ class LiveTradingMonitor:
                 if is_closed and s.portfolio.trades:
                     entry_ts = s.portfolio.trades[0].timestamp
                     last_ts = s.portfolio.trades[-1].timestamp
+                    
+                    # Ensure both are offset-aware for subtraction (Bug Fix: TypeError fix)
+                    if getattr(entry_ts, 'tzinfo', None) is None: entry_ts = entry_ts.replace(tzinfo=CHICAGO)
+                    if getattr(last_ts, 'tzinfo', None) is None: last_ts = last_ts.replace(tzinfo=CHICAGO)
+                    
                     dur = (last_ts - entry_ts).total_seconds() / 60.0
                     total_dur += dur
-                    total += 1
-
             self.stats.total_trades = total
             self.stats.winners = winners
             self.stats.losers = losers
@@ -1558,14 +1561,15 @@ class LiveTradingMonitor:
         """Fetch recent filled orders from Schwab and convert to Trade objects"""
         if not self.client or not self.account_hash: return None
         try:
-            # Fetch for today since 8:30am Chicago
-            now_chi = datetime.now(CHICAGO)
-            today_830 = now_chi.replace(hour=8, minute=30, second=0, microsecond=0)
+            # 0. Timezone Awareness: Correctly fetch Chicago morning (08:30) for orders
+            now = datetime.now(timezone.utc)
+            today_start_chi = datetime.now(CHICAGO).replace(hour=8, minute=30, second=0, microsecond=0)
+            # Ensure it is a valid aware datetime (today_start_chi is already aware via CHICAGO)
             
             resp = await self.client.get_orders_for_account(
                 self.account_hash, 
-                from_entered_datetime=today_830, 
-                to_entered_datetime=now_chi,
+                from_entered_datetime=today_start_chi, 
+                to_entered_datetime=now,
                 status=['FILLED']
             )
             if resp.status_code != 200:
