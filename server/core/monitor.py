@@ -2171,26 +2171,13 @@ class LiveTradingMonitor:
         history = []
         pending_live_trades = sorted(live_trades or [], key=lambda t: t.timestamp)
         
-        # Soft bootstrap intercept logic: queue up live ICs per strategy
-        soft_ics = defaultdict(list)
-        if mode == 'soft':
-            # Collect all live ICs that were placed manually (tagged as "BROKER")
-            broker_ics = [t for t in pending_live_trades if t.purpose == TradePurpose.IRON_CONDOR and t.strategy_id == "BROKER"]
-            
-            # Sub-strategies (sorted by expected start time)
-            sub_strats = sorted(self.sub_strategies.values(), key=lambda x: x.trade_start_time)
-            
-            for s in sub_strats:
-                # 1. Check if there's an explicit match already (if Terminator placed the order)
-                explicit_match = next((t for t in pending_live_trades if t.strategy_id == s.sid and t.purpose == TradePurpose.IRON_CONDOR), None)
-                if explicit_match:
-                    soft_ics[s.sid].append(explicit_match)
-                # 2. Otherwise, if there's a BROKER trade available, assign it to this strategy slot
-                elif broker_ics:
-                    trade = broker_ics.pop(0)
-                    trade.strategy_id = s.sid # Temporarily re-tag for the simulation sync
-                    soft_ics[s.sid].append(trade)
-                    self.logger.info(f"Bootstrap [SOFT]: Mapping manual BROKER trade at {trade.timestamp.strftime('%H:%M')} to sub-strategy {s.sid}")
+        # Soft bootstrap redefined: we no longer pre-map ICs here. 
+        # Instead, we replay ALL live trades inside the real-time loop below (since 9:00 AM).
+        filtered_pending_live = [t for t in sorted(live_trades or [], key=lambda x: x.timestamp) if t.timestamp.astimezone(CHICAGO).time() >= time(9, 0)]
+        pending_live_trades = filtered_pending_live.copy()
+        
+        # Mapping tracker: keep track of which strategy is next for an IRON_CONDOR 'BROKER' trade
+        available_strat_ids = sorted(self.sub_strategies.keys(), key=lambda x: self.sub_strategies[x].trade_start_time)
         sim_date_str = start_dt.date().isoformat()
         db_path = self.db_path
         
@@ -2234,17 +2221,20 @@ class LiveTradingMonitor:
         start_time_obj = time(8, 30)
         end_time_obj = time(15, 0)
 
-        # Bug Fix: Pad history if data starts late (e.g. at 11:11 AM)
+        # Bug Fix: Ensure chart starts at 8:30 AM even if data starts later. 
+        # Pad with first available SPX price instead of 'None' so the UI renders the line.
         if collect_history:
-            first_avail_ts = dt_series.iloc[0]
-            if first_avail_ts.time() > start_time_obj:
-                self.logger.info(f"History Padding: Backfilling 0-PnL entries from 08:30 to {first_avail_ts.strftime('%H:%M')}")
+            # Get first available SPX price to use as baseline for padding
+            first_spx = groups.get_group(dt_series.iloc[0])['mid_price'].mean() if not data.empty else None
+            first_avail_ts = dt_series.iloc[0] if not data.empty else None
+            
+            if first_avail_ts and first_avail_ts.time() > start_time_obj:
+                self.logger.info(f"Chart Padding: Baseline 08:30 AM with SPX={first_spx:.1f}")
                 curr_pad = start_dt
-                # Use a 1-minute cadence for padding to keep it lightweight
                 while curr_pad < first_avail_ts:
                     history.append({
                         'ts': curr_pad.isoformat(),
-                        'spx': None,
+                        'spx': first_spx,
                         'sim_sc_strike': None, 'sim_sp_strike': None,
                         'live_sc_strike': None, 'live_sp_strike': None,
                         'sim_sc_delta': 0.0, 'sim_sp_delta': 0.0,
@@ -2270,14 +2260,57 @@ class LiveTradingMonitor:
             # P3 Optimization: Use indexed lookups here too
             while pending_live_trades and pending_live_trades[0].timestamp.replace(tzinfo=None) <= ts.replace(tzinfo=None):
                 lt = pending_live_trades.pop(0)
-                # Map leg prices to current snap for accuracy if possible
+                
+                # Soft Bootstrap Redefinition Point 1: Match live trade strikes and execute at DB Mid-price
+                replayed_legs = []
                 for l in lt.legs:
                     l_key = (int(round(l.strike)), l.side)
                     if l_key in snap_indexed.index:
                         lrow = snap_indexed.loc[[l_key]].iloc[0]
-                        l.price = lrow['mid_price']
-                        l.delta = lrow['delta']
+                        replayed_legs.append(OptionLeg(
+                            symbol=l.symbol, strike=l.strike, side=l.side, quantity=l.quantity,
+                            delta=lrow['delta'], theta=float(lrow['theta']) if not pd.isna(lrow['theta']) else 0.0,
+                            price=lrow['mid_price'], entry_price=lrow['mid_price'] # REDEFINED: Assumed fill at mid
+                        ))
+                    else:
+                        # Fallback if DB is missing some specific leg data, keep original for position integrity
+                        replayed_legs.append(l)
+
+                # Update live portfolio (uses true broker fills)
                 self.live_combined_portfolio.add_trade(lt)
+
+                # Soft Bootstrap Redefinition Point 2: Replay into Simulation (if mode is soft)
+                if mode == 'soft':
+                    sim_credit = sum(-l.quantity * l.price for l in replayed_legs) * 100
+                    sim_trade = Trade(ts, replayed_legs, sim_credit, lt.commission, lt.current_sum_delta, lt.purpose, lt.strategy_id)
+                    
+                    # 1. Map to strategy
+                    target_sid = sim_trade.strategy_id
+                    if target_sid == "BROKER":
+                        if sim_trade.purpose == TradePurpose.IRON_CONDOR:
+                            # Map to the earliest available strategy that hasn't traded yet
+                            for s_id in available_strat_ids:
+                                s_obj = self.sub_strategies[s_id]
+                                if not s_obj.has_traded_today and ts.time() >= s_obj.trade_start_time:
+                                    target_sid = s_id
+                                    break
+                        else:
+                            # Rebalance/Exit: match by strike
+                            for s_id, s_obj in self.sub_strategies.items():
+                                if any(int(round(p.strike)) == int(round(sim_trade.legs[0].strike)) for p in s_obj.portfolio.positions):
+                                    target_sid = s_id
+                                    break
+                    
+                    if target_sid in self.sub_strategies:
+                        s_obj = self.sub_strategies[target_sid]
+                        s_obj.portfolio.add_trade(sim_trade)
+                        s_obj.has_traded_today = True # Mark as engaged
+                        self.combined_portfolio.add_trade(sim_trade)
+                        self.logger.info(f"Bootstrap [SOFT]: Replayed {sim_trade.purpose.value} into {target_sid} at {ts.strftime('%H:%M')}")
+                    else:
+                        self.combined_portfolio.add_trade(sim_trade)
+                        self.logger.info(f"Bootstrap [SOFT]: Replayed {sim_trade.purpose.value} into combined only at {ts.strftime('%H:%M')}")
+
             # Reconstruction of monitor state from a snapshot
             spx = self._last_spx_price or self.estimate_spx_price(snap)
                 
@@ -2302,24 +2335,8 @@ class LiveTradingMonitor:
                 # Check for entry
                 if not s.has_traded_today and t_time < end_time_obj:
                     trade = None
-                    # Soft mode: see if we have a live IC to sync with
-                    if mode == 'soft' and s.sid in soft_ics:
-                        # Re-sync if the current bootstrap clock has passed the live entry time
-                        if ts.replace(tzinfo=None) >= soft_ics[s.sid][0].timestamp.replace(tzinfo=None):
-                            live_ic = soft_ics[s.sid].pop(0)
-                            # Create a sync trade using these strikes but current database pricing
-                            trade = self._create_sync_entry(s, snap, ts, live_ic)
-                            if trade:
-                                self.logger.info(f"Bootstrap [SOFT]: Synced {s.sid} entry with live strikes at {ts.strftime('%H:%M')}")
-                    
-                    if not trade: # Fallback to standard logic if HARD mode or no soft IC pending
-                        # Mode logic: only fallback to hard entry if we have no soft entry waiting/available
-                        soft_entry_pending = mode == 'soft' and s.sid in soft_ics and len(soft_ics[s.sid]) > 0
-                        
-                        if not soft_entry_pending:
-                            trade = self._check_entry(s, snap, ts)
-                        else:
-                            self.logger.debug(f"Bootstrap [SOFT]: Skipping hard entry logic at {ts.strftime('%H:%M')} for {s.sid} - awaiting live trade sync.")
+                    if mode == 'hard':
+                        trade = self._check_entry(s, snap, ts)
                     
                     if trade:
                         s.portfolio.add_trade(trade)
