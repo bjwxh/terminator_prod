@@ -2224,8 +2224,10 @@ class LiveTradingMonitor:
         # Bug Fix: Ensure chart starts at 8:30 AM even if data starts later. 
         # Pad with first available SPX price instead of 'None' so the UI renders the line.
         if collect_history:
-            # Get first available SPX price to use as baseline for padding
-            first_spx = groups.get_group(dt_series.iloc[0])['mid_price'].mean() if not data.empty else None
+            # Get first available SPX price estimate to use as baseline for padding 
+            # (Note: mean of mid_price of options is NOT the SPX price)
+            first_snap = groups.get_group(dt_series.iloc[0])
+            first_spx = self.estimate_spx_price(first_snap) if not data.empty else None
             first_avail_ts = dt_series.iloc[0] if not data.empty else None
             
             if first_avail_ts and first_avail_ts.time() > start_time_obj:
