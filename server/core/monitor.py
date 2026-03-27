@@ -2175,26 +2175,14 @@ class LiveTradingMonitor:
         # Deduplication Logic: Prevent multiple replays of the same trade event
         unique_live = []
         seen_order_ids = set()
-        seen_signatures = set() # (ts_rounded_60s, leg_sig) -> bool
         
         for t in sorted(live_trades or [], key=lambda x: x.timestamp):
-            # Check 1: Deduplication by Order ID (Priority)
+            # Check 1: Deduplication by Order ID (Bug 6 Fix: rely on Order ID only)
             if t.order_id:
                 if t.order_id in seen_order_ids:
                     self.logger.info(f"Bootstrap [SOFT]: Skipping duplicate Order ID {t.order_id} at {t.timestamp}")
                     continue
                 seen_order_ids.add(t.order_id)
-            
-            # Check 2: 60-second Fuzzy Deduplication by Leg Signature
-            # (Matches trades with identical legs within a 1-minute window)
-            leg_sig = tuple(sorted([(l.symbol, l.strike, l.side, l.quantity) for l in t.legs]))
-            ts_fuzzy = t.timestamp.replace(second=0, microsecond=0) # Group by minute for safety
-            sig_key = (ts_fuzzy, leg_sig)
-            
-            if sig_key in seen_signatures:
-                self.logger.info(f"Bootstrap [SOFT]: Skipping fuzzy duplicate leg-signature trade at {t.timestamp} ({ts_fuzzy})")
-                continue
-            seen_signatures.add(sig_key)
             
             # Explicitly mark as 'filled' for UI consistency
             t.status = "filled"
@@ -2238,6 +2226,7 @@ class LiveTradingMonitor:
         else:
             data['datetime'] = dt_series.dt.tz_convert('America/Chicago')
 
+        data = data.sort_values('datetime')
         data['mid_price'] = (data['bidprice'] + data['askprice']) / 2
         data = data.dropna(subset=['delta', 'bidprice', 'askprice'])
         
@@ -2247,30 +2236,30 @@ class LiveTradingMonitor:
         start_time_obj = time(8, 30)
         end_time_obj = time(15, 0)
 
-        # Bug Fix: Ensure chart starts at 8:30 AM even if data starts later. 
+        # Bug 4 Fix: Ensure chart starts at 8:30 AM even if data starts later. 
         # Pad with first available SPX price instead of 'None' so the UI renders the line.
         if collect_history:
-            # Get first available SPX price estimate to use as baseline for padding 
-            # (Note: mean of mid_price of options is NOT the SPX price)
-            first_snap = groups.get_group(dt_series.iloc[0])
-            first_spx = self.estimate_spx_price(first_snap) if not data.empty else None
-            first_avail_ts = dt_series.iloc[0] if not data.empty else None
-            
-            if first_avail_ts and first_avail_ts.time() > start_time_obj:
-                self.logger.info(f"Chart Padding: Baseline 08:30 AM with SPX={first_spx:.1f}")
-                curr_pad = start_dt
-                while curr_pad < first_avail_ts:
-                    history.append({
-                        'ts': curr_pad.isoformat(),
-                        'spx': first_spx,
-                        'sim_sc_strike': None, 'sim_sp_strike': None,
-                        'live_sc_strike': None, 'live_sp_strike': None,
-                        'sim_sc_delta': 0.0, 'sim_sp_delta': 0.0,
-                        'live_sc_delta': 0.0, 'live_sp_delta': 0.0,
-                        'sim_pnl': 0.0, 'live_pnl': 0.0,
-                        'sim_margin': 0.0, 'live_margin': 0.0
-                    })
-                    curr_pad += timedelta(minutes=1)
+            if not data.empty:
+                # Bug 4 Logic: Use already-localized datetime to avoid tz-naive lookup crash
+                first_avail_ts = data['datetime'].iloc[0]
+                first_snap = groups.get_group(first_avail_ts)
+                first_spx = self.estimate_spx_price(first_snap)
+                
+                if first_avail_ts.time() > start_time_obj:
+                    self.logger.info(f"Chart Padding: Baseline 08:30 AM with SPX={first_spx:.1f}")
+                    curr_pad = start_dt
+                    while curr_pad < first_avail_ts:
+                        history.append({
+                            'ts': curr_pad.isoformat(),
+                            'spx': first_spx,
+                            'sim_sc_strike': None, 'sim_sp_strike': None,
+                            'live_sc_strike': None, 'live_sp_strike': None,
+                            'sim_sc_delta': 0.0, 'sim_sp_delta': 0.0,
+                            'live_sc_delta': 0.0, 'live_sp_delta': 0.0,
+                            'sim_pnl': 0.0, 'live_pnl': 0.0,
+                            'sim_margin': 0.0, 'live_margin': 0.0
+                        })
+                        curr_pad += timedelta(minutes=1)
 
         for ts, snap in groups:
             # P3 Fix: Pre-index snap for O(1) position valuation during catch-up
