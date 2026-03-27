@@ -2156,11 +2156,13 @@ class LiveTradingMonitor:
                 delta=row['delta'],
                 theta=float(row['theta']) if not pd.isna(row['theta']) else 0.0,
                 price=row['mid_price'],
+                entry_price=ll.entry_price or row['mid_price'], # Bug Sync Fix: Use live entry price to prevent PnL drift
                 target_delta=ll.target_delta
             ))
         
-        credit = sum(-l.quantity * l.price for l in legs) * 100
-        comm = self.config.get('commission_per_contract', 1.13) * len(legs)
+        # Bug Sync Fix: Use actual credit from live trade to ensure PnL alignment in simulation
+        credit = live_t.credit if live_t.credit != 0 else sum(-l.quantity * l.price for l in legs) * 100
+        comm = live_t.commission if live_t.commission != 0 else self.config.get('commission_per_contract', 1.13) * len(legs)
         return Trade(ts, legs, credit, comm, live_t.current_sum_delta, live_t.purpose, s.sid)
 
 
@@ -2231,6 +2233,26 @@ class LiveTradingMonitor:
         
         start_time_obj = time(8, 30)
         end_time_obj = time(15, 0)
+
+        # Bug Fix: Pad history if data starts late (e.g. at 11:11 AM)
+        if collect_history:
+            first_avail_ts = dt_series.iloc[0]
+            if first_avail_ts.time() > start_time_obj:
+                self.logger.info(f"History Padding: Backfilling 0-PnL entries from 08:30 to {first_avail_ts.strftime('%H:%M')}")
+                curr_pad = start_dt
+                # Use a 1-minute cadence for padding to keep it lightweight
+                while curr_pad < first_avail_ts:
+                    history.append({
+                        'ts': curr_pad.isoformat(),
+                        'spx': None,
+                        'sim_sc_strike': None, 'sim_sp_strike': None,
+                        'live_sc_strike': None, 'live_sp_strike': None,
+                        'sim_sc_delta': 0.0, 'sim_sp_delta': 0.0,
+                        'live_sc_delta': 0.0, 'live_sp_delta': 0.0,
+                        'sim_pnl': 0.0, 'live_pnl': 0.0,
+                        'sim_margin': 0.0, 'live_margin': 0.0
+                    })
+                    curr_pad += timedelta(minutes=1)
 
         for ts, snap in groups:
             # P3 Fix: Pre-index snap for O(1) position valuation during catch-up
@@ -2317,10 +2339,14 @@ class LiveTradingMonitor:
                             s.portfolio.add_trade(res_t)
                             t_trades[s.sid].append(res_t)
             
-            # Record net trades for the step if any strategy traded
+            # Record trades for the step if any strategy traded
             if t_trades:
-                for mt in self.net_trades(t_trades):
-                    self.combined_portfolio.add_trade(mt)
+                # Bug Fix: During bootstrap catch-up, we want to maintain the identity of 
+                # individual sub-strategy trades to prevent collapsing them into a single 12-leg 'combined' trade
+                # in the UI logs. Only use net_trades for real-time reconciliation spikes.
+                for sid, trades in t_trades.items():
+                    for mt in trades:
+                        self.combined_portfolio.add_trade(mt)
                 
                 # Sync combined simulation
                 self._reconcile_combined_simulation()
