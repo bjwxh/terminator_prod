@@ -2170,39 +2170,34 @@ class LiveTradingMonitor:
         """Run backtester logic on historical data. If live_trades provided, replays them into live_combined_portfolio."""
         history = []
         # Soft bootstrap redefined: we no longer pre-map ICs here. 
-        # Instead, we replay ALL unique live trades inside the real-time loop below (since 9:00 AM).
+        # Instead, we replay ALL unique live trades inside the real-time loop below to ensure Sim matches Live positions.
         
         # Deduplication Logic: Prevent multiple replays of the same trade event
         unique_live = []
         seen_order_ids = set()
-        seen_signatures = set()
+        seen_signatures = set() # (ts_rounded_60s, leg_sig) -> bool
         
         for t in sorted(live_trades or [], key=lambda x: x.timestamp):
-            # Check 1: Time filter (since 9:00 AM Chicago)
-            if t.timestamp.astimezone(CHICAGO).time() < time(9, 0):
-                continue
-            
-            # Check 2: Deduplication by Order ID
+            # Check 1: Deduplication by Order ID (Priority)
             if t.order_id:
                 if t.order_id in seen_order_ids:
                     self.logger.info(f"Bootstrap [SOFT]: Skipping duplicate Order ID {t.order_id} at {t.timestamp}")
                     continue
                 seen_order_ids.add(t.order_id)
-                
-            # Check 3: Deduplication by Leg Signature + Timestamp (to nearest second)
+            
+            # Check 2: 60-second Fuzzy Deduplication by Leg Signature
+            # (Matches trades with identical legs within a 1-minute window)
             leg_sig = tuple(sorted([(l.symbol, l.strike, l.side, l.quantity) for l in t.legs]))
-            ts_rounded = t.timestamp.replace(microsecond=0)
-            sig_key = (ts_rounded, leg_sig)
+            ts_fuzzy = t.timestamp.replace(second=0, microsecond=0) # Group by minute for safety
+            sig_key = (ts_fuzzy, leg_sig)
             
             if sig_key in seen_signatures:
-                self.logger.info(f"Bootstrap [SOFT]: Skipping duplicate leg-signature trade at {t.timestamp}")
+                self.logger.info(f"Bootstrap [SOFT]: Skipping fuzzy duplicate leg-signature trade at {t.timestamp} ({ts_fuzzy})")
                 continue
             seen_signatures.add(sig_key)
             
-            # Check 4: Filter out RECONCILIATION/GAP_SYNC trades if we already have 
-            # broker filled trades that cover the same time window (reduces noise)
-            # Actually keep them if they are unique, but we've already checked uniqueness by sig.
-
+            # Explicitly mark as 'filled' for UI consistency
+            t.status = "filled"
             unique_live.append(t)
 
         pending_live_trades = unique_live.copy()
