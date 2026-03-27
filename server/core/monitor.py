@@ -2174,24 +2174,36 @@ class LiveTradingMonitor:
         
         # Deduplication Logic: Prevent multiple replays of the same trade event
         unique_live = []
-        seen_trades = set()
+        seen_order_ids = set()
+        seen_signatures = set()
         
         for t in sorted(live_trades or [], key=lambda x: x.timestamp):
             # Check 1: Time filter (since 9:00 AM Chicago)
             if t.timestamp.astimezone(CHICAGO).time() < time(9, 0):
                 continue
-                
-            # Check 2: Uniqueness (TS + Leg Signature)
-            leg_sig = tuple(sorted([(l.symbol, l.strike, l.side, l.quantity) for l in t.legs]))
-            # Round timestamp to nearest second for duplicate detection because Schwab might return slightly different ms
-            ts_key = t.timestamp.replace(microsecond=0) 
-            trade_key = (ts_key, leg_sig)
             
-            if trade_key not in seen_trades:
-                unique_live.append(t)
-                seen_trades.add(trade_key)
-            else:
-                self.logger.info(f"Bootstrap [SOFT]: Skipping duplicate trade at {t.timestamp}")
+            # Check 2: Deduplication by Order ID
+            if t.order_id:
+                if t.order_id in seen_order_ids:
+                    self.logger.info(f"Bootstrap [SOFT]: Skipping duplicate Order ID {t.order_id} at {t.timestamp}")
+                    continue
+                seen_order_ids.add(t.order_id)
+                
+            # Check 3: Deduplication by Leg Signature + Timestamp (to nearest second)
+            leg_sig = tuple(sorted([(l.symbol, l.strike, l.side, l.quantity) for l in t.legs]))
+            ts_rounded = t.timestamp.replace(microsecond=0)
+            sig_key = (ts_rounded, leg_sig)
+            
+            if sig_key in seen_signatures:
+                self.logger.info(f"Bootstrap [SOFT]: Skipping duplicate leg-signature trade at {t.timestamp}")
+                continue
+            seen_signatures.add(sig_key)
+            
+            # Check 4: Filter out RECONCILIATION/GAP_SYNC trades if we already have 
+            # broker filled trades that cover the same time window (reduces noise)
+            # Actually keep them if they are unique, but we've already checked uniqueness by sig.
+
+            unique_live.append(t)
 
         pending_live_trades = unique_live.copy()
         
