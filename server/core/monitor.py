@@ -2169,12 +2169,31 @@ class LiveTradingMonitor:
     async def _run_historical_simulation(self, start_dt: datetime, end_dt: datetime, live_trades: List[Trade] = None, mode: str = 'hard', collect_history: bool = False) -> List[Dict]:
         """Run backtester logic on historical data. If live_trades provided, replays them into live_combined_portfolio."""
         history = []
-        pending_live_trades = sorted(live_trades or [], key=lambda t: t.timestamp)
-        
         # Soft bootstrap redefined: we no longer pre-map ICs here. 
-        # Instead, we replay ALL live trades inside the real-time loop below (since 9:00 AM).
-        filtered_pending_live = [t for t in sorted(live_trades or [], key=lambda x: x.timestamp) if t.timestamp.astimezone(CHICAGO).time() >= time(9, 0)]
-        pending_live_trades = filtered_pending_live.copy()
+        # Instead, we replay ALL unique live trades inside the real-time loop below (since 9:00 AM).
+        
+        # Deduplication Logic: Prevent multiple replays of the same trade event
+        unique_live = []
+        seen_trades = set()
+        
+        for t in sorted(live_trades or [], key=lambda x: x.timestamp):
+            # Check 1: Time filter (since 9:00 AM Chicago)
+            if t.timestamp.astimezone(CHICAGO).time() < time(9, 0):
+                continue
+                
+            # Check 2: Uniqueness (TS + Leg Signature)
+            leg_sig = tuple(sorted([(l.symbol, l.strike, l.side, l.quantity) for l in t.legs]))
+            # Round timestamp to nearest second for duplicate detection because Schwab might return slightly different ms
+            ts_key = t.timestamp.replace(microsecond=0) 
+            trade_key = (ts_key, leg_sig)
+            
+            if trade_key not in seen_trades:
+                unique_live.append(t)
+                seen_trades.add(trade_key)
+            else:
+                self.logger.info(f"Bootstrap [SOFT]: Skipping duplicate trade at {t.timestamp}")
+
+        pending_live_trades = unique_live.copy()
         
         # Mapping tracker: keep track of which strategy is next for an IRON_CONDOR 'BROKER' trade
         available_strat_ids = sorted(self.sub_strategies.keys(), key=lambda x: self.sub_strategies[x].trade_start_time)
