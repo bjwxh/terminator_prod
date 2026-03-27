@@ -16,7 +16,7 @@ CONFIG = {
     # === Timing ===
     'start_time': '08:30:00',          # Market open
     'end_time': '15:00:00',            # Market close / exit time
-    'check_interval_minutes': 0.5,     # How often to check for rebalances (30 seconds)
+    'check_interval_minutes': 5 / 60,  # Strategy/Pricing check every 5 seconds (Enhancement)
     'portfolio_start_time': '09:00:00', # First sub-strategy start time
     'portfolio_end_time': '11:00:00',   # Last sub-strategy start time
     'portfolio_interval_minutes': 60,   # Time between sub-strategies (can be 1-30)
@@ -31,7 +31,8 @@ CONFIG = {
 
     # === Persistence ===
     'session_file_path': 'session_state.json', # Local to working dir
-    'db_path': '/dev/null', # No DB on VM (as per plan §4.5)
+    'db_path': 'server/market_data.db', # Path to SQLite DB for EOD/reconciliation
+    'bootstrap_mode': 'soft', # 'soft' = sync sim entry with live IC; 'hard' = pure logic entry
 
     # === Email Alerts (configurable) ===
     'email_alerts_enabled': True,

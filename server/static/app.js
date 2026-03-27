@@ -8,9 +8,29 @@ let portfolioFoldStates = { sim: true, live: true }; // { sim: boolean, live: bo
 let tradeTimer = null;
 let tradeTimeLeft = 10;
 let isTradeTimerPaused = false;
+let pendingDismissStratId = null; // Queued dismiss to retry if WS was not open
+let currentTradeOrders = []; // Task #28: Global store for adjustments
 const TRADE_TIMEOUT_SEC = 10;
 let spxChart, pnlChart;
 let lastChartUpdate = 0;
+let isMuted = localStorage.getItem('isMuted') === 'true';
+let currentVersion = null; // Track backend version for auto-refresh
+
+// Initialize Mute UI
+function initMuteUI() {
+    const icon = document.getElementById('mute-icon');
+    if (icon) icon.textContent = isMuted ? '🔕' : '🔔';
+    
+    const btn = document.getElementById('mute-toggle-btn');
+    if (btn) {
+        btn.addEventListener('click', () => {
+            isMuted = !isMuted;
+            localStorage.setItem('isMuted', isMuted);
+            icon.textContent = isMuted ? '🔕' : '🔔';
+            console.log(`Sounds ${isMuted ? 'muted' : 'unmuted'}`);
+        });
+    }
+}
 
 // Tab Management
 function openTab(evt, tabName) {
@@ -36,29 +56,84 @@ function connect() {
     socket.onopen = () => {
         console.log("Connected to Terminal WS");
         const statusEl = document.getElementById('system-status');
-        statusEl.textContent = 'CONNECTED';
-        statusEl.className = 'value status-connected';
+        if (statusEl) {
+            statusEl.textContent = 'CONNECTED';
+            statusEl.className = 'value status-connected';
+        }
+        const banner = document.getElementById('disconnect-banner');
+        if (banner) banner.remove();
         reconnectInterval = 1000;
+        // Re-sync pause state with backend after reconnect (fixes lost pause message on disconnect)
+        if (isTradeTimerPaused) {
+            socket.send(JSON.stringify({ action: 'toggle_trade_pause', is_paused: true }));
+        }
+        // Retry a dismiss that failed to send because WS was not open
+        if (pendingDismissStratId) {
+            socket.send(JSON.stringify({ action: 'dismiss_trade', strat_id: pendingDismissStratId }));
+            console.log(`Retried queued dismiss for ${pendingDismissStratId} on reconnect`);
+            pendingDismissStratId = null;
+        }
     };
 
     socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'state_update') {
+            // Auto-refresh on deployment/restart
+            if (data.state.version) {
+                if (currentVersion && data.state.version !== currentVersion) {
+                    console.log("New version detected. Reloading...");
+                    window.location.reload();
+                }
+                currentVersion = data.state.version;
+            }
             updateUI(data.state);
         } else if (data.type === 'history_init') {
             populateCharts(data.history);
+            if (data.config) updateConfigTable(data.config);
         } else if (data.type === 'alert') {
             handleAlert(data);
         } else if (data.type === 'trade_signal') {
+            // Clear any stale pending dismiss when a fresh trade signal arrives
+            pendingDismissStratId = null;
+            // Bug 12 Defensive Fix: Don't overwrite a paused modal
+            const modal = document.getElementById('trade-modal');
+            if (modal && modal.classList.contains('show') && isTradeTimerPaused) {
+                console.warn("New trade signal ignored because current modal is paused.");
+                return;
+            }
+            // Task: Play sound for trade signal
+            playSound('info');
             showTradeModal(data);
+        } else if (data.type === 'trade_action') {
+            console.log("Remote trade action received:", data);
+            if (data.action === 'close_modal') {
+                closeTradeModal();
+            } else if (data.action === 'pause_sync') {
+                isTradeTimerPaused = data.is_paused;
+                const btn = document.getElementById('modal-pause-btn');
+                if (btn) btn.textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
+                updateTradeTimerUI();
+            }
         }
     };
 
     socket.onclose = () => {
         console.log("Disconnected from Terminal WS");
-        document.getElementById('system-status').textContent = 'RECONNECTING...';
-        document.getElementById('system-status').className = 'value status-connecting';
+        const statusEl = document.getElementById('system-status');
+        if (statusEl) {
+            statusEl.textContent = 'DISCONNECTED - RECONNECTING...';
+            statusEl.className = 'value status-disconnected flash-alert';
+        }
         
+        // Show a temporary banner if not exists
+        if (!document.getElementById('disconnect-banner')) {
+            const banner = document.createElement('div');
+            banner.id = 'disconnect-banner';
+            banner.className = 'disconnect-banner';
+            banner.textContent = '⚠️ Lost connection to server. Attempting to reconnect...';
+            document.body.prepend(banner);
+        }
+
         setTimeout(() => {
             reconnectInterval = Math.min(reconnectInterval * 2, maxReconnectInterval);
             connect();
@@ -66,19 +141,24 @@ function connect() {
     };
 }
 
+function playSound(level) {
+    if (isMuted) return; // Task: Respect mute state
+    const soundPath = level === 'error' ? 'error.mp3' : 'chime.mp3';
+    const audio = new Audio(soundPath);
+    audio.play().catch(e => console.warn("Audio play blocked (needs user interaction):", e));
+}
+
 function handleAlert(data) {
     console.log("System Alert:", data);
     
     // Play sound
-    const soundPath = data.level === 'error' ? '/static/error.mp3' : '/static/chime.mp3';
-    const audio = new Audio(soundPath);
-    audio.play().catch(e => console.error("Audio play failed:", e));
+    playSound(data.level);
     
     // Show a temporary browser notification if allowed
     if (Notification.permission === "granted") {
         new Notification(data.title || "Terminator Alert", {
             body: data.message || "Action required",
-            icon: '/static/favicon.ico'
+            icon: 'favicon.ico'
         });
     } else if (Notification.permission !== "denied") {
         Notification.requestPermission();
@@ -99,6 +179,40 @@ function updateUI(state) {
     document.getElementById('trading-status').textContent = state.trading_enabled ? 'ENABLED' : 'DISABLED';
     document.getElementById('trading-status').className = 'value ' + (state.trading_enabled ? 'status-connected' : 'status-disabled');
     tradingBtn.textContent = state.trading_enabled ? 'Disable trading' : 'Enable trading';
+
+    // Exchange Clock (Chicago)
+    if (state.ts) {
+        const d = new Date(state.ts);
+        const timeStr = d.toLocaleTimeString('en-US', { 
+            hour12: false, 
+            hour: '2-digit', 
+            minute: '2-digit', 
+            second: '2-digit',
+            timeZone: 'America/Chicago'
+        });
+        const clockEl = document.getElementById('exchange-time');
+        if (clockEl) clockEl.textContent = timeStr;
+    }
+
+    // SPX Price
+    const spxEl = document.getElementById('spx-price');
+    if (spxEl) {
+        if (state.spx) {
+            spxEl.textContent = state.spx.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        } else {
+            spxEl.textContent = '----.--';
+        }
+    }
+
+    // VIX Price
+    const vixEl = document.getElementById('vix-price');
+    if (vixEl) {
+        if (state.vix) {
+            vixEl.textContent = state.vix.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        } else {
+            vixEl.textContent = '----.--';
+        }
+    }
 
     // 2. Metrics - Sim
     const simNetPnl = formatUSD(state.sim.net_pnl);
@@ -201,6 +315,10 @@ function populateCharts(history) {
 }
 
 function initCharts() {
+    // FRONT-1 Fix: Destroy existing charts if they exist to prevent memory leaks
+    if (spxChart) spxChart.destroy();
+    if (pnlChart) pnlChart.destroy();
+
     const commonOptions = {
         responsive: true,
         maintainAspectRatio: false,
@@ -254,7 +372,8 @@ function initCharts() {
                     borderWidth: 2, 
                     pointRadius: 0, 
                     fill: false, 
-                    tension: 0.1 
+                    tension: 0.1,
+                    order: 2 // Higher order = Bottom layer
                 },
                 { 
                     label: 'Sim PnL', 
@@ -264,7 +383,8 @@ function initCharts() {
                     borderDash: [5, 5], 
                     pointRadius: 0, 
                     fill: false, 
-                    tension: 0.1 
+                    tension: 0.1,
+                    order: 1 // Lower order = Top layer
                 }
             ]
         },
@@ -386,15 +506,19 @@ function updateStats(stats) {
 
 let configRendered = false;
 function updateConfigTable(config) {
-    if (!config || configRendered) return;
+    if (!config) return;
     const tbody = document.getElementById('config-tbody');
-    tbody.innerHTML = '';
+    if (!tbody) return;
     
+    tbody.innerHTML = '';
     const sortedKeys = Object.keys(config).sort();
     sortedKeys.forEach(key => {
         const row = document.createElement('tr');
         let val = config[key];
-        if (typeof val === 'object') val = JSON.stringify(val);
+        // Stringify objects for better readability
+        if (typeof val === 'object' && val !== null) {
+            val = JSON.stringify(val);
+        }
         
         row.innerHTML = `
             <td><code>${key}</code></td>
@@ -402,7 +526,6 @@ function updateConfigTable(config) {
         `;
         tbody.appendChild(row);
     });
-    configRendered = true; // Only render once or on significant change if you wish
 }
 
 function updateStrategies(strategies) {
@@ -516,20 +639,16 @@ function showTradeModal(tradeData) {
     
     // Support either a single trade object or an array of orders
     const orders = tradeData.orders || [];
-    if (orders.length === 0 && tradeData.legs) {
-        // Fallback for single legacy trade
-        orders.push({
-            type: 'TRADE',
-            qty: 1,
-            desc: tradeData.legs.map(l => `${l.side} ${l.strike} x${l.qty}`).join(' | '),
-            credit: tradeData.credit
-        });
-    }
-
-    orders.forEach((order, idx) => {
+    currentTradeOrders = JSON.parse(JSON.stringify(orders)); // Deep copy for adjustments
+    
+    currentTradeOrders.forEach((order, idx) => {
         const orderCard = document.createElement('div');
         const typeClass = (order.type || 'TRADE').toLowerCase();
         orderCard.className = `order-card type-${typeClass}`;
+        
+        // Initial price from server
+        const price = order.price_ea || 0;
+        
         orderCard.innerHTML = `
             <div class="order-header">
                 <span class="order-title">Order #${idx + 1}: ${order.type || 'TRADE'}</span>
@@ -541,8 +660,12 @@ function showTradeModal(tradeData) {
                     <span class="value">${order.desc || 'N/A'}</span>
                 </div>
                 <div class="modal-detail">
-                    <span class="label">Target Price</span>
-                    <span class="value">${order.credit || '$0.00'}</span>
+                    <span class="label">Price (ea)</span>
+                    <div class="price-adjust-container">
+                        <button class="adjust-btn minus" onclick="adjustPrice(${idx}, -0.05)">-</button>
+                        <span id="price-val-${idx}" class="value price-val">${formatOrderPrice(price)}</span>
+                        <button class="adjust-btn plus" onclick="adjustPrice(${idx}, 0.05)">+</button>
+                    </div>
                 </div>
             </div>
         `;
@@ -551,21 +674,59 @@ function showTradeModal(tradeData) {
 
     document.getElementById('modal-total-credit').textContent = tradeData.total_credit || '$0.00';
     
-    // Current Strategy ID for confirmation
+    // Sync UI global scale
+    window.currentTradeMaxTime = tradeData.timeout || TRADE_TIMEOUT_SEC;
+    tradeTimeLeft = window.currentTradeMaxTime;
     window.currentModalStratId = tradeData.strat_id;
     
-    // Reset Timer
-    tradeTimeLeft = tradeData.timeout || TRADE_TIMEOUT_SEC;
-    isTradeTimerPaused = false;
-    document.getElementById('modal-pause-btn').textContent = 'Pause Timer';
+    // Respect pause state from server
+    isTradeTimerPaused = tradeData.is_paused || false;
+    document.getElementById('modal-pause-btn').textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
+    
     updateTradeTimerUI();
     
     const modal = document.getElementById('trade-modal');
-    modal.classList.add('show');
+    if (modal) modal.classList.add('show');
 
     // Start Timer
     if (tradeTimer) clearInterval(tradeTimer);
     tradeTimer = setInterval(updateTradeTimer, 1000);
+}
+
+function formatOrderPrice(price) {
+    const absPrice = Math.abs(price).toFixed(2);
+    const suffix = price >= 0 ? 'Cr' : 'Db';
+    return `$${absPrice} ${suffix}`;
+}
+
+function adjustPrice(idx, delta) {
+    if (!currentTradeOrders[idx]) return;
+    
+    // Passive (+) / Aggressive (-) adjustment
+    currentTradeOrders[idx].price_ea = Number((currentTradeOrders[idx].price_ea + delta).toFixed(2));
+    
+    const priceEl = document.getElementById(`price-val-${idx}`);
+    if (priceEl) {
+        priceEl.textContent = formatOrderPrice(currentTradeOrders[idx].price_ea);
+        priceEl.classList.add('modified');
+    }
+    
+    updateTotalCreditDisplay();
+}
+
+function updateTotalCreditDisplay() {
+    let total = 0;
+    currentTradeOrders.forEach(order => {
+        if (order.type === 'TRADE') {
+            total += (order.price_ea || 0) * (order.qty || 1);
+        }
+    });
+    
+    const totalEl = document.getElementById('modal-total-credit');
+    if (totalEl) {
+        totalEl.textContent = formatUSD(total);
+        totalEl.classList.add('modified');
+    }
 }
 
 function updateTradeTimer() {
@@ -583,7 +744,8 @@ function updateTradeTimer() {
 function updateTradeTimerUI() {
     const bar = document.getElementById('modal-timer-bar');
     const stat = document.getElementById('modal-timer-stat');
-    const pct = Math.max(0, (tradeTimeLeft / TRADE_TIMEOUT_SEC) * 100);
+    const maxTime = window.currentTradeMaxTime || TRADE_TIMEOUT_SEC;
+    const pct = Math.max(0, (tradeTimeLeft / maxTime) * 100);
     
     if (bar) bar.style.width = pct + '%';
     if (stat) stat.textContent = isTradeTimerPaused ? 'Timer Paused' : `Auto-sending in ${tradeTimeLeft}s`;
@@ -597,9 +759,19 @@ function updateTradeTimerUI() {
 }
 
 function toggleTradeTimer() {
+    console.log("Toggle Timer Clicked");
     isTradeTimerPaused = !isTradeTimerPaused;
     const btn = document.getElementById('modal-pause-btn');
     if (btn) btn.textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
+    
+    // Notify server to pause/resume auto-confirm timer (Issue 20 Fix)
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+            action: 'toggle_trade_pause',
+            is_paused: isTradeTimerPaused
+        }));
+    }
+    
     updateTradeTimerUI();
 }
 
@@ -608,27 +780,50 @@ function closeTradeModal() {
         clearInterval(tradeTimer);
         tradeTimer = null;
     }
+    isTradeTimerPaused = false;
     const modal = document.getElementById('trade-modal');
     if (modal) modal.classList.remove('show');
 }
 
 function dismissTrade() {
-    console.log("Trade dismissed");
+    console.log("Dismiss Trade Clicked");
+    const stratId = window.currentModalStratId;
     if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
-            action: 'dismiss_trade',
-            strat_id: window.currentModalStratId
-        }));
+        socket.send(JSON.stringify({ action: 'dismiss_trade', strat_id: stratId }));
+    } else {
+        // WS not open — queue dismiss to retry on reconnect so backend doesn't auto-execute
+        pendingDismissStratId = stratId;
+        console.warn(`WS not open — dismiss for ${stratId} queued for reconnect`);
     }
     closeTradeModal();
 }
 
+function disableTradingFromModal() {
+    if (confirm("⚠️ Are you sure you want to STOP ALL TRADING?\n\nThis will disable the trading flag and dismiss the current order. No further trades will be processed until re-enabled.")) {
+        // 1. Disable trading flag via API
+        fetch('/api/trading/toggle', { method: 'POST' })
+            .then(() => {
+                // 2. Dismiss the current modal
+                dismissTrade();
+                console.log("Trading disabled from modal.");
+            })
+            .catch(err => {
+                console.error("Failed to disable trading:", err);
+                alert("Error disabling trading. Please check console.");
+            });
+    }
+}
+
 function confirmLiveTrade() {
-    console.log("Order confirmed");
+    console.log("Confirm Trade Clicked");
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
             action: 'confirm_trade',
-            strat_id: window.currentModalStratId
+            strat_id: window.currentModalStratId,
+            overrides: currentTradeOrders.map(o => ({
+                idx: o.idx,
+                price_ea: o.price_ea
+            }))
         }));
     }
     closeTradeModal();
@@ -647,45 +842,89 @@ window.demoTradeConfirmation = function() {
 };
 
 let lastLogCount = 0;
+let lastLogMsg = null;
 function updateLogs(logs) {
     const consoleEl = document.getElementById('log-console');
     if (!logs || logs.length === 0) return;
     
-    if (logs.length < lastLogCount) {
-        consoleEl.innerHTML = '';
-        lastLogCount = 0;
+    // If the list of logs is completely different or we haven't seen any, we might need a full reset
+    const newLength = logs.length;
+    let newLogs = [];
+
+    if (lastLogCount === 0 || logs[logs.length - 1] !== lastLogMsg) {
+        // Find where the new logs start by searching from the end for the last known message
+        let splitIdx = -1;
+        if (lastLogMsg) {
+            for (let i = logs.length - 1; i >= 0; i--) {
+                if (logs[i] === lastLogMsg) {
+                    splitIdx = i;
+                    break;
+                }
+            }
+        }
+        
+        newLogs = logs.slice(splitIdx + 1);
+        
+        // If we found NO overlap and it's not the first time, or it's a server reset
+        if (splitIdx === -1 && lastLogCount > 0) {
+            consoleEl.innerHTML = ''; // Start fresh if we lost sync
+            newLogs = logs;
+        }
+    } else {
+        return; // No new logs
     }
 
-    const newLogs = logs.slice(lastLogCount);
     newLogs.forEach(msg => {
         const entry = document.createElement('div');
         entry.className = 'log-entry';
         
         let levelClass = '';
-        if (msg.includes('ERROR')) levelClass = 'red';
-        else if (msg.includes('WARNING')) levelClass = 'orange';
+        if (msg.includes('ERROR')) {
+            levelClass = 'red';
+            playSound('error');
+        }
+        else if (msg.includes('WARNING')) {
+            levelClass = 'orange';
+            playSound('info');
+        }
         else if (msg.includes('INFO')) levelClass = 'primary';
         
         entry.innerHTML = `<span class="${levelClass}">${msg}</span>`;
-        consoleEl.prepend(entry);
+        consoleEl.prepend(entry); // Prepend to keep NEWEST at top
     });
     
     lastLogCount = logs.length;
+    lastLogMsg = logs[logs.length - 1];
 }
 
 function clearLogs() {
     document.getElementById('log-console').innerHTML = '';
-    lastLogCount = 0;
+    // We leave lastLogCount/Msg as-is so only NEW messages appear after clear
 }
 
 // Action Buttons
 document.getElementById('toggle-trading-btn').addEventListener('click', () => {
-    fetch('/api/trading/toggle', { method: 'POST' });
+    const statusEl = document.getElementById('trading-status');
+    const isEnabled = statusEl.textContent === 'ENABLED';
+    const action = isEnabled ? 'DISABLE' : 'ENABLE';
+    
+    if (confirm(`⚠️ Are you sure you want to ${action} live trading?\n\n${isEnabled ? 'This will stop all live execution.' : 'This will allow the system to send live orders to Schwab.'}`)) {
+        fetch('/api/trading/toggle', { method: 'POST' });
+    }
 });
 
 document.getElementById('reconnect-broker-btn').addEventListener('click', () => {
-    fetch('/api/trading/reconnect', { method: 'POST' });
+    const statusEl = document.getElementById('broker-status');
+    const isLive = statusEl.textContent === 'LIVE';
+    const msg = isLive 
+        ? '⚠️ Broker is currently LIVE. Reconnecting will reset the session and potentially lose real-time sync for a few seconds. Proceed?'
+        : 'Reconnect to Schwab API?';
+        
+    if (confirm(msg)) {
+        fetch('/api/trading/reconnect', { method: 'POST' });
+    }
 });
 
 initCharts();
+initMuteUI();
 connect();

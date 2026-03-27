@@ -30,8 +30,8 @@ def load_power_law_data():
 def calculate_delta_decay(timestamp: dt.datetime, side: str, init_leg_delta: float, 
                          start_time: dt.time, end_time: dt.time) -> float:
     base_date = timestamp.date()
-    start_dt = dt.datetime.combine(base_date, start_time)
-    end_dt = dt.datetime.combine(base_date, end_time)
+    start_dt = dt.datetime.combine(base_date, start_time, tzinfo=timestamp.tzinfo)
+    end_dt = dt.datetime.combine(base_date, end_time, tzinfo=timestamp.tzinfo)
     total_seconds = (end_dt - start_dt).total_seconds()
     elapsed_seconds = (timestamp - start_dt).total_seconds()
     time_fraction = max(0.0, min(1.0, elapsed_seconds / total_seconds))

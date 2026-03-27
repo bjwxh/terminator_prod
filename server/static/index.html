@@ -23,7 +23,22 @@
             <span class="label">Trading:</span>
             <span id="trading-status" class="value status-disabled">DISABLED</span>
         </div>
+        <div class="status-item">
+            <span class="label">Exchange:</span>
+            <span id="exchange-time" class="value">--:--:--</span>
+        </div>
+        <div class="status-item">
+            <span class="label">SPX:</span>
+            <span id="spx-price" class="value">----.--</span>
+        </div>
+        <div class="status-item">
+            <span class="label">VIX:</span>
+            <span id="vix-price" class="value">----.--</span>
+        </div>
         <div class="actions">
+            <button id="mute-toggle-btn" class="btn btn-secondary" title="Mute/Unmute Sounds" style="padding: 0.5rem 0.7rem; font-size: 1.1rem; display: flex; align-items: center; justify-content: center;">
+                <span id="mute-icon">🔔</span>
+            </button>
             <button id="toggle-trading-btn" class="btn btn-secondary">Enable trading</button>
             <button id="reconnect-broker-btn" class="btn btn-secondary">Reconnect Broker</button>
         </div>
@@ -200,10 +215,6 @@
                 <div class="data-group">
                     <div class="split-header">
                         <h3>Recent Trades</h3>
-                        <div class="trade-legend">
-                            <span class="legend-item live">LIVE</span>
-                            <span class="legend-item sim">SIM</span>
-                        </div>
                     </div>
                     <div class="trades-grid">
                         <div class="table-container">
@@ -340,6 +351,11 @@
                 <span id="modal-timer-stat" class="timer-stat">Auto-sending in 10s</span>
             </div>
             <div class="modal-body">
+                <div id="modal-total-section" class="total-summary-box" style="margin-top: 0; margin-bottom: 1.5rem;">
+                    <span class="label">Total Est. Credit</span>
+                    <span id="modal-total-credit" class="value highlight">$0.00</span>
+                </div>
+                
                 <div class="trade-info-header">
                     <div id="modal-strat-title" class="trade-main-title">Strategy Execution: SPX-DEMO</div>
                     <div class="trade-sub-desc">Multi-order Confirmation Requested</div>
@@ -348,13 +364,9 @@
                 <div id="modal-order-list" class="order-list-container">
                     <!-- Orders will be injected here as .trade-details-box -->
                 </div>
-
-                <div id="modal-total-section" class="total-summary-box">
-                    <span class="label">Total Est. Credit</span>
-                    <span id="modal-total-credit" class="value highlight">$0.00</span>
-                </div>
             </div>
             <div class="modal-footer">
+                <button class="btn btn-danger" onclick="disableTradingFromModal()">⚠️ Stop & Disable</button>
                 <button class="btn btn-secondary" onclick="dismissTrade()">Dismiss Trade</button>
                 <button id="modal-pause-btn" class="btn btn-secondary" onclick="toggleTradeTimer()">Pause Timer</button>
                 <button id="modal-confirm-btn" class="btn btn-primary" onclick="confirmLiveTrade()">🚀 Send Order Now</button>

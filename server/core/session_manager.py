@@ -4,6 +4,8 @@ import json
 import os
 import logging
 from datetime import datetime, date, time
+from zoneinfo import ZoneInfo
+CHICAGO = ZoneInfo("America/Chicago")
 from typing import Optional, Dict, Any, List
 from .models import SubStrategy, Portfolio, OptionLeg, Trade, TradePurpose
 
@@ -32,13 +34,14 @@ class SessionManager:
         try:
             state = {
                 'version': 1,
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.now(CHICAGO).isoformat(),
                 'date': monitor.startup_time.date().isoformat(),
                 'sub_strategies': self._serialize_sub_strategies(monitor.sub_strategies),
                 'combined_portfolio': self._serialize_portfolio(monitor.combined_portfolio),
                 'live_combined_portfolio': self._serialize_portfolio(monitor.live_combined_portfolio),
                 'sent_order_ids': list(monitor.sent_order_ids),
-                'order_to_strategy': monitor.order_to_strategy
+                'order_to_strategy': monitor.order_to_strategy,
+                'trading_enabled': monitor.trading_enabled
             }
             
             temp_path = self.file_path + ".tmp"
@@ -107,7 +110,10 @@ class SessionManager:
             'short_put_strike': p.short_put_strike,
             'long_put_strike': p.long_put_strike,
             'positions': [self._serialize_leg(l) for l in p.positions],
-            'trades': [self._serialize_trade(t) for t in p.trades]
+            'trades': [self._serialize_trade(t) for t in p.trades],
+            'total_contracts': p.total_contracts,
+            'gross_pnl': p.gross_pnl,
+            'net_pnl': p.net_pnl
         }
 
     def _serialize_leg(self, l: OptionLeg) -> Dict[str, Any]:
@@ -119,6 +125,7 @@ class SessionManager:
             'delta': l.delta,
             'theta': l.theta,
             'price': l.price,
+            'entry_price': l.entry_price,
             'bid_price': l.bid_price,
             'ask_price': l.ask_price
         }
@@ -140,6 +147,7 @@ class SessionManager:
         """Restore monitor state from loaded dict"""
         monitor.sent_order_ids = set(state.get('sent_order_ids', []))
         monitor.order_to_strategy = state.get('order_to_strategy', {})
+        monitor.trading_enabled = state.get('trading_enabled', False)
 
         
         # Restore sub-strategies
@@ -153,6 +161,10 @@ class SessionManager:
         
         # Restore combined portfolio
         self._restore_portfolio(monitor.combined_portfolio, state['combined_portfolio'])
+        
+        # Restore live combined portfolio (Fix for Live PnL Chart Discrepancy)
+        if 'live_combined_portfolio' in state:
+            self._restore_portfolio(monitor.live_combined_portfolio, state['live_combined_portfolio'])
 
     def _restore_portfolio(self, p: Portfolio, p_data: Dict[str, Any]):
         p.cash = p_data['cash']
@@ -180,6 +192,7 @@ class SessionManager:
             delta=l_data['delta'],
             theta=l_data['theta'],
             price=l_data['price'],
+            entry_price=l_data.get('entry_price', l_data['price']),
             bid_price=l_data['bid_price'],
             ask_price=l_data['ask_price']
         )

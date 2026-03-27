@@ -6,12 +6,15 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from datetime import datetime, date, time, timedelta, timezone
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Any
 from collections import defaultdict, OrderedDict
+from itertools import combinations
 import threading
 import traceback
 import queue
+import random
 from zoneinfo import ZoneInfo
+CHICAGO = ZoneInfo("America/Chicago")
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -22,6 +25,7 @@ import math
 from pathlib import Path
 import schwab
 from schwab.auth import easy_client
+from schwab.streaming import StreamClient
 from schwab import utils as schwab_utils
 from schwab.orders.options import (
     option_buy_to_open_limit, option_buy_to_close_limit,
@@ -41,9 +45,12 @@ from .utils import calculate_delta_decay
 from .session_manager import SessionManager
 
 try:
-    from ..notifications import notify_all
+    from notifications import notify_all
 except (ImportError, ValueError):
     # Fallback for standalone or testing
+    import logging
+    _fallback_log = logging.getLogger("LiveTradingMonitor")
+    _fallback_log.warning("CRITICAL: Failed to load notification engine! Email alerts will be disabled.")
     async def notify_all(*args, **kwargs): pass
 
 # Mocking Schwab until actual client is ready
@@ -94,6 +101,7 @@ class LiveTradingMonitor:
         self.active_order_signals: Set[str] = set() # Track strategy_ids currently in order_queue
         self.working_strategy_ids: Set[str] = set() # Track strategy_ids with working orders at broker
         self.live_closed_day_pnl = 0.0
+        self.price_overrides: Dict[str, Dict[int, float]] = {} # Task #28: sid -> {chunk_idx: price_ea}
         
         self.trading_enabled = False # New toggle for live trading vs sim only
         self.working_orders = [] # Shared cache for GUI
@@ -101,40 +109,158 @@ class LiveTradingMonitor:
         
         # Broker Heartbeat State
         self.broker_connected = False
+        self.broker_reconnecting = False
         self.heartbeat_failures = 0
         self.heartbeat_running = False
         
         # Trade Confirmation State (Interactive Modal Support)
         self.pending_trade: Optional[Trade] = None
         self._pending_trade_confirmed = False
-        self.confirmation_event = asyncio.Event()
+        self.is_trade_timer_paused = False # Issue 20: support pausing auto-confirm
+        self.confirmation_event = asyncio.Event() 
+        self._queued_purposes: Set[TradePurpose] = set() # Bug 8 tracker
+        self._sim_dirty: bool = True # P4 tracker
 
         # Session persistence
-        self.startup_time = datetime.now()
+        self.startup_time = datetime.now(CHICAGO)
         self.forced_shutdown_requested = False
         self.session_manager = SessionManager(self.config['session_file_path'])
         
         self.is_running = False
-        self._stop_event = asyncio.Event()
-        self.reconciliation_event = asyncio.Event() # Triggered by sim trades
+        self._stop_event = asyncio.Event() # Re-bound in run_live_monitor (Bug 2)
+        self.reconciliation_event = asyncio.Event() # Re-bound in run_live_monitor (Bug 2)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._recon_task = None
         self.status = "Stopped" 
-        self._option_cache = OrderedDict() # Issue 11: LRU-style cache
-        self.order_queue = asyncio.Queue()
+        self._option_cache: Dict[Tuple, Any] = {} # P6: Clear per tick
+        self.order_queue: Optional[asyncio.Queue] = None  # Re-bound in run_live_monitor (same pattern as Bug 2)
         self.stats = TradeStats() # Enhancement 2: Trading Statistics
         self._last_snap: Optional[pd.DataFrame] = None # Cache for Greeks
         self._greek_cache: Dict[Tuple[str, int, str], Tuple[float, float]] = {} # (symbol, strike, side) -> (delta, theta)
         
         # Resolve DB path relative to project root if it's relative
-        db_path = self.config.get('db_path', 'data/spx_0dte.db')
-        if not os.path.isabs(db_path):
+        self.db_path = self.config.get('db_path', 'data/spx_0dte.db')
+        if not os.path.isabs(self.db_path):
             root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-            db_path = os.path.join(root, db_path)
-        self.config['db_path'] = db_path
+            self.db_path = os.path.join(root, self.db_path)
         self._peak_equity = 0.0 # Initializing peak equity for stats
         self.session_history: List[Dict] = [] # Time-series for charts: {ts, spx, sim_pnl, live_pnl}
         self._last_spx_price: Optional[float] = None # Latest SPX estimate
-        self.logger.info(f"Monitor initialized with DB: {db_path}")
+        self._last_vix_price: Optional[float] = None
+        self.stream_client: Optional[StreamClient] = None
+        self.last_dismissed_recon_time: float = 0 # Cooldown for GAP_SYNC (Bug 16 Fix)
+        # Scalability #6: Tracker for periodic saves (5min)
+        self._last_save_time: float = 0 
+        self.logger.info(f"Monitor initialized with DB: {self.db_path}")
+
+    def set_trading_enabled(self, enabled: bool):
+        """Managed toggle for trading to ensure state consistency (Bug 13 Fix)"""
+        self.trading_enabled = enabled
+        action = "ENABLED" if enabled else "DISABLED"
+        self.logger.info(f"Trading has been {action} manually.")
+        
+        if not enabled:
+            # 1. Stop any currently waiting modal from returning on refresh (Bug 16 Fix)
+            if self.pending_trade:
+                self.logger.info(f"Aborting active trade {self.pending_trade.strategy_id} due to disable.")
+                # We don't null it here (loop will do it), but we ensure the UI doesn't see it
+                # Actually, set it to None here just to be safe for websocket reconnects
+                self.pending_trade = None
+                self._pending_trade_confirmed = False
+                self.confirmation_event.set() # Wake up the loop to clean up state
+
+            # 2. Clear the order queue so no further popups occur (Bug 1 Fix)
+            cleared_count = 0
+            if self.order_queue is not None:
+                while not self.order_queue.empty():
+                    try:
+                        t = self.order_queue.get_nowait()
+                        self.order_queue.task_done()
+                        cleared_count += 1
+                        # Cleanup trackers
+                        if t.strategy_id in self.active_order_signals:
+                            self.active_order_signals.remove(t.strategy_id)
+                        if t.purpose in self._queued_purposes:
+                            self._queued_purposes.remove(t.purpose)
+                    except:
+                        break
+            if cleared_count > 0:
+                self.logger.info(f"Cleared {cleared_count} pending trades from queue upon disabling.")
+
+    def get_trade_signal_payload(self, trade: Trade) -> Dict:
+        """Centralized helper to build consistent UI signals for a trade (Bug 15 Fix)"""
+        plan = self.create_execution_plan(trade)
+        orders_data = []
+        
+        # 1. New Orders being submitted (matching logic in run_order_execution_loop)
+        for i, chunk in enumerate(plan['to_submit']):
+            rolled = self._roll_legs(chunk)
+            chunk_credit = sum(-l.quantity * l.price for l in rolled) * 100
+            leg_qtys = [abs(l.quantity) for l in rolled]
+            num_units = leg_qtys[0]
+            for q in leg_qtys[1:]: num_units = math.gcd(num_units, q)
+            
+            leg_texts = []
+            for l in rolled:
+                side = "SHORT" if l.quantity < 0 else "LONG"
+                leg_texts.append(f"{side} {l.side} {int(l.strike)} x{abs(l.quantity)//num_units}")
+            
+            orders_data.append({
+                "type": "TRADE",
+                "idx": i,
+                "qty": num_units,
+                "desc": " | ".join(leg_texts),
+                "credit": f"${abs(chunk_credit/100.0/num_units):.2f} {'Cr' if chunk_credit >= 0 else 'Db'} (ea)",
+                "price_ea": chunk_credit/100.0/num_units # Numeric signed value: + = Cr, - = Db
+            })
+        
+        # 2. Orders being cancelled
+        for wo in plan['to_cancel']:
+            orders_data.append({
+                "type": "CANCEL",
+                "qty": wo.get('quantity'),
+                "desc": f"Order ID: {wo.get('orderId')}",
+                "credit": "N/A",
+                "price_ea": 0.0
+            })
+            
+        return {
+            "type": "trade_signal",
+            "strat_id": trade.strategy_id,
+            "purpose": trade.purpose.value,
+            "total_credit": f"${abs(trade.credit/100.0):.2f} {'Credit' if trade.credit >= 0 else 'Debit'}",
+            "orders": orders_data,
+            "is_paused": self.is_trade_timer_paused,
+            "timeout": self.config.get('order_auto_execute_timeout', 20)
+        }
+
+    def _get_portfolio_summary_text(self) -> str:
+        """Helper to generate a text summary for alerts (Bug 30 Fix)"""
+        with self._data_lock:
+            # Stats
+            sim_pnl = self.combined_portfolio.net_pnl
+            live_pnl = self.live_combined_portfolio.net_pnl
+            total_trades = self.stats.total_trades
+            
+            # Holdings
+            def format_h(p):
+                if not p.positions: return " - Empty"
+                lines = []
+                for l in p.positions:
+                    side = "SHORT" if l.quantity < 0 else "LONG"
+                    lines.append(f" - {side} {l.side} {int(l.strike)} x{abs(l.quantity)}")
+                return "\n".join(lines)
+            
+            sim_h = format_h(self.combined_portfolio)
+            live_h = format_h(self.live_combined_portfolio)
+            
+        return (
+            f"--- PORTFOLIO SUMMARY ---\n"
+            f"SIM PnL: ${sim_pnl:,.2f} (Total Session Trades: {total_trades})\n"
+            f"LIVE PnL: ${live_pnl:,.2f}\n\n"
+            f"SIM HOLDINGS:\n{sim_h}\n\n"
+            f"LIVE HOLDINGS:\n{live_h}"
+        )
 
     def _broadcast_alert(self, level: str, title: str, message: str):
         """Helper to broadcast alerts via WebSocket for UI sound and notifications."""
@@ -149,6 +275,8 @@ class LiveTradingMonitor:
                         "message": message
                     }), self._loop
                 )
+            else:
+                self.logger.warning(f"Alert dropped (loop not ready): [{level}] {title} — {message}")
         except Exception as e:
             self.logger.error(f"Failed to broadcast alert: {e}")
 
@@ -174,6 +302,13 @@ class LiveTradingMonitor:
     async def run_live_monitor(self):
         """Main lifecycle entry point for the background monitor."""
         self._loop = asyncio.get_running_loop()
+        
+        # Bug 2 + BUG-R2-2: Create asyncio primitives inside the running loop
+        self.confirmation_event = asyncio.Event()
+        self._stop_event = asyncio.Event()
+        self.reconciliation_event = asyncio.Event()
+        self.order_queue = asyncio.Queue()
+        
         self.is_running = True
         self.logger.info("Starting live monitor thread...")
         self.status = "Initializing..."
@@ -183,21 +318,23 @@ class LiveTradingMonitor:
                 # 0. Startup notification
                 await notify_all(self.config, "Monitor Started", title="Terminator Live")
                 
-                # 1. Start Support Tasks
-                tg.create_task(self.run_broker_heartbeat())
-                tg.create_task(self._run_health_check_server()) # Enhancement 1: Health Check
+                # 1. Start Support Tasks with self-restarting loops (Robustness-1 Fix)
+                tg.create_task(self._safe_task("HealthCheck", self._run_health_check_server))
                 
                 # 2. Main Strategy Logic (30s cadence)
-                tg.create_task(self._monitoring_loop())
+                tg.create_task(self._safe_task("Monitoring", self._monitoring_loop))
                 
                 # 3. Dedicated Reconciliation Logic (Unified GAP_SYNC)
-                tg.create_task(self.run_reconciliation_loop())
+                tg.create_task(self._safe_task("Reconciliation", self.run_reconciliation_loop))
 
                 # 4. High-Frequency Broker Sync (5s cadence)
-                tg.create_task(self._broker_sync_loop())
+                tg.create_task(self._safe_task("BrokerSync", self._broker_sync_loop))
 
-                # 5. Order Execution Loop (Option A - Auto-execute)
-                tg.create_task(self.run_order_execution_loop())
+                # 5. Real-time Index Streaming ($SPX, $VIX)
+                tg.create_task(self._safe_task("IndexStreamer", self._run_index_streaming_loop))
+
+                # 6. Order Execution Loop
+                tg.create_task(self._safe_task("OrderExecution", self.run_order_execution_loop))
                 
         except Exception as e:
             if not isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):
@@ -205,6 +342,19 @@ class LiveTradingMonitor:
                 self.logger.error(f"Fatal task failure in TaskGroup: {e}\n{traceback.format_exc()}")
             self.is_running = False
             asyncio.create_task(notify_all(self.config, f"Monitor Stopped: {self.status}", title="Terminator Live", priority="urgent"))
+
+    async def _safe_task(self, name, coro_func):
+        """Robustness-1 Fix: Wrap each task in a self-restarting loop"""
+        while self.is_running:
+            try:
+                await coro_func()
+            except asyncio.CancelledError:
+                self.logger.info(f"{name} task cancelled.")
+                break
+            except Exception as e:
+                self.logger.error(f"{name} task crashed, restarting in 5s: {e}")
+                self.logger.error(traceback.format_exc())
+                await asyncio.sleep(5)
 
     async def run_reconciliation_loop(self):
         """Unified path for execution: Waits for 'pokes' or runs periodically on timeout."""
@@ -235,6 +385,8 @@ class LiveTradingMonitor:
                 snap = await self.get_live_options_data()
                 if snap is not None:
                     await self._check_reconciliation(snap)
+                    # Bug 8 Fix: Ensure combined sim matches sum of sub-strategies
+                    self._reconcile_combined_simulation()
 
             except asyncio.CancelledError:
                 break
@@ -255,72 +407,101 @@ class LiveTradingMonitor:
 
                 # Interactive Confirmation Loop
                 self.pending_trade = trade
+                # Bug 8 Tracker: Clear from queue tracker as it's now in active confirmation (pending_trade)
+                with self._data_lock:
+                    if trade.purpose in self._queued_purposes:
+                        self._queued_purposes.discard(trade.purpose)
+                
                 self._pending_trade_confirmed = False
                 self.confirmation_event.clear()
                 
                 self.logger.info(f"Awaiting confirmation for trade: {trade.strategy_id} ({trade.purpose})")
                 
-                # Build REFINED payload for showTradeModal in app.js
-                plan = self.create_execution_plan(trade)
-                orders_data = []
+                # Build REFINED payload for showTradeModal in app.js (Bug 15 Fix: extracted to helper)
+                msg = self.get_trade_signal_payload(trade)
                 
-                # 1. New Orders being submitted
-                for i, chunk in enumerate(plan['to_submit']):
-                    rolled = self._roll_legs(chunk)
-                    chunk_credit = sum(-l.quantity * l.price for l in rolled) * 100
-                    leg_qtys = [abs(l.quantity) for l in rolled]
-                    num_units = leg_qtys[0]
-                    for q in leg_qtys[1:]: num_units = math.gcd(num_units, q)
-                    
-                    leg_texts = []
-                    for l in rolled:
-                        side = "SHORT" if l.quantity < 0 else "LONG"
-                        leg_texts.append(f"{side} {l.side} {int(l.strike)} x{abs(l.quantity)//num_units}")
-                    
-                    orders_data.append({
-                        "type": "TRADE",
-                        "qty": num_units,
-                        "desc": " | ".join(leg_texts),
-                        "credit": f"${abs(chunk_credit/100.0/num_units):.2f} {'Cr' if chunk_credit >= 0 else 'Db'} (ea)"
-                    })
-                
-                # 2. Orders being cancelled
-                for wo in plan['to_cancel']:
-                    orders_data.append({
-                        "type": "CANCEL",
-                        "qty": wo.get('quantity'),
-                        "desc": f"Order ID: {wo.get('orderId')}",
-                        "credit": "N/A"
-                    })
-
                 # Notify UI to show modal
                 from api.ws import manager
                 if manager.active_connections:
-                    asyncio.create_task(manager.broadcast({
-                        "type": "trade_signal",
-                        "strat_id": trade.strategy_id,
-                        "purpose": trade.purpose.value,
-                        "total_credit": f"${abs(trade.credit/100.0):.2f} {'Credit' if trade.credit >= 0 else 'Debit'}",
-                        "orders": orders_data
-                    }))
+                    asyncio.create_task(manager.broadcast(msg))
                 
-                # Wait for UI confirmation (or auto-send from UI countdown)
-                await self.confirmation_event.wait()
+                # BUG 30: Also notify via push/email when signal appears (not just when filled)
+                # This provides the user with the snapshot summary for context
+                try:
+                    summ = self._get_portfolio_summary_text()
+                    asyncio.create_task(notify_all(
+                        self.config, 
+                        f"New trade needed: {trade.strategy_id} ({trade.purpose.value}) for ${abs(trade.credit/100.0):.2f}", 
+                        title="Trade Signal ALERT",
+                        email_body=f"Trade required for strategy: {trade.strategy_id}\n\n{summ}"
+                    ))
+                except Exception as ne:
+                    self.logger.error(f"Failed to generate/send trade signal notification: {ne}")
+
+                # Wait for UI confirmation (or auto-confirm in headless mode)
+                confirmed = False
+                # Server-side safety timeout should be slightly longer than UI countdown 
+                # to allow the browser's confirm message to arrive. (Bug 15 Fix)
+                ui_timeout = self.config.get('order_auto_execute_timeout', 20)
+                timeout = self.config.get('auto_confirm_timeout', ui_timeout + 10)
                 
-                if self._pending_trade_confirmed:
-                    self.logger.info(f"Confirmed! Executing trade for {trade.strategy_id}...")
+                # BUG 3 Fix: Support "Pause" by replacing wait_for with a manual interval loop
+                elapsed_while_active = 0.0
+                while self.is_running:
+                    try:
+                        # Check for confirmation/dismissal every 0.1s
+                        await asyncio.wait_for(self.confirmation_event.wait(), timeout=0.1)
+                        confirmed = self._pending_trade_confirmed
+                        break
+                    except asyncio.TimeoutError:
+                        # 5-second cadence check (matches broker sync frequency)
+                        if int(elapsed_while_active * 10) % 50 == 0:
+                            if self._is_trade_redundant(trade):
+                                self.logger.info(f"Trade for {trade.strategy_id} is no longer needed (filled manually?). Auto-dismissing.")
+                                confirmed = False
+                                self._pending_trade_confirmed = False
+                                # Notify UI to close modal
+                                from api.ws import manager
+                                asyncio.create_task(manager.broadcast({"type": "trade_action", "action": "close_modal", "strat_id": trade.strategy_id}))
+                                break
+
+                        if not self.is_trade_timer_paused:
+                            elapsed_while_active += 0.1
+                            if timeout > 0 and elapsed_while_active >= timeout:
+                                # Re-check redundancy one last time before auto-exec! (Safety-1 Fix)
+                                if self._is_trade_redundant(trade):
+                                    self.logger.warning(f"Timeout for {trade.strategy_id}, but trade is now redundant. Aborting!")
+                                    confirmed = False
+                                    break
+                                    
+                                self.logger.warning(f"Confirmation timeout for {trade.strategy_id} at {elapsed_while_active:.1f}s / {timeout}s. Auto-executing!")
+                                confirmed = True
+                                break
+                        else:
+                            # Still paused
+                            if int(elapsed_while_active * 10) % 50 == 0: # Log every 5 seconds while paused
+                                self.logger.debug(f"Trade {trade.strategy_id} remains PAUSED. Time already elapsed: {elapsed_while_active:.1f}s")
+                        continue
+                
+                # Cleanup BEFORE notifying reconciliation (prevents race condition)
+                self.pending_trade = None
+                self.is_trade_timer_paused = False
+                self.order_queue.task_done()
+
+                if confirmed:
+                    self.logger.info(f"Executing trade for {trade.strategy_id}...")
                     await self.execute_net_trade(trade)
                     # Broadcast success alert
-                    self._broadcast_alert("success", "Trade Confirmed", f"Sent {len(trade.legs)} legs for {trade.strategy_id}.")
+                    self._broadcast_alert("success", "Trade Executed", f"Sent {len(trade.legs)} legs for {trade.strategy_id}.")
                 else:
-                    self.logger.info(f"Trade for {trade.strategy_id} was dismissed correctly.")
+                    self.logger.info(f"Trade for {trade.strategy_id} was dismissed/rejected.")
+                    trade.status = "cancelled"
+                    if trade.purpose == TradePurpose.RECONCILIATION:
+                        from time import time
+                        self.last_dismissed_recon_time = time()
                     # POKE reconciliation again to re-evaluate the GAP
                     self.reconciliation_event.set()
-                    self._broadcast_alert("info", "Trade Dismissed", f"Trade for {trade.strategy_id} was cancelled by user.")
-                
-                # Cleanup
-                self.pending_trade = None
-                self.order_queue.task_done()
+                    self._broadcast_alert("info", "Trade Dismissed", f"Trade for {trade.strategy_id} was cancelled/dismissed.")
 
             except asyncio.CancelledError:
                 break
@@ -331,41 +512,59 @@ class LiveTradingMonitor:
     async def _monitoring_loop(self):
         """Isolated monitoring logic extracted for TaskGroup context"""
         try:
-            now = datetime.now()
-            catch_up_start = datetime.combine(now.date(), time(8, 30))
+            now = datetime.now(CHICAGO)
+            catch_up_start = datetime.combine(now.date(), time(8, 30), CHICAGO)
             
             session_state = self.session_manager.load_session()
+            catch_up_start_today = catch_up_start # Baseline 8:30
             if session_state:
                 self.logger.info("Found existing session for today. Restoring...")
                 self.session_manager.restore_monitor(self, session_state)
-                if 'timestamp' in session_state:
-                    try:
-                        file_ts = datetime.fromisoformat(session_state['timestamp'].replace('Z', '+00:00'))
-                        if file_ts.date() == now.date():
-                            catch_up_start = max(catch_up_start, file_ts)
-                            self.logger.info(f"Resuming catch-up from session timestamp: {catch_up_start}")
-                    except Exception as e:
-                        self.logger.warning(f"Could not parse session timestamp: {e}")
+                # Note: We still rebuild history from 8:30 regardless of timestamp to ensure chart continuity
             
-            # 1. Catch-up via simulation (Sim Mode)
-            db_path = self.config.get('db_path')
-            if now > catch_up_start and db_path and os.path.exists(db_path) and db_path != '/dev/null':
+            # 1. ALWAYS Catch-up from 08:30 AM via simulation to rebuild full history
+            db_path = self.db_path
+            bootstrap_mode = self.config.get('bootstrap_mode', 'soft')
+            
+            if now.time() >= time(8, 30) and db_path and os.path.exists(db_path) and db_path != '/dev/null':
                 self.status = "Catching up..."
                 try:
-                    history = await self._run_historical_simulation(catch_up_start, now, collect_history=True)
+                    # Collect TRUE broker trades from restored live portfolio for the Live replay
+                    # Issue Fix: We used to use s.portfolio.trades (Sim) which caused curves to overlap
                     with self._data_lock:
-                        # Ensure we only keep history from 8:30 AM onwards for today
+                        broker_trades = list(self.live_combined_portfolio.trades)
+                    
+                    # Reset portfolios for a clean replay from 08:30
+                    with self._data_lock:
+                        self.combined_portfolio = Portfolio()
+                        self.live_combined_portfolio = Portfolio()
+                        for sid, s in self.sub_strategies.items():
+                            s.portfolio = Portfolio()
+                            s.has_traded_today = False
+                    
+                    self.logger.info(f"Rebuilding full history from 08:30 AM (Mode: {bootstrap_mode})...")
+                    self.logger.info(f"Bootstrap debug: found {len(broker_trades)} broker trades for replay.")
+                    if broker_trades:
+                        self.logger.info(f"First broker trade: {broker_trades[0].timestamp} - {broker_trades[0].purpose}")
+                        
+                    history = await self._run_historical_simulation(
+                        catch_up_start_today, now, 
+                        live_trades=broker_trades, 
+                        mode=bootstrap_mode,
+                        collect_history=True
+                    )
+                    with self._data_lock:
                         self.session_history = history if history else []
                 except Exception as e:
-                    self.logger.error(f"Catch-up simulation failed: {e}")
+                    self.logger.error(f"Catch-up simulation failed: {e}\n{traceback.format_exc()}")
             else:
-                self.logger.info("Skipping historical catch-up (Live mode or no Database).")
+                self.logger.info("Skipping historical catch-up (Before market open or no Database).")
             
             self.status = "Running"
 
             while self.is_running:
                 # 0. Overnight Sentinel Check (Requirement #3)
-                now_check = datetime.now()
+                now_check = datetime.now(CHICAGO)
                 if now_check.date() > self.startup_time.date() and now_check.time() >= time(8, 0):
                     self.logger.warning("Overnight session detected (8:00 AM threshold). Initiating forced shutdown.")
                     self.trading_enabled = False
@@ -384,7 +583,7 @@ class LiveTradingMonitor:
                     # Estimate SPX if not already done in monitor_step
                     spx = self._last_spx_price if hasattr(self, '_last_spx_price') else None
                     self.session_history.append({
-                        'ts': datetime.now().isoformat(),
+                        'ts': datetime.now(CHICAGO).isoformat(),
                         'spx': spx,
                         'sim_pnl': round(self.combined_portfolio.net_pnl, 2),
                         'live_pnl': round(self.live_combined_portfolio.net_pnl, 2)
@@ -404,44 +603,96 @@ class LiveTradingMonitor:
             raise
 
     async def _sync_broker_data(self):
-        """Fetch positions, recent trades, and working orders. Clears awaiting_broker_sync flag."""
+        """Fetch positions, recent trades, and working orders using a consolidated 2-call pattern.
+        This also serves as the connection heartbeat."""
         if not self.client or not self.account_hash:
             return
 
         try:
-            # 1. Fetch live SPX positions from Broker
-            broker_positions = await self.get_live_positions()
+            # Current time in Chicago for order filtering
+            now_chi = datetime.now(CHICAGO)
+            today_830 = now_chi.replace(hour=8, minute=30, second=0, microsecond=0)
             
-            # 2. Fetch live recent trades from Broker
-            broker_trades = await self.get_live_trades()
+            # --- CALL 1: Account Balances & Positions ---
+            resp_acc = await self.client.get_account(self.account_hash, fields=['positions'])
             
-            # 3. Fetch working orders to track status
-            working_orders = await self.get_working_orders()
+            # --- CALL 2: Consolidated Orders (Filled + Working) ---
+            # Focus on today's activity from 08:30 AM (Chicago)
+            resp_ord = await self.client.get_orders_for_account(
+                self.account_hash,
+                from_entered_datetime=today_830,
+                to_entered_datetime=now_chi
+            )
 
+            # --- Heartbeat Tracking ---
+            if resp_acc.status_code == 200 and resp_ord.status_code == 200:
+                with self._data_lock:
+                    self.broker_connected = True
+                    self.heartbeat_failures = 0
+            else:
+                self.logger.warning(f"Broker Sync partial failure: Acc {resp_acc.status_code}, Ord {resp_ord.status_code}")
+                # Treat as failure for heartbeat logic
+                raise Exception(f"API Error: Acc={resp_acc.status_code}, Ord={resp_ord.status_code}")
+
+            # --- Data Processing ---
+            ord_data = resp_ord.json()
+            if not isinstance(ord_data, list):
+                self.logger.warning(f"Unexpected orders response format: {type(ord_data)} - data: {str(ord_data)[:200]}")
+                ord_data = []
+
+            acc_data = resp_acc.json().get('securitiesAccount', {})
             with self._data_lock:
-                if broker_positions is not None:
-                    self._update_live_portfolio(broker_positions)
+                # 1. Update Positions
+                broker_positions = acc_data.get('positions', [])
+                self._update_live_portfolio(broker_positions)
 
-                if broker_trades is not None:
-                    self.live_combined_portfolio.trades = broker_trades
-                    # Recalculate live cash from trades to show PnL correctly
-                    self.live_combined_portfolio.cash = sum(t.credit for t in broker_trades)
+                # 2. Update Trades (FILLED today)
+                # Filter locally for trades filled today after 8:30
+                filled_orders = [o for o in ord_data if o.get('status') == 'FILLED']
+                
+                # Convert filled orders to Trade objects
+                broker_trades = []
+                for o in filled_orders:
+                    trades = self._convert_order_to_trade(o)
+                    broker_trades.extend(trades)
 
-                if working_orders is not None:
-                    self.working_orders = working_orders # Cache for GUI
-                    self.working_strategy_ids = {
-                        self.order_to_strategy[str(o['orderId'])] 
-                        for o in working_orders 
-                        if str(o.get('orderId')) in self.order_to_strategy
-                    }
-                    
-                    # CLEARING FLAG: If we were waiting for sync, clear it now that we have fresh data
-                    if self.awaiting_broker_sync:
-                        self.awaiting_broker_sync = False
-                        self.logger.info("Fresh broker data received. Clearing awaiting_broker_sync flag.")
+                self.live_combined_portfolio.trades = broker_trades
+                # Recalculate live cash from trades to show PnL correctly
+                self.live_combined_portfolio.cash = sum(t.credit for t in broker_trades)
+
+                # 3. Update Working Orders
+                self.working_orders = [o for o in ord_data if o.get('status') in ['WORKING', 'QUEUED', 'ACCEPTED', 'PENDING_ACTIVATION']]
+                self.working_strategy_ids = {
+                    self.order_to_strategy[str(o['orderId'])] 
+                    for o in self.working_orders 
+                    if str(o.get('orderId')) in self.order_to_strategy
+                }
+                
+                # CLEARING FLAG: If we were waiting for sync, clear it now that we have fresh data
+                if self.awaiting_broker_sync:
+                    self.awaiting_broker_sync = False
+                    self.logger.info("Fresh consolidated broker data received. Clearing awaiting_broker_sync flag.")
+
+                # AUTO-DISMISSAL: If we have an active modal, check if it's now redundant
+                # Issue 3 Fix: Sync-triggered check is more responsive than timer-based
+                if hasattr(self, 'pending_trade') and self.pending_trade and self._is_trade_redundant(self.pending_trade):
+                    self.logger.debug(f"Data-driven redundancy check: Trade {self.pending_trade.strategy_id} is covered. Dismissing modal.")
+                    self.confirmation_event.set()
 
         except Exception as e:
-            self.logger.error(f"Error in _sync_broker_data: {e}")
+            with self._data_lock:
+                self.heartbeat_failures += 1
+                self.logger.error(f"Error in _sync_broker_data (Heartbeat Failure {self.heartbeat_failures}): {e}")
+                
+                # Connection Recovery Logic
+                if self.heartbeat_failures >= 3:
+                    self.broker_connected = False
+                    # Reset client to force re-auth
+                    self.client = None 
+
+            if self.heartbeat_failures == 3:
+                await notify_all(self.config, "Broker Connection Lost!", title="Terminator Critical", priority="urgent")
+            
             self._broadcast_alert("error", "Broker Sync Error", str(e))
 
     async def _broker_sync_loop(self):
@@ -450,8 +701,12 @@ class LiveTradingMonitor:
         initial_sync_done = False
         while self.is_running:
             try:
+                # Ensure client is initialized even pre-market so UI shows online status
+                if not self.client:
+                    await self.initialize_schwab_client()
+
                 # Sync if market is open OR if we haven't done an initial sync yet (useful for after-hours start)
-                now = datetime.now()
+                now = datetime.now(CHICAGO)
                 if self.is_market_open(now) or self.status == "Initializing..." or not initial_sync_done:
                     await self._sync_broker_data()
                     initial_sync_done = True
@@ -462,6 +717,60 @@ class LiveTradingMonitor:
             except Exception as e:
                 self.logger.error(f"Error in broker_sync_loop: {e}")
                 await asyncio.sleep(5)
+
+    async def _run_index_streaming_loop(self):
+        """Dedicated task to stream $SPX and $VIX in real-time via WebSocket."""
+        self.logger.info("Index Streaming Loop starting...")
+        
+        def handle_index_update(msg):
+            # Known: Indices like $SPX and $VIX come under LEVELONE_EQUITIES for Schwab in 1.5.1
+            content = msg.get('content', [])
+            for entry in content:
+                key = entry.get('key')
+                # Support both string keys and index-based keys
+                price = entry.get('LAST_PRICE') or entry.get('3')
+                if price is not None:
+                    if key == '$SPX':
+                        self._last_spx_price = float(price)
+                    elif key == '$VIX':
+                        self._last_vix_price = float(price)
+        
+        try:
+            while self.is_running:
+                try:
+                    if not self.client:
+                        await asyncio.sleep(5)
+                        continue
+
+                    self.stream_client = StreamClient(self.client)
+                    await self.stream_client.login()
+                    
+                    # Handler for index symbols ($SPX, $VIX)
+                    self.stream_client.add_level_one_equity_handler(handle_index_update)
+                    
+                    # Subscribe to symbols
+                    self.logger.info("Subscribing to real-time $SPX and $VIX streams...")
+                    await self.stream_client.level_one_equity_subs(['$SPX', '$VIX'])
+                    
+                    # Persistent message loop
+                    while self.is_running:
+                        await self.stream_client.handle_message()
+                        
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Index Streamer Error: {e}")
+                    if self.stream_client:
+                        try:
+                            await self.stream_client.logout()
+                        except: pass
+                    await asyncio.sleep(10) # Cooldown before reconnect
+        finally:
+            if self.stream_client:
+                try:
+                    await self.stream_client.logout()
+                except: pass
+            self.logger.info("Index Streaming Loop stopped.")
 
     async def _run_health_check_server(self):
         """Enhancement 1: Lightweight HTTP server for external monitoring tools"""
@@ -477,7 +786,7 @@ class LiveTradingMonitor:
                         "is_running": self.is_running,
                         "live_pnl": self.live_closed_day_pnl,
                         "sim_pnl": self.combined_portfolio.cash + sum(l.price * l.quantity * 100 for l in self.combined_portfolio.positions),
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": datetime.now(CHICAGO).isoformat()
                     }
                 res_body = json.dumps(status_data).encode()
                 response = (
@@ -521,24 +830,21 @@ class LiveTradingMonitor:
                 
                 # Only count as 'finished' for win rate if positions are flat or day is late
                 is_closed = not s.portfolio.positions
-                if is_closed:
-                    total += 1
-                    if pnl > 0: winners += 1
-                    elif pnl < 0: losers += 1
-                
-                # Duration: simple estimate (entry time to current or exit)
-                if s.portfolio.trades:
+                # Duration: only for closed strategies (Bug 4 Fix)
+                if is_closed and s.portfolio.trades:
                     entry_ts = s.portfolio.trades[0].timestamp
-                    last_ts = s.portfolio.trades[-1].timestamp if is_closed else datetime.now()
+                    last_ts = s.portfolio.trades[-1].timestamp
                     dur = (last_ts - entry_ts).total_seconds() / 60.0
                     total_dur += dur
+                    total += 1
 
             self.stats.total_trades = total
             self.stats.winners = winners
             self.stats.losers = losers
             self.stats.total_pnl = self.combined_portfolio.cash + sum(l.price * l.quantity * 100 for l in self.combined_portfolio.positions)
             if total > 0:
-                self.stats.avg_duration_minutes = total_dur / len([s for s in self.sub_strategies.values() if s.has_traded_today])
+                # Bug 4 Fix: Average duration across closed trades (total)
+                self.stats.avg_duration_minutes = total_dur / total
             
             # Drawdown calculation
             # Simplified: track daily peak simulated equity vs current
@@ -549,49 +855,10 @@ class LiveTradingMonitor:
             self.stats.max_drawdown = max(self.stats.max_drawdown, dd)
 
     async def run_broker_heartbeat(self):
-        """Dedicated loop to check broker connection every 5s"""
-        self.heartbeat_running = True
-        self.logger.info("Broker heartbeat loop started.")
-        
-        import random
-        backoff = 1.0
-        max_backoff = 60.0
-        
-        while self.heartbeat_running:
-            try:
-                if not self.client:
-                    await self.initialize_schwab_client()
-                    if not self.client:
-                        # Init failed, let the exception block handle the delay/backoff
-                        raise ConnectionError("Schwab client failed to initialize (check network/VPN/DNS)")
-                
-                # Use get_account_numbers as it was fastest in tests (~230ms)
-                resp = await self.client.get_account_numbers()
-                if resp.status_code == 200:
-                    self.broker_connected = True
-                    self.heartbeat_failures = 0
-                    backoff = 1.0 # Reset backoff on success
-                else:
-                    raise Exception(f"Status {resp.status_code}")
-                
-                await asyncio.sleep(self.config.get('heartbeat_interval_seconds', 5))
-                
-            except Exception as e:
-                self.heartbeat_failures += 1
-                if self.heartbeat_failures == 3: # Send alert only on initial failure threshold
-                    self.broker_connected = False
-                    await notify_all(self.config, "Broker Connection Lost!", title="Terminator Critical", priority="urgent")
-                    self.client = None # Reset client to force a fresh initialization attempt next cycle
-                elif self.heartbeat_failures > 3:
-                     self.broker_connected = False
-                     self.client = None
-                
-                self.logger.error(f"Heartbeat failed (attempt {self.heartbeat_failures}): {e}")
-                
-                # Issue 7: Exponential backoff with jitter
-                sleep_time = min(backoff + random.uniform(0, 0.1 * backoff), max_backoff)
-                await asyncio.sleep(sleep_time)
-                backoff = min(backoff * 2, max_backoff)
+        """Legacy heartbeat loop (Deprecated: logic moved to _sync_broker_data)"""
+        self.logger.info("Legacy heartbeat loop deactivated as sync loop now handles connection monitoring.")
+        self.heartbeat_running = False
+        return
 
     async def initialize_schwab_client(self, credentials_file: Optional[str] = None, token_file: Optional[str] = None):
         """Initialize Schwab API client using local keys"""
@@ -619,7 +886,8 @@ class LiveTradingMonitor:
             )
             
             # Set timeout on the underlying httpx session to handle large SPX chain responses
-            self.client.session.timeout = 30.0
+            if self.client and hasattr(self.client, 'session'):
+                self.client.session.timeout = 30.0
             
             # Issue 19: Add timeout to initial verification call
             try:
@@ -700,7 +968,7 @@ class LiveTradingMonitor:
 
     async def _monitor_step(self):
         """Single iteration of checking for trades (30s cadence)"""
-        now = datetime.now()
+        now = datetime.now(CHICAGO)
         if not self.is_market_open(now):
             self.logger.debug(f"Outside market hours ({now.time()}). Skipping monitor step.")
             return
@@ -724,6 +992,14 @@ class LiveTradingMonitor:
         if snap is None or snap.empty:
             self.logger.warning("Failed to fetch option chain. Aborting monitor step to avoid stale state.")
             return
+        
+        # Pre-calculate indexed snap for strategy loops (Perf-1 Fix)
+        snap['strike_int'] = snap['strike_price'].round().astype(int)
+        snap_indexed = snap.set_index(['strike_int', 'side'])
+        
+        # P6 Fix: Clear the option cache at the start of every 30s tick
+        # Since entries are snap-relative, there is no benefit to retaining across ticks.
+        self._option_cache = {} 
 
         # Create a quote dict from the snap for portfolios
         snap_quotes = {}
@@ -736,24 +1012,32 @@ class LiveTradingMonitor:
                 'theta': row['theta']
             }
         
+        # Identify all symbols we need quotes for
         with self._data_lock:
-            # Group fills by symbol for qty tracking
             symbol_net_qty_fills = defaultdict(int)
             for t in broker_trades:
                 for l in t.legs:
                     symbol_net_qty_fills[l.symbol] += l.quantity
 
             all_relevant_symbols = set(symbol_net_qty_fills.keys())
-            for p in broker_positions: all_relevant_symbols.add(p.symbol)
+            for p in broker_positions: 
+                all_relevant_symbols.add(p.symbol)
             
+            # P9 Fix: Also include all current SIM positions so they are priced even if Live is empty
+            for p in self.combined_portfolio.positions:
+                all_relevant_symbols.add(p.symbol)
+            
+            # Identify missing ones (Bug 3: identify UNDER lock, fetch OUTSIDE lock)
+            missing = [s for s in all_relevant_symbols if s not in snap_quotes]
+
+        # Bug 3: Fetch outside lock!
+        quotes = snap_quotes.copy()
+        if missing:
+            extra = await self.fetch_quotes(missing)
+            quotes.update(extra)
+
+        with self._data_lock:
             if all_relevant_symbols:
-                # Only fetch what's NOT in snap_quotes
-                missing = [s for s in all_relevant_symbols if s not in snap_quotes]
-                quotes = snap_quotes.copy()
-                if missing:
-                    extra = await self.fetch_quotes(missing)
-                    quotes.update(extra)
-                
                 starting_value = 0.0
                 for symbol in all_relevant_symbols:
                     # Robust symbol lookup for quotes to get prev_close (fallback for whitespace differences)
@@ -776,7 +1060,8 @@ class LiveTradingMonitor:
                     starting_value += (start_qty * prev_close * 100)
                     
                 self.live_combined_portfolio.starting_market_value = starting_value
-                self._update_all_pricing(quotes, snap=snap)
+                # P2: Use indexed snap for fast pricing
+                self._update_all_pricing(quotes, snap=snap, snap_indexed=snap_indexed)
                 
                 mv = sum(l.price * l.quantity * 100 for l in self.live_combined_portfolio.positions)
                 cash = self.live_combined_portfolio.cash
@@ -785,7 +1070,7 @@ class LiveTradingMonitor:
         
         # 3. Update Quotes and Deltas for all active positions (Already updated in step 2c via snap)
         # 4. Strategy logic (snap already fetched)
-        ts = datetime.now()
+        ts = datetime.now(CHICAGO)
         t_time = ts.time()
         start_time_obj = time(8, 30)
         end_time_obj = time(15, 0)
@@ -794,51 +1079,61 @@ class LiveTradingMonitor:
         decay_c = calculate_delta_decay(ts, 'CALL', self.config['initial_sum_delta']/2, start_time_obj, end_time_obj)
         decay_p = calculate_delta_decay(ts, 'PUT', self.config['initial_sum_delta']/2, start_time_obj, end_time_obj)
         t_short = (decay_c + decay_p) / 2
-        spx = self.estimate_spx_price(snap)
-        self._last_spx_price = spx # Cache for history recorder
+        # P7 Fix: Prefer real-time streamed $SPX price over synthetic estimate
+        spx = self._last_spx_price or self.estimate_spx_price(snap)
+        if spx is None:
+            self.logger.error("Critical: Could not determine SPX price from stream or snapshot.")
+            return
+
+        self._last_spx_price = spx # Ensure fallback value is cached
 
         t_trades = defaultdict(list)
         
-        with self._data_lock:
-            for sid, s in self.sub_strategies.items():
-                if t_time < s.trade_start_time:
-                    continue
-                
-                # Skip if there's already a pending signal for this strategy in the GUI
-                if sid in self.active_order_signals:
-                    continue
+        # Scalability #5: Batch process strategies to avoid holding lock too long
+        strategy_items = list(self.sub_strategies.items())
+        for start_i in range(0, len(strategy_items), 10):
+            batch = strategy_items[start_i:start_i + 10]
+            with self._data_lock:
+                for sid, s in batch:
+                    if t_time < s.trade_start_time:
+                        continue
+                    
+                    # Bug 5 Fix: Check active_order_signals while under lock 
+                    # and skip if there's already a pending signal for this strategy in the GUI
+                    if sid in self.active_order_signals:
+                        continue
 
-                
-                # Update individual strategy position pricing/deltas from snap
-                for p in s.portfolio.positions:
-                    r = snap[(snap['strike_price'].round().astype(int) == int(round(p.strike))) & (snap['side'] == p.side)]
-                    if not r.empty:
-                        p.delta = r['delta'].iloc[0]
-                        p.price = r['mid_price'].iloc[0]
-                        p.theta = float(r['theta'].iloc[0]) if not pd.isna(r['theta'].iloc[0]) else 0.0
-                
-                # Check for entry
-                if not s.has_traded_today and t_time < end_time_obj:
-                    trade = self._check_entry(s, snap, ts)
-                    if trade:
-                        # NOTE: In Live mode, we DON'T update the portfolio yet!
-                        # We wait for the user to confirm in the GUI.
-                        t_trades[sid].append(trade)
-                
-                # Check for rebalance/exit
-                elif s.has_traded_today:
-                    if t_time >= end_time_obj and s.portfolio.positions:
-                        trade = self._create_exit_trade(s, snap, ts, spx)
+                    for p in s.portfolio.positions:
+                        p_strike_int = int(round(p.strike))
+                        key = (p_strike_int, p.side)
+                        if key in snap_indexed.index:
+                            row = snap_indexed.loc[[key]].iloc[0]
+                            p.delta = row['delta']
+                            p.price = row['mid_price']
+                            p.theta = float(row['theta']) if not pd.isna(row['theta']) else 0.0
+                    
+                    # Check for entry
+                    if not s.has_traded_today and t_time < end_time_obj:
+                        trade = self._check_entry(s, snap, ts)
                         if trade:
                             t_trades[sid].append(trade)
-                    elif t_time < end_time_obj:
-                        trades = self._check_rebalance(s, snap, ts, t_short)
-                        for tr in trades:
-                            t_trades[sid].append(tr)
+                    
+                    # Check for rebalance/exit
+                    elif s.has_traded_today:
+                        if t_time >= end_time_obj and s.portfolio.positions:
+                            trade = self._create_exit_trade(s, snap, ts, spx)
+                            if trade:
+                                t_trades[sid].append(trade)
+                        elif t_time < end_time_obj:
+                            trades = self._check_rebalance(s, snap, ts, t_short)
+                            for tr in trades:
+                                t_trades[sid].append(tr)
+            
+            # Yield control between batches
+            await asyncio.sleep(0)
 
-            # 4. Fast Model Update: Simulation state is updated immediately
-            if t_trades:
-                self.logger.info(f"Fast Model Update: Executing {len(t_trades)} strategy signals in simulation.")
+        with self._data_lock:
+                self.logger.debug(f"Fast Model Update: Executing {len(t_trades)} strategy signals in simulation.")
                 
                 # Update sub-strategies first
                 for sid, trades in t_trades.items():
@@ -847,10 +1142,17 @@ class LiveTradingMonitor:
                             self.sub_strategies[sid].portfolio.add_trade(tr)
                             self.sub_strategies[sid].has_traded_today = True
 
+                # P4 Fix: Mark simulation as 'dirty' when trades occur to trigger rebuild
+                if t_trades:
+                    self._sim_dirty = True
+
                 # Net and update combined simulation portfolio
                 netted = self.net_trades(t_trades)
                 for nt in netted:
                     self.combined_portfolio.add_trade(nt)
+                
+                # BUG 8/Replay Fix: Force sync to ensure combined portfolio matches substrategies
+                self._reconcile_combined_simulation()
                 
                 # POKE: Signal that reconciliation is needed immediately
                 self.reconciliation_event.set()
@@ -859,8 +1161,14 @@ class LiveTradingMonitor:
         # Handled by run_reconciliation_loop() when poked via reconciliation_event.
         # Removed direct call here to prevent race condition causing duplicate order confirmations.
 
-        # 6. Save Session
-        self.session_manager.save_session(self)
+        # 6. Periodic Save Session (Scalability #6: 5min Safety Checkpoint)
+        # Event-driven saves also occur in execute_net_trade()
+        from time import time as t_time
+        now_ts = t_time()
+        if (now_ts - self._last_save_time) >= 300: # 5 Minutes
+            self.session_manager.save_session(self)
+            self._last_save_time = now_ts
+            self.logger.debug("Performed periodic session safety checkpoint.")
 
 
     def _round_to_tick(self, price: float, num_legs: int = 1) -> float:
@@ -882,10 +1190,10 @@ class LiveTradingMonitor:
             trade.status = "failed"
             return
 
-        # ALWAYS regenerate the execution plan right before execution to deduplicate 
-        # against manual orders placed while the confirmation window was open.
-        self.logger.info("Refreshing broker state and execution plan for final verification...")
-        self.working_orders = await self.get_working_orders()
+        # ALWAYS refresh the execution plan right before execution.
+        # Issue 2 Fix: Rely on the 5s sync cache (self.working_orders) rather than making a 3rd API call.
+        self.logger.info("Verifying execution plan against last known broker state...")
+        # self.working_orders = await self.get_working_orders() # Removed redundant call
         plan = self.create_execution_plan(trade)
 
         try:
@@ -923,13 +1231,23 @@ class LiveTradingMonitor:
                 
                 # Price per unit for the broker
                 unit_mid_price = total_mid_price / num_units
-                offset = self.config.get('order_offset', 0.0)
                 
-                # Apply offset and tick rounding to UNIT price
-                if total_chunk_credit >= 0:
-                    raw_price = unit_mid_price + offset
+                # Task #28: Apply Manual Price Override from UI if exists
+                override = self.price_overrides.get(trade.strategy_id, {}).get(i)
+                if override is not None:
+                    # User provided the FINAL price per unit (+Cr, -Db)
+                    raw_price = abs(override)
+                    self.logger.info(f"Chunk {i}: Using manual override price {override:.2f} (Abs: {raw_price:.2f})")
                 else:
-                    raw_price = max(0.0, unit_mid_price - offset)
+                    offset = self.config.get('order_offset', 0.0)
+                    # Apply offset and tick rounding to UNIT price
+                    if total_chunk_credit >= 0:
+                        raw_price = unit_mid_price + offset
+                    else:
+                        raw_price = max(0.0, unit_mid_price - offset)
+                
+                # Task #28: Ensure 5-cent increment (SPX Rule)
+                raw_price = round(round(raw_price / 0.05) * 0.05, 2)
 
                 ticked_price = self._round_to_tick(raw_price, num_legs=num_legs)
                 price_str = f"{ticked_price:.2f}"
@@ -1036,17 +1354,20 @@ class LiveTradingMonitor:
         try:
             # Explicitly filter for 0DTE and limited strike range to prevent 'Body buffer overflow'
             today = date.today()
-            resp = await self.client.get_option_chain(
-                '$SPX', 
-                strike_range=100,
-                from_date=today,
-                to_date=today
-            )
-            if resp.status_code != 200:
-                self.logger.error(f"Failed to fetch option chain: {resp.status_code}")
+            if self.client:
+                resp = await self.client.get_option_chain(
+                    '$SPX', 
+                    strike_range=100,
+                    from_date=today,
+                    to_date=today
+                )
+                if resp.status_code != 200:
+                    self.logger.error(f"Failed to fetch option chain: {resp.status_code}")
+                    return None
+                    
+                data = resp.json()
+            else:
                 return None
-                
-            data = resp.json()
             recs = []
             
             # Schwab returns either 'callStrategyChain' (Strike -> Exp -> Options)
@@ -1100,42 +1421,71 @@ class LiveTradingMonitor:
             'theta': opt.get('theta', 0)
         }
 
-    async def fetch_quotes(self, symbols: List[str]) -> Dict[str, Dict]:
-        """Fetch real-time quotes from Schwab"""
+    async def fetch_quotes(self, symbols: List[str]) -> Dict[str, Any]:
+        """Fetch quotes for symbols with exponential backoff (Bug 9 Fix)"""
         if not self.client or not symbols: return {}
         
-        try:
-            resp = await self.client.get_quotes(symbols)
-            if resp.status_code != 200: return {}
-            
-            data = resp.json()
-            quotes = {}
-            for sym, q in data.items():
-                # Schwab API might return quote under a 'quote' key or directly
-                quote_data = q.get('quote', q)
-                # Schwab API version dependent: delta sometimes in 'greeks' or directly in 'quote'
-                greeks = q.get('greeks', {})
-                quotes[sym] = {
-                    'bid': quote_data.get('bidPrice', 0),
-                    'ask': quote_data.get('askPrice', 0),
-                    'mid': (quote_data.get('bidPrice', 0) + quote_data.get('askPrice', 0)) / 2,
-                    'delta': greeks.get('delta', quote_data.get('delta', 0)),
-                    'theta': greeks.get('theta', quote_data.get('theta', 0))
-                }
-            return quotes
-        except Exception as e:
-            self.logger.error(f"Error fetching quotes: {e}")
-            return {}
+        # Ensure symbols are clean and not empty
+        symbols = [s.strip() for s in symbols if s and s.strip()]
+        if not symbols: return {}
 
-    def _update_all_pricing(self, quotes: Dict[str, Dict], snap: Optional[pd.DataFrame] = None):
-        """Update both sim and live portfolios with latest quotes using robust matching"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.logger.info(f"Fetching quotes for {len(symbols)} symbols (Attempt {attempt+1})...")
+                res = await self.client.get_quotes(symbols)
+                if res.status_code == 200:
+                    data = res.json()
+                    quotes = {}
+                    for sym, q in data.items():
+                        # Schwab API might return quote under a 'quote' key or directly
+                        quote_data = q.get('quote', q)
+                        # Schwab API version dependent: delta sometimes in 'greeks' or directly in 'quote'
+                        greeks = q.get('greeks', {})
+                        quotes[sym] = {
+                            'bid': quote_data.get('bidPrice', 0),
+                            'ask': quote_data.get('askPrice', 0),
+                            'mid': (quote_data.get('bidPrice', 0) + quote_data.get('askPrice', 0)) / 2,
+                            'delta': greeks.get('delta', quote_data.get('delta', 0)),
+                            'theta': greeks.get('theta', quote_data.get('theta', 0))
+                        }
+                    return quotes
+                elif res.status_code == 429: # Rate Limit
+                    import random
+                    wait = (2 ** attempt) + (random.random() * 0.5)
+                    self.logger.warning(f"Rate limited (429) fetching quotes. Waiting {wait:.2f}s")
+                    await asyncio.sleep(wait)
+                else:
+                    self.logger.error(f"Failed to fetch quotes: HTTP {res.status_code}")
+                    break
+            except Exception as e:
+                self.logger.error(f"Error fetching quotes: {e}")
+                await asyncio.sleep(1)
+        return {}
+
+    def _update_all_pricing(self, quotes: Dict[str, Dict], snap: Optional[pd.DataFrame] = None, snap_indexed: Optional[pd.DataFrame] = None):
+        """Update both sim and live portfolios with latest quotes using robust matching (P2 Fix)"""
         for portfolio in [self.combined_portfolio, self.live_combined_portfolio]:
             for p in portfolio.positions:
                 found = False
                 
-                # 1. Try Strike/Side matching against snap (most robust for SPX 0DTE)
-                if snap is not None and not snap.empty:
-                    # Match by integer strike and side
+                # 1. Fast path: O(1) indexed snap lookup (P2 fix)
+                if snap_indexed is not None:
+                    key = (int(round(p.strike)), p.side)
+                    if key in snap_indexed.index:
+                        row = snap_indexed.loc[[key]].iloc[0]
+                        p.bid_price = row['bidprice']
+                        p.ask_price = row['askprice']
+                        p.price = row['mid_price']
+                        delta_val = row['delta']
+                        p.delta = float(delta_val) if not pd.isna(delta_val) else 0.0
+                        p.theta = float(row['theta']) if not pd.isna(row['theta']) else 0.0
+                        # Update sticky cache
+                        self._greek_cache[(p.symbol, int(round(p.strike)), p.side)] = (p.delta, p.theta)
+                        found = True
+
+                # 2. Slow fallback: boolean mask (only when snap_indexed unavailable)
+                elif not found and snap is not None and not snap.empty:
                     r = snap[(snap['strike_price'].round().astype(int) == int(round(p.strike))) & (snap['side'] == p.side)]
                     if not r.empty:
                         row = r.iloc[0]
@@ -1144,7 +1494,6 @@ class LiveTradingMonitor:
                         p.price = row['mid_price']
                         delta_val = row['delta']
                         p.delta = float(delta_val) if not pd.isna(delta_val) else 0.0
-                        theta_val = row['theta']
                         p.theta = float(row['theta']) if not pd.isna(row['theta']) else 0.0
                         # Update sticky cache
                         self._greek_cache[(p.symbol, int(round(p.strike)), p.side)] = (p.delta, p.theta)
@@ -1194,149 +1543,179 @@ class LiveTradingMonitor:
                         'strike': parsed['strike'],
                         'side': parsed['side'],
                         'quantity': int(qty),
+                        # Bug 2 Fix: Extract and send real bid/ask for live positions
                         'price': pos.get('marketValue', 0) / (qty * 100) if qty != 0 else 0,
-                        'bid': pos.get('marketValue', 0) / (qty * 100) if qty != 0 else 0,
-                        'ask': pos.get('marketValue', 0) / (qty * 100) if qty != 0 else 0,
+                        'bid': 0, # Bug 9 Fix: Populate from snap in update_live_portfolio instead of fabrication
+                        'ask': 0,
                     'avg_price': pos.get('averagePrice', 0),
                     'current_day_pnl': pos.get('currentDayProfitLoss', 0)
                     })
             return spx_pos
         except Exception as e:
             self.logger.error(f"Error fetching live positions: {e}")
-            return None # Return None to indicate failure
-
+            return None
     async def get_live_trades(self) -> List[Trade]:
         """Fetch recent filled orders from Schwab and convert to Trade objects"""
         if not self.client or not self.account_hash: return None
         try:
-            # Fetch for today
-            from_time = datetime.combine(date.today(), time(0, 0))
-            resp = await self.client.get_orders_for_account(self.account_hash, from_entered_datetime=from_time, status=self.client.Order.Status.FILLED)
+            # Fetch for today since 8:30am Chicago
+            now_chi = datetime.now(CHICAGO)
+            today_830 = now_chi.replace(hour=8, minute=30, second=0, microsecond=0)
+            
+            resp = await self.client.get_orders_for_account(
+                self.account_hash, 
+                from_entered_datetime=today_830, 
+                to_entered_datetime=now_chi,
+                status=['FILLED']
+            )
             if resp.status_code != 200:
                 self.logger.error(f"Failed to fetch account orders: {resp.status_code}")
                 return None
             
             orders = resp.json()
             trades = []
-            self.logger.info(f"Fetched {len(orders)} filled orders from Schwab.")
+            self.logger.debug(f"Fetched {len(orders)} filled orders from Schwab.")
             for order in orders:
-                legs = []
-                for oleg in order.get('orderLegCollection', []):
-                    instr = oleg.get('instrument', {})
-                    if instr.get('underlyingSymbol') == '$SPX' or instr.get('symbol').startswith('SPX'):
-                        sym = instr.get('symbol')
-                        parsed = self._parse_schwab_symbol(sym)
-                        if parsed:
-                            legs.append(OptionLeg(
-                                symbol=sym,
-                                strike=parsed['strike'],
-                                side=parsed['side'],
-                                quantity=int(oleg.get('quantity', 0)) if oleg.get('instruction').startswith('BUY') else -int(oleg.get('quantity', 0)),
-                                price=order.get('price', 0),
-                                entry_price=order.get('price', 0)
-                            ))
-                
-                if legs:
-                    # ... (rest of the logic remains the same)
-                    # (I'll keep it concise for the replacement)
-                    close_time_str = order.get('closeTime') or order.get('enteredTime')
-                    if close_time_str:
-                        ts = datetime.fromisoformat(close_time_str.replace('Z', '+00:00'))
-                    else:
-                        ts = datetime.now(timezone.utc)
+                trades.extend(self._convert_order_to_trade(order))
 
-                    order_id_key = str(order.get('orderId', ''))
-                    strategy_id = self.order_to_strategy.get(order_id_key, "BROKER")
-                    
-                    # Prefer actual execution price from orderActivityCollection (Issue Fix)
-                    activities = order.get('orderActivityCollection', [])
-                    actual_net_cash = 0.0
-                    has_execution = False
-                    
-                    if activities:
-                        leg_id_to_instr = {l.get('legId'): l.get('instruction') for l in order.get('orderLegCollection', [])}
-                        for activity in activities:
-                            if activity.get('activityType') == 'EXECUTION':
-                                for exec_leg in activity.get('executionLegs', []):
-                                    exec_p = exec_leg.get('price', 0.0)
-                                    exec_q = exec_leg.get('quantity', 0)
-                                    lid = exec_leg.get('legId')
-                                    instr = leg_id_to_instr.get(lid, '')
-                                    multiplier = 1.0 if 'SELL' in instr else -1.0
-                                    actual_net_cash += (exec_p * exec_q * multiplier)
-                                    has_execution = True
-                    
-                    if has_execution:
-                        credit = actual_net_cash * 100
-                    else:
-                        order_type = order.get('orderType', '')
-                        raw_price = order.get('price', 0)
-                        multiplier = abs(legs[0].quantity) * 100
-                        if order_type == 'NET_DEBIT':
-                            credit = -raw_price * multiplier
-                        elif order_type == 'NET_CREDIT':
-                            credit = raw_price * multiplier
-                        else:
-                            if legs[0].quantity > 0: credit = -raw_price * multiplier
-                            else: credit = raw_price * multiplier
-
-                    comm_per_contract = self.config.get('commission_per_contract', 1.13)
-                    est_commission = comm_per_contract * sum(abs(l.quantity) for l in legs)
-                    any_open = any(oleg.get('instruction', '').endswith('_OPEN') for oleg in order.get('orderLegCollection', []))
-                    purpose = TradePurpose.RECONCILIATION if any_open else TradePurpose.EXIT
-
-                    trades.append(Trade(
-                        timestamp=ts.astimezone(ZoneInfo("America/Chicago")),
-                        legs=legs,
-                        credit=credit,
-                        commission=est_commission,
-                        current_sum_delta=0,
-                        purpose=purpose,
-                        strategy_id=strategy_id,
-                        order_id=order_id_key,
-                        status="filled"
-                    ))
-
-            self.logger.info(f"Processed {len(trades)} SPX trades for display.")
+            self.logger.debug(f"Processed {len(trades)} SPX trades for display.")
             trades.sort(key=lambda x: x.timestamp)
             return trades
         except Exception as e:
             self.logger.error(f"Error fetching live trades: {e}\n{traceback.format_exc()}")
             return None
 
+    def _convert_order_to_trade(self, order: Dict) -> List[Trade]:
+        """Helper to convert a single Schwab order JSON to Trade objects (1 Strategy = 1 Trade)"""
+        trades = []
+        
+        # Issue 4 Fix: Map each leg to its specific execution fill price
+        leg_fill_prices = {}
+        activities = order.get('orderActivityCollection', [])
+        actual_net_cash = 0.0
+        has_execution = False
+        
+        if activities:
+            leg_id_to_instr = {str(l.get('legId')): l.get('instruction') for l in order.get('orderLegCollection', [])}
+            for activity in activities:
+                if activity.get('activityType') == 'EXECUTION':
+                    for exec_leg in activity.get('executionLegs', []):
+                        lid = str(exec_leg.get('legId'))
+                        ep = exec_leg.get('price', 0.0)
+                        eq = exec_leg.get('quantity', 0)
+                        
+                        # Cache fill price for instrument building
+                        leg_fill_prices[lid] = ep
+                        
+                        # Aggregate for net premium
+                        instr = leg_id_to_instr.get(lid, '')
+                        multiplier = 1.0 if 'SELL' in instr else -1.0
+                        actual_net_cash += (ep * eq * multiplier)
+                        has_execution = True
+
+        legs = []
+        for oleg in order.get('orderLegCollection', []):
+            instr = oleg.get('instrument', {})
+            symbol = instr.get('symbol', '')
+            if instr.get('underlyingSymbol') == '$SPX' or symbol.startswith('SPX'):
+                parsed = self._parse_schwab_symbol(symbol)
+                if parsed:
+                    instruction = oleg.get('instruction', '')
+                    qty = int(oleg.get('quantity', 0))
+                    signed_qty = qty if 'BUY' in instruction else -qty
+                    
+                    # Issue 4: Use leg-specific fill price, fall back to limit price
+                    lid = str(oleg.get('legId'))
+                    fill_p = leg_fill_prices.get(lid, order.get('price', 0))
+                    
+                    legs.append(OptionLeg(
+                        symbol=symbol,
+                        strike=parsed['strike'],
+                        side=parsed['side'],
+                        quantity=signed_qty,
+                        price=fill_p,
+                        entry_price=fill_p
+                    ))
+        
+        if not legs:
+            return []
+
+        # Determine timestamp
+        close_time_str = order.get('closeTime') or order.get('enteredTime')
+        if close_time_str:
+            ts = datetime.fromisoformat(close_time_str.replace('Z', '+00:00'))
+        else:
+            ts = datetime.now(timezone.utc)
+        ts_chi = ts.astimezone(CHICAGO)
+
+        order_id_key = str(order.get('orderId', ''))
+        strategy_id = self.order_to_strategy.get(order_id_key, "BROKER")
+        
+        if has_execution:
+            credit = actual_net_cash * 100
+        else:
+            # Fallback for non-filled orders
+            order_type = order.get('orderType', '')
+            raw_price = order.get('price', 0)
+            multiplier = 100 
+            if order_type == 'NET_DEBIT':
+                credit = -raw_price * multiplier
+            elif order_type == 'NET_CREDIT':
+                credit = raw_price * multiplier
+            else:
+                credit = (raw_price * multiplier) if legs[0].quantity < 0 else (-raw_price * multiplier)
+
+        comm_per_contract = self.config.get('commission_per_contract', 1.13)
+        est_commission = comm_per_contract * sum(abs(l.quantity) for l in legs)
+        
+        # Determine purpose
+        order_legs = order.get('orderLegCollection', [])
+        all_open = all(oleg.get('instruction', '').endswith('_OPEN') for oleg in order_legs)
+        any_open = any(oleg.get('instruction', '').endswith('_OPEN') for oleg in order_legs)
+        
+        if len(legs) == 4 and all_open:
+            purpose = TradePurpose.IRON_CONDOR
+        else:
+            purpose = TradePurpose.RECONCILIATION if any_open else TradePurpose.EXIT
+
+        trades.append(Trade(
+            timestamp=ts_chi,
+            legs=legs,
+            credit=credit,
+            commission=est_commission,
+            current_sum_delta=0,
+            purpose=purpose,
+            strategy_id=strategy_id,
+            order_id=order_id_key,
+            status="filled"
+        ))
+        
+        return trades
+
     async def get_working_orders(self) -> List[Dict]:
-        """Fetch currently working/pending orders from Schwab"""
-        if not self.client or not self.account_hash: return None
+        """Fetch currently working/pending orders from Schwab. (Issue 6 Fix: CHICAGO aware)"""
+        if not self.client or not self.account_hash: return []
         try:
-            # We want working/pending orders
-            statuses = [
-                self.client.Order.Status.WORKING,
-                self.client.Order.Status.PENDING_ACTIVATION,
-                self.client.Order.Status.AWAITING_MANUAL_REVIEW,
-                self.client.Order.Status.PENDING_CANCEL
-            ]
+            # Fetch for today since Chicago midnight
+            from_time = datetime.now(CHICAGO).replace(hour=0, minute=0, second=0, microsecond=0)
             
-            # get_orders_for_account with multiple statuses
-            # Schwab API allows querying by status. 
-            # If the library doesn't support a list of statuses easily, we might need to iterate or check docs.
-            # Assuming it supports a single status at a time or we can just fetch all and filter.
-            # Let's fetch for today and filter manually for speed/robustness if needed, 
-            # but API filtering is better.
-            
-            # Try fetching ALL orders for today and filtering
-            from_time = datetime.combine(date.today(), time(0, 0))
+            # Fetch ALL to filter manually for better robustness (library might have quirks with list status)
             resp = await self.client.get_orders_for_account(self.account_hash, from_entered_datetime=from_time)
+            
             if resp.status_code != 200:
                 self.logger.error(f"Failed to fetch account orders: {resp.status_code}")
-                return None
+                return []
             
             all_orders = resp.json()
-            working_statuses = ['WORKING', 'PENDING_ACTIVATION', 'AWAITING_MANUAL_REVIEW', 'QUEUED']
+            if not isinstance(all_orders, list):
+                return []
+
+            working_statuses = ['WORKING', 'PENDING_ACTIVATION', 'AWAITING_MANUAL_REVIEW', 'QUEUED', 'ACCEPTED']
             working_orders = [o for o in all_orders if o.get('status') in working_statuses]
             return working_orders
         except Exception as e:
             self.logger.error(f"Error fetching working orders: {e}")
-            return None
+            return []
 
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a specific order by ID"""
@@ -1412,7 +1791,7 @@ class LiveTradingMonitor:
         lines.append("=" * 40)
         lines.append(f"Strategy: {trade.strategy_id}")
         lines.append(f"Purpose: {trade.purpose.value}")
-        lines.append(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Time: {datetime.now(CHICAGO).strftime('%Y-%m-%d %H:%M:%S')}")
         lines.append("")
         
         # Sort legs: PUT first, then by Strike
@@ -1478,10 +1857,16 @@ class LiveTradingMonitor:
             if ct.strategy_id in self.active_order_signals:
                 self.active_order_signals.remove(ct.strategy_id)
 
-    async def confirm_live_trade(self, strategy_id: str):
+    async def confirm_live_trade(self, strategy_id: str, overrides: Optional[List[Dict]] = None):
         """Manual confirmation of a pending trade for a strategy."""
         if self.pending_trade and self.pending_trade.strategy_id == strategy_id:
             self.logger.info(f"Manual confirmation received for strategy: {strategy_id}")
+            if overrides:
+                # Convert list [ {idx: 0, price_ea: 1.05}, ... ] to dict mapping for fast lookup in execution loop
+                override_map = {o['idx']: o['price_ea'] for o in overrides if 'idx' in o}
+                self.price_overrides[strategy_id] = override_map
+                self.logger.info(f"Applied {len(override_map)} price overrides for {strategy_id}")
+            
             self._pending_trade_confirmed = True
             self.confirmation_event.set()
         else:
@@ -1499,46 +1884,101 @@ class LiveTradingMonitor:
 
 
     def _update_live_portfolio(self, broker_positions: List[Dict]):
-        """Update live_combined_portfolio with actual broker positions, using sticky Greeks."""
+        """Update live_combined_portfolio with actual broker positions, robustly parsing Schwab JSON. (Bug Fix: Raw Parsing)"""
         self.live_combined_portfolio.positions = []
         for bp in broker_positions:
-            strike_val = int(round(bp['strike']))
-            side_val = bp['side']
-            k = (bp['symbol'], strike_val, side_val)
+            instr = bp.get('instrument', {})
+            symbol = instr.get('symbol', 'N/A')
             
-            # Read EXCLUSIVELY from the Sticky Cache (populated by 30s cadence) or Latest SNAP
+            # 1. Basic validation and parsing
+            if instr.get('assetType') != 'OPTION':
+                continue
+            
+            # Important: raw Schwab positions often lack strikePrice at top level. 
+            # We use our robust parser to get strike and side from the symbol.
+            parsed = self._parse_schwab_symbol(symbol)
+            if not parsed:
+                self.logger.warning(f"Failed to parse live position symbol: {symbol}")
+                continue
+                
+            strike_val = parsed['strike']
+            side_val = parsed['side']
+            
+            # Calculate SIGNED quantity: Long - Short
+            quantity = float(bp.get('longQuantity', 0)) - float(bp.get('shortQuantity', 0))
+            if quantity == 0:
+                continue
+
+            k = (symbol, int(round(strike_val)), side_val)
+            
+            # 2. Greeks and Pricing lookup
             delta, theta = self._greek_cache.get(k, (0.0, 0.0))
+            # Raw positions JSON usually has marketValue and averagePrice, but not bid/ask.
+            bid_price = 0.0
+            ask_price = 0.0
             
-            # If not in cache, attempt one last look at the last snapshot
-            # Bug 6c Fix: Use 'not in' check instead of zero-check to avoid sentinel confusion
-            if k not in self._greek_cache and self._last_snap is not None:
-                # Bug 6a/6b Fix: Write fallback results back to _greek_cache to warm it
-                r = self._last_snap[(self._last_snap['strike_price'].round().astype(int) == int(round(bp['strike']))) & (self._last_snap['side'] == bp['side'])]
+            # If Greeks or Prices missing, attempt look at the last snapshot (Bug 9 Fix)
+            if (k not in self._greek_cache or delta == 0) and self._last_snap is not None:
+                mask = (self._last_snap['strike_price'].round().astype(int) == int(round(strike_val))) & \
+                       (self._last_snap['side'] == side_val)
+                r = self._last_snap[mask]
                 if not r.empty:
                     delta = float(r['delta'].iloc[0])
                     theta_val = r['theta'].iloc[0] if 'theta' in r.columns else 0.0
                     theta = float(theta_val) if not pd.isna(theta_val) else 0.0
+                    bid_price = float(r['bidprice'].iloc[0])
+                    ask_price = float(r['askprice'].iloc[0])
                     self._greek_cache[k] = (delta, theta)
-                    self.logger.debug(f"Warmed Greek cache for {k} from last_snap: {delta}, {theta}")
-                else:
-                    delta, theta = 0.0, 0.0
-            else:
-                delta, theta = self._greek_cache.get(k, (0.0, 0.0))
 
+            # 3. Add to live portfolio
+            mkt_val = bp.get('marketValue', 0)
+            mid_price = mkt_val / (quantity * 100) if quantity != 0 else 0
+            
             self.live_combined_portfolio.positions.append(OptionLeg(
-                symbol=bp['symbol'],
-                strike=bp['strike'],
-                side=bp['side'],
-                quantity=bp['quantity'],
-                price=bp['price'],
-                entry_price=bp.get('avg_price', bp['price']), 
-                bid_price=bp['bid'],
-                ask_price=bp['ask'],
-                current_day_pnl=bp.get('current_day_pnl', 0.0),
+                symbol=symbol,
+                strike=strike_val,
+                side=side_val,
+                quantity=int(quantity),
+                price=abs(mid_price), # Mid is derived from market value
+                entry_price=bp.get('averagePrice', 0), 
+                bid_price=bid_price,
+                ask_price=ask_price,
+                current_day_pnl=bp.get('currentDayProfitLoss', 0.0),
                 delta=delta,
                 theta=theta
             ))
+            
+        # Trigger margin recalculation
         self.live_combined_portfolio.max_margin = self.live_combined_portfolio.calculate_standard_margin()
+        self.logger.info(f"Updated live portfolio: {len(self.live_combined_portfolio.positions)} active positions. Margin: ${self.live_combined_portfolio.max_margin:,.2f}")
+
+    def _get_effective_live_positions(self) -> Dict[Tuple[int, str], float]:
+        """
+        Combines FILLED positions with WORKING orders to get the 'Target' live state.
+        This prevents suggesting trades for gaps that are already being addressed by a pending order.
+        """
+        with self._data_lock:
+            # 1. Start with filled positions
+            eff_dict = { (int(round(p.strike)), p.side): float(p.quantity) for p in self.live_combined_portfolio.positions }
+            
+            # 2. Add working orders to the effective current state
+            for o in self.working_orders:
+                # We skip cancelling/rejected orders if possible, but 'WORKING' is our target.
+                for leg in o.get('orderLegCollection', []):
+                    instr = leg.get('instruction', '')
+                    qty = float(leg.get('quantity', 0))
+                    instr_obj = leg.get('instrument', {})
+                    
+                    if instr_obj.get('assetType') == 'OPTION':
+                        strike = instr_obj.get('strikePrice')
+                        side = instr_obj.get('putCall')
+                        
+                        if strike and side:
+                            # BUY instructions increase position, SELL instructions decrease (long-centric math)
+                            multiplier = 1.0 if 'BUY' in instr else -1.0
+                            key = (int(round(strike)), side)
+                            eff_dict[key] = eff_dict.get(key, 0.0) + (qty * multiplier)
+            return eff_dict
 
     async def _check_reconciliation(self, snap: pd.DataFrame):
         """Compare simulated combined portfolio with live broker reality and suggest syncing trades"""
@@ -1546,23 +1986,20 @@ class LiveTradingMonitor:
             self.logger.info("Skipping reconciliation: Awaiting broker sync of recent submission.")
             return
         # Issue 9: Always run reconciliation logic to track divergence
-        # But only suggest/queue if trading enabled? 
-        # Actually, Issue 9 says "Always run reconciliation logic regardless of trading_enabled flag."
-
+        # Issue 35: Deduplicate against Working Orders
         sim_pos = self.combined_portfolio.positions
-        live_pos = self.live_combined_portfolio.positions
+        eff_live_dict = self._get_effective_live_positions()
         
-        sim_dict = { (int(round(p.strike)), p.side): p.quantity for p in sim_pos }
-        live_dict = { (int(round(p.strike)), p.side): p.quantity for p in live_pos }
+        sim_dict = { (int(round(p.strike)), p.side): float(p.quantity) for p in sim_pos }
         
-        all_keys = set(sim_dict.keys()) | set(live_dict.keys())
+        all_keys = set(sim_dict.keys()) | set(eff_live_dict.keys())
         needed_adjustments = []
         
         for k in all_keys:
-            sq = sim_dict.get(k, 0)
-            lq = live_dict.get(k, 0)
+            sq = sim_dict.get(k, 0.0)
+            lq = eff_live_dict.get(k, 0.0)
             diff = sq - lq
-            if diff != 0:
+            if abs(diff) > 0.01: # Use epsilon for float safety
                 # Bypass broker restriction: do not close and open in one order.
                 # If flipping (e.g., -1 to +1), only go to 0 first.
                 if (lq < 0 and sq > 0) or (lq > 0 and sq < 0):
@@ -1577,32 +2014,45 @@ class LiveTradingMonitor:
                 self.last_reconciliation_trade = None
             return
 
-        # Use a lock to check queue state without blocking
-        with self._order_lock:
-            in_queue = any(t.purpose == TradePurpose.RECONCILIATION for t in list(self.order_queue._queue))
+        # Bug 8 Fix: Use tracker set for robust check 
+        with self._data_lock:
+            in_queue = TradePurpose.RECONCILIATION in self._queued_purposes
+            if not in_queue and self.pending_trade:
+                in_queue = self.pending_trade.purpose == TradePurpose.RECONCILIATION
 
-        self.logger.info(f"RECONCILIATION DISCREPANCY: Found {len(needed_adjustments)} legs mismatch. Generating Gap Sync Trade.")
+        # Bug 16 Fix: cooldown for GAP_SYNC dismissal to prevent immediate re-prompts
+        recon_cooldown = self.config.get('recon_dismiss_cooldown_seconds', 20)
+        if not in_queue:
+            from time import time
+            if (time() - self.last_dismissed_recon_time) < recon_cooldown:
+                return
+
+        self.logger.debug(f"RECONCILIATION DISCREPANCY: Found {len(needed_adjustments)} legs mismatch. Generating Gap Sync Trade.")
         
         # Build Reconciliation Trade
         legs = []
         total_credit = 0.0
         
+        # Bug 11: Index snap for O(1) reconciliation lookups
+        snap_indexed = snap.set_index(['strike_int', 'side']) if 'strike_int' in snap.columns else snap.set_index([snap['strike_price'].round().astype(int), 'side'])
+
         for strike, side, qty in needed_adjustments:
-            # Find in snap
-            r = snap[(snap['strike_price'].round().astype(int) == strike) & (snap['side'] == side)]
-            if r.empty:
+            # Bug 11: O(1) lookup
+            key = (int(strike), side)
+            if key not in snap_indexed.index:
                 self.logger.error(f"Cannot sync leg {strike}{side}: Not found in option chain.")
                 continue
                 
-            symbol = r['symbol'].iloc[0]
-            price = r['mid_price'].iloc[0]
-            delta = r['delta'].iloc[0]
+            r_row = snap_indexed.loc[[key]].iloc[0]
+            symbol = r_row['symbol']
+            price = r_row['mid_price']
+            delta = r_row['delta']
             # Handle possible NaN in theta
-            theta_val = r['theta'].iloc[0] if 'theta' in r.columns else 0.0
+            theta_val = r_row['theta'] if 'theta' in r_row.index else 0.0
             theta = float(theta_val) if not pd.isna(theta_val) else 0.0
             
             # Determine instruction based on live position (lq)
-            lq = live_dict.get((strike, side), 0)
+            lq = eff_live_dict.get(key, 0)
             if qty > 0: # Needs to BUY
                 inst = "BUY_TO_CLOSE" if lq < 0 else "BUY_TO_OPEN"
             else: # Needs to SELL
@@ -1625,7 +2075,7 @@ class LiveTradingMonitor:
 
         if legs:
             recon_trade = Trade(
-                timestamp=datetime.now(),
+                timestamp=datetime.now(CHICAGO),
                 legs=legs,
                 credit=total_credit,
                 commission=len(legs) * self.config.get('commission_per_contract', 1.13),
@@ -1651,24 +2101,75 @@ class LiveTradingMonitor:
 
                     self.logger.info(f"Adding RECON trade to queue for strategy {recon_trade.strategy_id} with {len(recon_trade.legs)} legs")
                     self.order_queue.put_nowait(recon_trade)
+                    # Bug 5 & 8 trackers: Prevent duplicates while in queue (Task #45)
+                    self.active_order_signals.add(recon_trade.strategy_id)
+                    self._queued_purposes.add(recon_trade.purpose)
                     self._broadcast_alert("chime", "New Trade Signal", f"Reconciliation trade queued for {recon_trade.strategy_id}")
                 else:
                     self.logger.info(f"Updated reconciliation trade available for GUI sync (Already in queue: {recon_trade.strategy_id})")
             else:
-                self.logger.warning(f"Sim divergence detected but trading is disabled. GAP_SYNC updated for {len(legs)} legs.")
+                self.logger.debug(f"Sim divergence detected but trading is disabled. GAP_SYNC updated for {len(legs)} legs.")
         else:
             self.logger.info("Reconciliation built NO legs. Skipping trade creation.")
 
 
-    async def _run_historical_simulation(self, start_dt: datetime, end_dt: datetime, live_trades: List[Trade] = None, collect_history: bool = False) -> List[Dict]:
+    def _create_sync_entry(self, s: SubStrategy, snap: pd.DataFrame, ts: datetime, live_t: Trade) -> Optional[Trade]:
+        """Soft Bootstrap: Create a sim trade that exactly matches the recorded live trade legs and strikes."""
+        legs = []
+        for ll in live_t.legs:
+            # Match the recorded live strike in the historical snapshot
+            r = snap[(snap['strike_price'].round().astype(int) == int(round(ll.strike))) & (snap['side'] == ll.side)]
+            if r.empty:
+                self.logger.warning(f"Bootstrap [SOFT]: Missing strike {ll.strike}{ll.side} for {s.sid} in snapshot. Sync failed.")
+                return None # Missing DB data for this specific strike at this time
+            
+            row = r.iloc[0]
+            legs.append(OptionLeg(
+                symbol=ll.symbol,
+                strike=ll.strike,
+                side=ll.side,
+                quantity=ll.quantity,
+                delta=row['delta'],
+                theta=float(row['theta']) if not pd.isna(row['theta']) else 0.0,
+                price=row['mid_price'],
+                target_delta=ll.target_delta
+            ))
+        
+        credit = sum(-l.quantity * l.price for l in legs) * 100
+        comm = self.config.get('commission_per_contract', 1.13) * len(legs)
+        return Trade(ts, legs, credit, comm, live_t.current_sum_delta, live_t.purpose, s.sid)
+
+
+    async def _run_historical_simulation(self, start_dt: datetime, end_dt: datetime, live_trades: List[Trade] = None, mode: str = 'hard', collect_history: bool = False) -> List[Dict]:
         """Run backtester logic on historical data. If live_trades provided, replays them into live_combined_portfolio."""
         history = []
         pending_live_trades = sorted(live_trades or [], key=lambda t: t.timestamp)
+        
+        # Soft bootstrap intercept logic: queue up live ICs per strategy
+        soft_ics = defaultdict(list)
+        if mode == 'soft':
+            # Collect all live ICs that were placed manually (tagged as "BROKER")
+            broker_ics = [t for t in pending_live_trades if t.purpose == TradePurpose.IRON_CONDOR and t.strategy_id == "BROKER"]
+            
+            # Sub-strategies (sorted by expected start time)
+            sub_strats = sorted(self.sub_strategies.values(), key=lambda x: x.trade_start_time)
+            
+            for s in sub_strats:
+                # 1. Check if there's an explicit match already (if Terminator placed the order)
+                explicit_match = next((t for t in pending_live_trades if t.strategy_id == s.sid and t.purpose == TradePurpose.IRON_CONDOR), None)
+                if explicit_match:
+                    soft_ics[s.sid].append(explicit_match)
+                # 2. Otherwise, if there's a BROKER trade available, assign it to this strategy slot
+                elif broker_ics:
+                    trade = broker_ics.pop(0)
+                    trade.strategy_id = s.sid # Temporarily re-tag for the simulation sync
+                    soft_ics[s.sid].append(trade)
+                    self.logger.info(f"Bootstrap [SOFT]: Mapping manual BROKER trade at {trade.timestamp.strftime('%H:%M')} to sub-strategy {s.sid}")
         sim_date_str = start_dt.date().isoformat()
-        db_path = self.config['db_path']
+        db_path = self.db_path
         
         # If testing after market close, extend end_dt to include the whole day's data
-        market_end_today = datetime.combine(start_dt.date(), time(15, 0))
+        market_end_today = datetime.combine(start_dt.date(), time(15, 0), CHICAGO)
         effective_end_dt = max(end_dt, market_end_today)
 
         from contextlib import closing
@@ -1684,42 +2185,56 @@ class LiveTradingMonitor:
                 data = pd.read_sql_query(query, conn, params=(sim_date_str, start_dt.isoformat(), effective_end_dt.isoformat()))
         except Exception as e:
             self.logger.error(f"Database error during historical simulation: {e}")
-            return
+            return [] # Bug 10: return explicit list
 
         if data.empty:
             self.logger.warning(f"No historical data available for simulation catch-up on {sim_date_str}")
-            return
+            return [] # Bug 10: return explicit list
         
         self.logger.info(f"Loaded {len(data)} snapshots for {sim_date_str}. Processing...")
 
-        data['datetime'] = pd.to_datetime(data['datetime'])
+        dt_series = pd.to_datetime(data['datetime'])
+        if dt_series.dt.tz is None:
+            data['datetime'] = dt_series.dt.tz_localize('America/Chicago')
+        else:
+            data['datetime'] = dt_series.dt.tz_convert('America/Chicago')
+
         data['mid_price'] = (data['bidprice'] + data['askprice']) / 2
         data = data.dropna(subset=['delta', 'bidprice', 'askprice'])
         
         groups = data.groupby('datetime')
-        self._option_cache = {}
+        self._option_cache = {} # P6: clear per timestamp group
         
         start_time_obj = time(8, 30)
         end_time_obj = time(15, 0)
 
         for ts, snap in groups:
+            # P3 Fix: Pre-index snap for O(1) position valuation during catch-up
             snap = snap.reset_index(drop=True)
+            snap['strike_int'] = snap['strike_price'].round().astype(int)
+            snap_indexed = snap.set_index(['strike_int', 'side'])
+            
+            # P6 Fix: Clear the option cache per timestamp group 
+            self._option_cache = {} 
+            
             t_time = ts.time()
             t_trades = defaultdict(list)
             
             # Apply any live trades that occurred at or before this timestamp
+            # P3 Optimization: Use indexed lookups here too
             while pending_live_trades and pending_live_trades[0].timestamp.replace(tzinfo=None) <= ts.replace(tzinfo=None):
                 lt = pending_live_trades.pop(0)
                 # Map leg prices to current snap for accuracy if possible
                 for l in lt.legs:
-                    lsnap = snap[(snap['strike_price'].round().astype(int) == int(round(l.strike))) & (snap['side'] == l.side)]
-                    if not lsnap.empty:
-                        l.price = lsnap['mid_price'].iloc[0]
-                        l.delta = lsnap['delta'].iloc[0]
+                    l_key = (int(round(l.strike)), l.side)
+                    if l_key in snap_indexed.index:
+                        lrow = snap_indexed.loc[[l_key]].iloc[0]
+                        l.price = lrow['mid_price']
+                        l.delta = lrow['delta']
                 self.live_combined_portfolio.add_trade(lt)
-
-            spx = self.estimate_spx_price(snap)
-            
+            # Reconstruction of monitor state from a snapshot
+            spx = self._last_spx_price or self.estimate_spx_price(snap)
+                
             # Target decay for rebalance logic
             decay_c = calculate_delta_decay(ts, 'CALL', self.config['initial_sum_delta']/2, start_time_obj, end_time_obj)
             decay_p = calculate_delta_decay(ts, 'PUT', self.config['initial_sum_delta']/2, start_time_obj, end_time_obj)
@@ -1731,45 +2246,70 @@ class LiveTradingMonitor:
                 
                 # Update positions
                 for p in s.portfolio.positions:
-                    r = snap[(snap['strike_price'].round().astype(int) == int(round(p.strike))) & (snap['side'] == p.side)]
-                    if not r.empty:
-                        p.delta = r['delta'].iloc[0]
-                        p.price = r['mid_price'].iloc[0]
-                        p.theta = float(r['theta'].iloc[0]) if not pd.isna(r['theta'].iloc[0]) else 0.0
+                    p_key = (int(round(p.strike)), p.side)
+                    if p_key in snap_indexed.index:
+                        p_row = snap_indexed.loc[[p_key]].iloc[0]
+                        p.delta = p_row['delta']
+                        p.price = p_row['mid_price']
+                        p.theta = float(p_row['theta']) if not pd.isna(p_row['theta']) else 0.0
                 
                 # Check for entry
                 if not s.has_traded_today and t_time < end_time_obj:
-                    trade = self._check_entry(s, snap, ts)
+                    trade = None
+                    # Soft mode: see if we have a live IC to sync with
+                    if mode == 'soft' and s.sid in soft_ics:
+                        # Re-sync if the current bootstrap clock has passed the live entry time
+                        if ts.replace(tzinfo=None) >= soft_ics[s.sid][0].timestamp.replace(tzinfo=None):
+                            live_ic = soft_ics[s.sid].pop(0)
+                            # Create a sync trade using these strikes but current database pricing
+                            trade = self._create_sync_entry(s, snap, ts, live_ic)
+                            if trade:
+                                self.logger.info(f"Bootstrap [SOFT]: Synced {s.sid} entry with live strikes at {ts.strftime('%H:%M')}")
+                    
+                    if not trade: # Fallback to standard logic if HARD mode or no soft IC pending
+                        # Mode logic: only fallback to hard entry if we have no soft entry waiting/available
+                        soft_entry_pending = mode == 'soft' and s.sid in soft_ics and len(soft_ics[s.sid]) > 0
+                        
+                        if not soft_entry_pending:
+                            trade = self._check_entry(s, snap, ts)
+                        else:
+                            self.logger.debug(f"Bootstrap [SOFT]: Skipping hard entry logic at {ts.strftime('%H:%M')} for {s.sid} - awaiting live trade sync.")
+                    
                     if trade:
                         s.portfolio.add_trade(trade)
                         t_trades[sid].append(trade)
                         s.has_traded_today = True
-                
-                # Check for rebalance/exit
-                elif s.has_traded_today:
-                    if t_time >= end_time_obj and s.portfolio.positions:
-                        trade = self._create_exit_trade(s, snap, ts, spx)
-                        if trade:
-                            s.portfolio.add_trade(trade)
-                            t_trades[sid].append(trade)
-                    elif t_time < end_time_obj:
-                        trades = self._check_rebalance(s, snap, ts, t_short)
-                        for tr in trades:
-                            s.portfolio.add_trade(tr)
-                            t_trades[sid].append(tr)
-
+                # Check for rebalance logic if we have positions
+                elif s.portfolio.positions:
+                    if t_time >= end_time_obj:
+                        exit_t = self._create_exit_trade(s, snap, ts, spx)
+                        if exit_t:
+                            s.portfolio.add_trade(exit_t)
+                            t_trades[s.sid].append(exit_t)
+                    else:
+                        # Rebalance
+                        res_trades = self._check_rebalance(s, snap, ts, t_short)
+                        for res_t in res_trades:
+                            s.portfolio.add_trade(res_t)
+                            t_trades[s.sid].append(res_t)
+            
+            # Record net trades for the step if any strategy traded
             if t_trades:
                 for mt in self.net_trades(t_trades):
                     self.combined_portfolio.add_trade(mt)
-
-            # Update pricing for the aggregated portfolios to ensure accurate PnL/Deltas
+                
+                # Sync combined simulation
+                self._reconcile_combined_simulation()
+            
+            # Post-step position sync (ensure deltas are updated for final state/history)
             for port in [self.combined_portfolio, self.live_combined_portfolio]:
                 for p in port.positions:
-                    r = snap[(snap['strike_price'].round().astype(int) == int(round(p.strike))) & (snap['side'] == p.side)]
-                    if not r.empty:
-                        p.delta = r['delta'].iloc[0]
-                        p.price = r['mid_price'].iloc[0]
-                        p.theta = float(r['theta'].iloc[0]) if not pd.isna(r['theta'].iloc[0]) else 0.0
+                    p_key = (int(round(p.strike)), p.side)
+                    if p_key in snap_indexed.index:
+                        row = snap_indexed.loc[[p_key]].iloc[0]
+                        p.delta = float(row['delta']) if not pd.isna(row['delta']) else 0.0
+                        p.price = row['mid_price']
+                        p.theta = float(row['theta']) if not pd.isna(row['theta']) else 0.0
 
             if collect_history:
                 sim_d = self.combined_portfolio.get_all_deltas(snap)
@@ -1778,6 +2318,14 @@ class LiveTradingMonitor:
                 history.append({
                     'ts': ts.isoformat(),
                     'spx': spx,
+                    'sim_sc_strike': self.combined_portfolio.short_call_strike,
+                    'sim_sp_strike': self.combined_portfolio.short_put_strike,
+                    'live_sc_strike': self.live_combined_portfolio.short_call_strike,
+                    'live_sp_strike': self.live_combined_portfolio.short_put_strike,
+                    'sim_sc_delta': sim_d['abs_short_call_delta'],
+                    'sim_sp_delta': sim_d['abs_short_put_delta'],
+                    'live_sc_delta': live_d['abs_short_call_delta'],
+                    'live_sp_delta': live_d['abs_short_put_delta'],
                     'sim_pnl': round(self.combined_portfolio.net_pnl, 2),
                     'live_pnl': round(self.live_combined_portfolio.net_pnl, 2)
                 })
@@ -1799,7 +2347,9 @@ class LiveTradingMonitor:
 
     def _find_option(self, snap: pd.DataFrame, target: float, side: str, timestamp: datetime, max_diff: float = None, short_strike: float = None):
         target = target if side == 'CALL' else -abs(target)
-        cache_key = (timestamp, round(target, 4), side, max_diff, short_strike)
+        # P6 Fix: timestamp is redundant because _option_cache is cleared per tick/snapshot.
+        # This increases cache hits for lookups shared by multiple strategies in the same tick.
+        cache_key = (round(target, 4), side, max_diff, short_strike)
         if cache_key in self._option_cache: return self._option_cache[cache_key]
         
         opts = snap[(snap['side'] == side) & (snap['delta'].notna())]
@@ -1825,11 +2375,6 @@ class LiveTradingMonitor:
                 res = opts.iloc[np.where(mask)[0][np.argmin(np.abs(deltas[mask] - target))]]
             else: res = opts.iloc[np.argmin(np.abs(deltas - target))]
         
-        # Issue 11: Keep cache bounded (LRU behavior with popitem(last=False))
-        if len(self._option_cache) > 2000:
-            while len(self._option_cache) > 1000:
-                self._option_cache.popitem(last=False)
-                
         self._option_cache[cache_key] = res
         return res
 
@@ -1914,14 +2459,18 @@ class LiveTradingMonitor:
             OptionLeg(opt_l['symbol'], opt_l['strike_price'], side, 1, opt_l['delta'], opt_l.get('theta', 0), price=opt_l['mid_price'], target_delta=lt if side == 'CALL' else -lt)
         ]
         credit = sum(-lg.quantity*lg.price for lg in legs)*100
-        return Trade(ts, legs, credit, 0, st + (lt if side == 'PUT' else 0), TradePurpose.REBALANCE_NEW, s.sid) # st is approx half sum delta
+        # Bug 10 Fix: current_sum_delta should be the sum of deltas of the legs
+        sum_delta = sum(l.quantity * l.delta for l in legs)
+        return Trade(ts, legs, credit, 0, sum_delta, TradePurpose.REBALANCE_NEW, s.sid)
 
     def _create_rebalance_trade(self, s: SubStrategy, snap: pd.DataFrame, target: float, side: str, ts: datetime, is_short: bool, t_long: float = None) -> Optional[Trade]:
-        ex_legs = [p for p in s.portfolio.positions if p.side == side and ((is_short and p.quantity < 0) or (not is_short and p.quantity > 0))]
-        if not ex_legs: return None
-        ex = ex_legs[0]
-        
-        max_diff = self.config['max_spread_diff']
+        # Bug 10 Fix: Ensure current_sum_delta reflects leg sum
+        with self._data_lock:
+            ex_legs = [p for p in s.portfolio.positions if p.side == side and ((is_short and p.quantity < 0) or (not is_short and p.quantity > 0))]
+            if not ex_legs: return None
+            ex = ex_legs[0]
+            
+            max_diff = self.config['max_spread_diff']
         
         if is_short:
             new_s = self._find_option(snap, target, side, ts)
@@ -1946,7 +2495,9 @@ class LiveTradingMonitor:
             credit = sum(-l.quantity * l.price for l in legs) * 100
             comm = self.config.get('commission_per_contract', 1.13) * len(legs)
             if abs(credit) <= self.config['min_credit']*100: return None
-            return Trade(ts, legs, credit, comm, target * 2, TradePurpose.REBALANCE_SHORT, s.sid)
+            # Bug 10 Fix: current_sum_delta should be sum of leg deltas
+            sum_delta = sum(l.quantity * l.delta for l in legs)
+            return Trade(ts, legs, credit, comm, sum_delta, TradePurpose.REBALANCE_SHORT, s.sid)
         else:
             ss_legs = [p for p in s.portfolio.positions if p.side == side and p.quantity < 0]
             short_strike = ss_legs[0].strike if ss_legs else None
@@ -1959,7 +2510,9 @@ class LiveTradingMonitor:
             ]
             credit = sum(-l.quantity * l.price for l in legs) * 100
             comm = self.config.get('commission_per_contract', 1.13) * len(legs)
-            return Trade(ts, legs, credit, comm, target * 2, TradePurpose.REBALANCE_LONG, s.sid)
+            # Bug 10 Fix: current_sum_delta should be sum of leg deltas
+            sum_delta = sum(l.quantity * l.delta for l in legs)
+            return Trade(ts, legs, credit, comm, sum_delta, TradePurpose.REBALANCE_LONG, s.sid)
 
     def _create_exit_trade(self, s: SubStrategy, snap: pd.DataFrame, ts: datetime, spx: Optional[float]) -> Optional[Trade]:
         closing_legs = []
@@ -2015,7 +2568,7 @@ class LiveTradingMonitor:
         return list(agg.values())
 
     def _get_smart_chunks(self, legs: List[OptionLeg]) -> List[List[OptionLeg]]:
-        """DETERMINISTIC CHUNKING: Always form the same ICs for the same set of legs."""
+        """Ported from spt_v4: Priorities Iron Condors and Rank by Delta for fill stability."""
         unrolled = self._unroll_legs(legs)
         if not unrolled: return []
         if len(unrolled) <= 4: return [unrolled]
@@ -2023,30 +2576,50 @@ class LiveTradingMonitor:
         ics = []
         remaining = list(unrolled) # Already sorted by Side/Strike from _unroll_legs
         
-        # Greedily pull out Iron Condors in a deterministic way
+        # 1. Extract possible Iron Condors greedily (Deterministic combination search)
         while len(remaining) >= 4:
-            # Find the first available Short Put (usually the foundation of our structure)
-            sp = next((l for l in remaining if l.side == 'PUT' and l.quantity < 0), None)
-            if not sp: break
+            found_ic = False
+            best_ic_combo = None
+            best_indices = None
+            min_absolute_delta = float('inf')
             
-            # Find partners to fulfill the IC structure: LP, SC, LC
-            lp = next((l for l in remaining if l.side == 'PUT' and l.quantity > 0), None)
-            sc = next((l for l in remaining if l.side == 'CALL' and l.quantity < 0), None)
-            lc = next((l for l in remaining if l.side == 'CALL' and l.quantity > 0), None)
+            # Note: Combinations are deterministic over the sorted remaining list
+            for indices in combinations(range(len(remaining)), 4):
+                combo = [remaining[i] for i in indices]
+                sc = any(l.side == 'CALL' and l.quantity < 0 for l in combo)
+                lc = any(l.side == 'CALL' and l.quantity > 0 for l in combo)
+                sp = any(l.side == 'PUT' and l.quantity < 0 for l in combo)
+                lp = any(l.side == 'PUT' and l.quantity > 0 for l in combo)
+                
+                if sc and lc and sp and lp:
+                    net_delta = sum(l.delta * l.quantity for l in combo)
+                    abs_delta = abs(net_delta)
+                    # We greedily find the most balanced IC to pull into the list
+                    if abs_delta < min_absolute_delta:
+                        min_absolute_delta = abs_delta
+                        best_ic_combo = combo
+                        best_indices = indices
+                        found_ic = True
             
-            if all([sp, lp, sc, lc]):
-                combo = [sp, lp, sc, lc]
-                ics.append(combo)
-                # Remove these specific instances
-                remaining.remove(sp); remaining.remove(lp);
-                remaining.remove(sc); remaining.remove(lc);
+            if found_ic:
+                ics.append((best_ic_combo, min_absolute_delta))
+                # Remove from remaining in reverse
+                for i in sorted(best_indices, reverse=True):
+                    remaining.pop(i)
             else:
-                break # Cannot form full IC anymore
+                break
         
-        # Any remaining legs are grouped into 4-leg chunks
-        chunks = ics
+        # 2. Sort the pulled ICs by delta: High Delta (most critical) first
+        ics.sort(key=lambda x: x[1], reverse=True)
+        
+        # 3. Form final chunks: (Non-IC legs first, then ICs)
+        chunks = []
+        # Remaining odd legs (Non-IC) first
         for i in range(0, len(remaining), 4):
             chunks.append(remaining[i:i+4])
+        # Ranked ICs
+        for ic_combo, delta in ics:
+            chunks.append(ic_combo)
             
         return chunks
 
@@ -2067,38 +2640,83 @@ class LiveTradingMonitor:
         return sig
 
     def create_execution_plan(self, trade: Trade) -> Dict:
-        self.logger.info(f"Creating execution plan for trade {trade.strategy_id} with {len(trade.legs)} legs")
-        chunks = self._get_smart_chunks(trade.legs)
-        self.logger.info(f"Formed {len(chunks)} smart chunks from {len(trade.legs)} legs")
-        to_submit = []
-        matched_broker_orders = []
-        matched_ids = set()
+        """
+        Calculates which chunks to submit/cancel by deduplicating against 
+        current Live Working Orders (supports partial overlaps).
+        """
+        self.logger.debug(f"Creating execution plan for trade {trade.strategy_id}")
         
-        # 1. Match Chunks
-        current_working = list(self.working_orders)
-        for chunk in chunks:
-            match_idx = self._find_sig_match(chunk, current_working)
-            if match_idx is not None:
-                wo = current_working.pop(match_idx)
-                matched_broker_orders.append(wo)
-                matched_ids.add(str(wo.get('orderId')))
-            else:
-                to_submit.append(chunk)
+        # 1. Map all working orders to a sum of quantities per leg
+        working_qtys = defaultdict(float)
+        matched_ids = set()
+        for o in self.working_orders:
+            wid = str(o.get('orderId'))
+            if not self._is_spx_0dte_order(o): continue
+            
+            for leg in o.get('orderLegCollection', []):
+                instr = leg.get('instruction', '')
+                qty = float(leg.get('quantity', 0))
+                instr_obj = leg.get('instrument', {})
+                if instr_obj.get('assetType') == 'OPTION':
+                    strike = instr_obj.get('strikePrice')
+                    side = instr_obj.get('putCall')
+                    if strike and side:
+                        key = (int(round(float(strike))), side)
+                        mult = 1.0 if 'BUY' in instr else -1.0
+                        working_qtys[key] += (qty * mult)
+                        matched_ids.add(wid)
 
-        # 2. Find orders to CANCEL
+        # 2. Subtract working quantities from Trade needed quantities
+        remaining_legs = []
+        covered_count = 0
+        for leg in trade.legs:
+            key = (int(round(float(leg.strike))), leg.side)
+            needed = float(leg.quantity)
+            already_covered = working_qtys.get(key, 0.0)
+            
+            # If target direction is same, subtract
+            if (needed > 0 and already_covered > 0) or (needed < 0 and already_covered < 0):
+                if abs(needed) > abs(already_covered):
+                    to_fill = needed - already_covered
+                    working_qtys[key] = 0 
+                else:
+                    to_fill = 0
+                    working_qtys[key] -= needed 
+            else:
+                to_fill = needed
+
+            if abs(to_fill) > 0.01:
+                new_leg = OptionLeg(leg.symbol, leg.strike, leg.side, to_fill, leg.delta, leg.theta, leg.price, leg.entry_price)
+                new_leg.instruction = getattr(leg, 'instruction', None)
+                remaining_legs.append(new_leg)
+            else:
+                covered_count += 1
+
+        if covered_count > 0:
+            self.logger.info(f"Adjusted execution plan: {covered_count} legs partially or fully covered by working orders.")
+
+        to_submit = self._get_smart_chunks(remaining_legs)
+
+        # 3. Find orders to CANCEL (stale ones)
+        # Bug Fix (Issue 5): Any order containing legs NOT in our current target strikes is stale.
+        # Short-circuit logic was wrong: it was keeping orders if ANY leg matched.
+        target_keys = {(int(round(float(tl.strike))), tl.side) for tl in trade.legs}
         to_cancel = []
         for wo in self.working_orders:
             wid = str(wo.get('orderId'))
-            if wid in matched_ids: continue
-            if not self._is_spx_0dte_order(wo): continue
-            
-            # If it belongs to strategy or is a recon overlap, and not matched -> kill it.
-            if self.order_to_strategy.get(wid) == trade.strategy_id or trade.purpose == TradePurpose.RECONCILIATION:
-                to_cancel.append(wo)
+            if wid in matched_ids:
+                if self.order_to_strategy.get(wid) == trade.strategy_id or trade.purpose == TradePurpose.RECONCILIATION:
+                    is_stale = False
+                    for leg in wo.get('orderLegCollection', []):
+                        inst_obj = leg.get('instrument', {})
+                        k = (int(round(float(inst_obj.get('strikePrice', 0)))), inst_obj.get('putCall', ''))
+                        if k not in target_keys:
+                            is_stale = True
+                            break # Any single wrong leg makes the entire order stale
+                    if is_stale: to_cancel.append(wo)
 
-        self.logger.info(f"Execution plan result: {len(to_submit)} to submit, {len(matched_broker_orders)} to keep, {len(to_cancel)} to cancel")
         return {
-            'to_keep': matched_broker_orders,
+            'to_keep': [o for o in self.working_orders if str(o.get('orderId')) in matched_ids and o not in to_cancel],
             'to_submit': to_submit,
             'to_cancel': to_cancel
         }
@@ -2209,7 +2827,83 @@ class LiveTradingMonitor:
             commission=comm,
             current_sum_delta=first_t.current_sum_delta,
             purpose=first_t.purpose,
-            strategy_id="GAP_SYNC",
+            strategy_id="combined", # Bug 6 Fix: Use more accurate label than GAP_SYNC
             constituent_trades=all_constituents
         )
         return [netted_trade]
+
+    def _reconcile_combined_simulation(self, force: bool = False):
+        """Bug 8 Fix: Ensure the combined simulation portfolio reflects the sum of all sub-strategies."""
+        with self._data_lock:
+            # P4 Optimization: Only rebuild when dirty (signals occurred) or forced
+            if not self._sim_dirty and not force:
+                return
+            self._sim_dirty = False
+            
+            # We must rebuild the combined portfolio from sub-strategy portfolios to avoid drift
+            new_port = Portfolio()
+            # Bug 3 Fix: Preserve peak margin across reconciliations
+            if hasattr(self, 'combined_portfolio'):
+                new_port.max_margin = self.combined_portfolio.max_margin
+            
+            for sid, s in self.sub_strategies.items():
+                for p in s.portfolio.positions:
+                    # Create a dummy trade to populate position
+                    dummy_trade = Trade(
+                        timestamp=datetime.now(CHICAGO),
+                        legs=[OptionLeg(p.symbol, p.strike, p.side, p.quantity, p.delta, p.theta, p.price, p.entry_price)],
+                        credit=0,
+                        commission=0,
+                        current_sum_delta=0,
+                        purpose=TradePurpose.RECONCILIATION,
+                        strategy_id=sid
+                    )
+                    new_port.add_trade(dummy_trade)
+                # Transfer cash separately
+                new_port.cash += s.portfolio.cash
+            
+            # Transfer baseline and trades
+            new_port.starting_market_value = self.combined_portfolio.starting_market_value
+            # Note: We don't strictly need to copy history for reconciliation, but it helps
+            new_port.trades = list(self.combined_portfolio.trades)
+            self.combined_portfolio = new_port
+            self.logger.debug("Reconciled combined simulation portfolio with sub-strategy sum.")
+
+    async def _attempt_broker_reconnect(self):
+        """Robustness-3 Fix: Attempt to restore broker connection session."""
+        if self.broker_reconnecting: return
+        self.broker_reconnecting = True
+        try:
+            self.logger.info("Retrying Schwab client initialization...")
+            await self.initialize_schwab_client()
+            if self.client:
+                # Verification call
+                resp = await self.client.get_account_numbers()
+                if resp.status_code == 200:
+                    self.logger.info("Schwab connection restored successfully.")
+                    self.broker_connected = True
+                    self.heartbeat_failures = 0
+                    self._broadcast_alert("success", "Connection Restored", "Broker heartbeat is back online.")
+                else:
+                    self.logger.warning(f"Reconnect verification failed: {resp.status_code}")
+        except Exception as e:
+            self.logger.error(f"Failed broker reconnect attempt: {e}")
+        finally:
+            self.broker_reconnecting = False
+
+    def _is_trade_redundant(self, trade: Trade) -> bool:
+        """
+        Check if the divergence this trade intended to fix is already gone.
+        Accounts for both filled positions and working orders.
+        """
+        eff_live_dict = self._get_effective_live_positions()
+        with self._data_lock:
+            # Flatten quantities for Sim state
+            sim_dict = { (int(round(p.strike)), p.side): float(p.quantity) for p in self.combined_portfolio.positions }
+            
+            # A trade is redundant ONLY if all legs it covers are now balanced (Sim == Effective Live)
+            for leg in trade.legs:
+                key = (int(round(leg.strike)), leg.side)
+                if abs(sim_dict.get(key, 0.0) - eff_live_dict.get(key, 0.0)) > 0.01:
+                    return False
+        return True

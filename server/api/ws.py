@@ -4,15 +4,20 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from api.routes import get_monitor
 from datetime import datetime
+from zoneinfo import ZoneInfo
+CHICAGO = ZoneInfo("America/Chicago")
 from typing import List, Set, Dict, Any
 from core.config import CONFIG
 
+import time
 router = APIRouter()
 logger = logging.getLogger("API_WS")
+APP_VERSION = str(int(time.time())) # Deploy tracking
 
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
+        self.tick_count = 0
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -46,43 +51,41 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 async def broadcast_state(monitor):
-    """Periodically push monitor state to all connected clients"""
+    """Periodically push monitor state to all connected clients (PERF-3 fix)"""
     while True:
         try:
             if not manager.active_connections:
-                await asyncio.sleep(1) # Sleep longer if no one listening
+                await asyncio.sleep(1)
                 continue
             
-            # Prepare detailed state snapshot UNDER LOCK (Bug 6d fix)
+            # 1. Take FAST snapshot of state under lock
+            # Bug 7 Fix: Capture all derived data and lists while under the lock 
+            # to prevent runtime errors if lists change size during iteration.
+            # 1. Take FAST snapshots of index data outside lock
+            vix = monitor._last_vix_price # Atomic float read
+            spx = monitor._last_spx_price # Atomic float read
+            
             with monitor._data_lock:
-                sim_p = monitor.combined_portfolio
-                live_p = monitor.live_combined_portfolio
+                status = monitor.status
+                broker_connected = monitor.broker_connected
+                trading_enabled = monitor.trading_enabled
+                heartbeat_failures = monitor.heartbeat_failures
+                working_orders = [
+                    {"id": o.get('orderId'), "symbol": o.get('symbol'), "qty": o.get('quantity'), "price": o.get('price'), "status": o.get('status')}
+                    for o in monitor.working_orders
+                ]
+                logs = list(monitor.logs)
                 
-                state = {
-                    "ts": datetime.now().isoformat(),
-                    "spx": monitor._last_spx_price if hasattr(monitor, '_last_spx_price') else None,
-                    "status": monitor.status,
-                    "broker_connected": monitor.broker_connected,
-                    "trading_enabled": monitor.trading_enabled,
-                    "heartbeat_failures": monitor.heartbeat_failures,
-                    "working_orders": list(monitor.working_orders), # Snapshot list
-                    "stats": {
-                        "total_trades": monitor.stats.total_trades,
-                        "winners": monitor.stats.winners,
-                        "losers": monitor.stats.losers,
-                        "win_rate": monitor.stats.win_rate,
-                        "total_pnl": round(monitor.stats.total_pnl, 2),
-                        "max_drawdown": round(monitor.stats.max_drawdown, 2),
-                        "avg_duration": round(monitor.stats.avg_duration_minutes, 1)
-                    },
-                    "sim": {
-                        "pnl": round(float(sim_p.gross_pnl), 2),
-                        "fees": round(float(sim_p.fees), 2),
-                        "net_pnl": round(float(sim_p.net_pnl), 2),
-                        "realized": round(float(sim_p.realized_pnl), 2),
-                        "unrealized": round(float(sim_p.unrealized_pnl), 2),
-                        "margin": round(float(sim_p.calculate_standard_margin()), 2),
-                        "trades": sim_p.total_contracts,
+                # Helper to snapshot portfolio metrics
+                def snap_p(p):
+                    return {
+                        "pnl": round(float(p.gross_pnl), 2),
+                        "fees": round(float(p.fees), 2),
+                        "net_pnl": round(float(p.net_pnl), 2),
+                        "realized": round(float(p.realized_pnl), 2),
+                        "unrealized": round(float(p.unrealized_pnl), 2),
+                        "margin": round(float(p.current_margin), 2),
+                        "trades": p.total_contracts,
                         "recent_trades": [
                             {
                                 "ts": t.timestamp.isoformat(),
@@ -90,74 +93,85 @@ async def broadcast_state(monitor):
                                 "credit": round(float(t.credit), 2),
                                 "strategy": t.strategy_id,
                                 "legs": [{"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side} for l in t.legs]
-                            } for t in sim_p.trades[-10:]
+                            } for t in p.trades
                         ],
-                        "delta": round(float(sim_p.total_delta), 4),
-                        "theta": round(float(sim_p.total_theta), 2),
+                        "delta": round(float(p.total_delta), 4),
+                        "theta": round(float(p.total_theta), 2),
                         "positions": [
                             {
-                                "symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, 
-                                "pnl": round(float(p.current_day_pnl), 2), "delta": round(float(p.delta), 4),
-                                "bid": round(float(p.bid_price), 2), "ask": round(float(p.ask_price), 2)
+                                "symbol": pos.symbol, "strike": pos.strike, "side": pos.side, "qty": pos.quantity, 
+                                "pnl": round(float(pos.current_day_pnl), 2), "delta": round(float(pos.delta), 4),
+                                "bid": round(float(pos.bid_price), 2), "ask": round(float(pos.ask_price), 2)
                             }
-                            for p in list(sim_p.positions) # Snapshot list
-                        ]
-                    },
-                    "live": {
-                        "pnl": round(float(live_p.gross_pnl), 2),
-                        "fees": round(float(live_p.fees), 2),
-                        "net_pnl": round(float(live_p.net_pnl), 2),
-                        "realized": round(float(live_p.realized_pnl), 2),
-                        "unrealized": round(float(live_p.unrealized_pnl), 2),
-                        "margin": round(float(live_p.calculate_standard_margin()), 2),
-                        "trades": live_p.total_contracts,
-                        "recent_trades": [
-                            {
-                                "ts": t.timestamp.isoformat(),
-                                "purpose": t.purpose.value,
-                                "credit": round(float(t.credit), 2),
-                                "strategy": t.strategy_id,
-                                "legs": [{"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side} for l in t.legs]
-                            } for t in live_p.trades[-10:]
-                        ],
-                        "delta": round(float(live_p.total_delta), 4),
-                        "theta": round(float(live_p.total_theta), 2),
-                        "positions": [
-                            {
-                                "symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, 
-                                "pnl": round(float(p.current_day_pnl), 2), "delta": round(float(p.delta), 4),
-                                "bid": round(float(p.bid_price), 2), "ask": round(float(p.ask_price), 2)
-                            }
-                            for p in list(live_p.positions) # Snapshot list
-                        ]
-                    },
-                    "strategies": {},
-                    "logs": list(monitor.logs),
-                    "config": CONFIG
-                }
-                
-                # Add sub-strategy level data
-                for sid, s in monitor.sub_strategies.items():
-                    state["strategies"][sid] = {
-                        "pnl": round(float(s.portfolio.current_pnl), 2),
-                        "traded": s.has_traded_today,
-                        "positions": [
-                            {
-                                "symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, 
-                                "pnl": round(float(p.current_day_pnl), 2), "delta": round(float(p.delta), 4),
-                                "bid": round(float(p.bid_price), 2), "ask": round(float(p.ask_price), 2)
-                            }
-                            for p in list(s.portfolio.positions)
-                        ],
-                        "history": [
-                            {
-                                "ts": t.timestamp.isoformat(),
-                                "purpose": t.purpose.value,
-                                "credit": round(float(t.credit), 2),
-                                "legs": [{"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side} for l in t.legs]
-                            } for t in s.portfolio.trades[-5:]
+                            for pos in p.positions
                         ]
                     }
+
+                sim_data = snap_p(monitor.combined_portfolio)
+                live_data = snap_p(monitor.live_combined_portfolio)
+                
+                # Capture sub-strategy state
+                # Scalability #4: Split payload into Fast (500ms heartbeat) and Slow (5s detailed) tiers
+                strategies_data = {}
+                if not hasattr(manager, 'tick_count'): manager.tick_count = 0
+                manager.tick_count += 1
+                
+                # Only send detailed strategy breakdown every 10 ticks
+                if manager.tick_count % 10 == 0:
+                    for sid, s in monitor.sub_strategies.items():
+                        strategies_data[sid] = {
+                            "pnl": round(float(s.portfolio.current_pnl), 2),
+                            "traded": s.has_traded_today,
+                            "positions": [
+                                {
+                                    "symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, 
+                                    "pnl": round(float(p.current_day_pnl), 2), "delta": round(float(p.delta), 4),
+                                    "bid": round(float(p.bid_price), 2), "ask": round(float(p.ask_price), 2)
+                                }
+                                for p in s.portfolio.positions
+                            ],
+                            "history": [
+                                {
+                                    "ts": t.timestamp.isoformat(),
+                                    "purpose": t.purpose.value,
+                                    "credit": round(float(t.credit), 2),
+                                    "legs": [{"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side} for l in t.legs]
+                                } for t in s.portfolio.trades[-5:]
+                            ]
+                        }
+                else:
+                    # Fast tier: just send minimal status for each strategy to keep PnL bars alive
+                    for sid, s in monitor.sub_strategies.items():
+                        strategies_data[sid] = {
+                            "pnl": round(float(s.portfolio.current_pnl), 2),
+                            "traded": s.has_traded_today
+                        }
+
+            # 2. Build and send OUTSIDE the lock
+            state = {
+                "ts": datetime.now(CHICAGO).isoformat(),
+                "spx": spx,
+                "vix": vix,
+                "status": status,
+                "broker_connected": broker_connected,
+                "trading_enabled": trading_enabled,
+                "heartbeat_failures": heartbeat_failures,
+                "working_orders": working_orders,
+                "stats": {
+                    "total_trades": monitor.stats.total_trades,
+                    "winners": monitor.stats.winners,
+                    "losers": monitor.stats.losers,
+                    "win_rate": monitor.stats.win_rate,
+                    "total_pnl": round(monitor.stats.total_pnl, 2),
+                    "max_drawdown": round(monitor.stats.max_drawdown, 2),
+                    "avg_duration": round(monitor.stats.avg_duration_minutes, 1)
+                },
+                "sim": sim_data,
+                "live": live_data,
+                "strategies": strategies_data,
+                "logs": logs,
+                "version": APP_VERSION
+            }
 
             await manager.broadcast({"type": "state_update", "state": state})
             await asyncio.sleep(0.5) # 500ms cadence
@@ -178,8 +192,16 @@ async def websocket_endpoint(websocket: WebSocket, monitor = Depends(get_monitor
     
     await websocket.send_text(json.dumps({
         "type": "history_init",
-        "history": history
+        "history": history,
+        "config": CONFIG # P5 Fix: Send config once on connect
     }))
+    
+    # If there's an active trade awaiting confirmation, re-send signal 
+    # so the UI can restore the modal after a page refresh (Bug 14 Fix)
+    if monitor.pending_trade:
+        payload = monitor.get_trade_signal_payload(monitor.pending_trade)
+        payload["is_reconnect"] = True
+        await websocket.send_text(json.dumps(payload))
     
     try:
         while True:
@@ -191,14 +213,37 @@ async def websocket_endpoint(websocket: WebSocket, monitor = Depends(get_monitor
                 
                 if action == "confirm_trade":
                     strat_id = msg.get("strat_id")
-                    logger.info(f"Manual confirmation received via WS for strategy: {strat_id}")
-                    # Ensure monitor handles this safely
-                    await monitor.confirm_live_trade(strat_id)
+                    overrides = msg.get("overrides") # Task #28: List of {idx, price_ea}
+                    logger.info(f"Manual confirmation received via WS for strategy: {strat_id} with {len(overrides) if overrides else 0} overrides.")
+                    await monitor.confirm_live_trade(strat_id, overrides=overrides)
+                    # Broadcast to other clients to close their modals
+                    await manager.broadcast({
+                        "type": "trade_action",
+                        "action": "close_modal",
+                        "strat_id": strat_id
+                    })
                 
                 elif action == "dismiss_trade":
                     strat_id = msg.get("strat_id")
                     logger.info(f"Manual dismissal received via WS for strategy: {strat_id}")
                     await monitor.dismiss_live_trade(strat_id)
+                    # Broadcast to other clients to close their modals
+                    await manager.broadcast({
+                        "type": "trade_action",
+                        "action": "close_modal",
+                        "strat_id": strat_id
+                    })
+                
+                elif action == "toggle_trade_pause":
+                    is_paused = msg.get("is_paused", False)
+                    monitor.is_trade_timer_paused = is_paused
+                    logger.info(f"Trade timer {'PAUSED' if is_paused else 'RESUMED'} via WS")
+                    # Sync other clients (Mac vs Mobile)
+                    await manager.broadcast({
+                        "type": "trade_action",
+                        "action": "pause_sync",
+                        "is_paused": is_paused
+                    })
             
             except json.JSONDecodeError:
                 logger.error("Failed to decode JSON message from client")

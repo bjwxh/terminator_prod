@@ -75,6 +75,7 @@ def send_email_alert(config: Dict, subject: str, body: str):
 
 async def notify_all(config: Dict, message: str, title: str = "Terminator Alert", email_body: Optional[str] = None):
     """Convenience helper to send both push and email"""
+    logger.info(f"notify_all started for: {title} | {message[:60]}")
     # 1. Push (Async)
     if config.get('ntfy_enabled', True):
         await send_push(config.get('ntfy_topic'), message, title=title)

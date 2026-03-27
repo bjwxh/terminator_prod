@@ -66,6 +66,8 @@ class Portfolio:
         self.long_put_strike: Optional[float] = None
         
         self._position_dict: Dict[Tuple[str, int, str], OptionLeg] = {}
+        self._margin_dirty: bool = True
+        self._cached_margin: float = 0.0
 
     @property
     def total_delta(self) -> float:
@@ -76,13 +78,61 @@ class Portfolio:
         return sum(p.theta * p.quantity for p in self.positions)
 
     @property
+    def realized_pnl(self) -> float:
+        """Net Realized PnL (Credits from closed legs - commissions for those legs)"""
+        # In this session model, cash reflects entries. 
+        # For intuitive realized/unrealized, we consider:
+        # Realized = Total cash - entry credits of open positions - fees
+        open_entry_credits = sum(p.entry_price * abs(p.quantity) * 100 for p in self.positions if p.quantity < 0)
+        open_entry_costs = sum(p.entry_price * abs(p.quantity) * 100 for p in self.positions if p.quantity > 0)
+        # Note: self.cash is the sum of ALL credits (entry and exit)
+        # So Realized (closed legs) = self.cash - (entry credits of currently open shorts) + (entry costs of currently open longs) - fees
+        return self.cash - open_entry_credits + open_entry_costs - self.fees
+
+    @property
+    def unrealized_pnl(self) -> float:
+        """Gain/Loss since entry for open positions"""
+        return sum((p.price - p.entry_price) * p.quantity * 100 for p in self.positions)
+
+    @property
+    def gross_pnl(self) -> float:
+        """Total PnL before fees (Realized Gains + Unrealized Gains)"""
+        # Unrealized is gain since entry. 
+        # Realized (including entry credits) is self.cash - commissions.
+        # So Gross = Cash + sum((price-entry)*qty*100) - current_open_entries
+        # Actually simpler: Gross = Net + Fees
+        # To avoid recursion, let's use the core formula:
+        # Net = Cash + sum(price*qty*100) - Fees
+        # Gross = Cash + sum(price*qty*100)
+        return self.cash + sum(p.price * p.quantity * 100 for p in self.positions)
+
+    @property
+    def fees(self) -> float:
+        """Total commissions for the current session"""
+        return sum(t.commission for t in self.trades)
+
+    @property
+    def net_pnl(self) -> float:
+        """Total PnL after fees (Gross PnL - Fees)"""
+        return self.gross_pnl - self.fees
+
+    @property
     def current_pnl(self) -> float:
-        """Returns the current unrealized + realized PnL of this portfolio."""
-        pnl = self.cash
-        for p in self.positions:
-            # PnL = (Current Price * Quantity * 100)
-            pnl += p.price * p.quantity * 100
-        return pnl
+        """Compatibility property for net_pnl"""
+        return self.net_pnl
+
+    @property
+    def total_contracts(self) -> int:
+        """Total number of contracts traded (sum of abs quantities across all legs)"""
+        return sum(sum(abs(l.quantity) for l in t.legs) for t in self.trades)
+
+    @property
+    def current_margin(self) -> float:
+        if self._margin_dirty:
+            self._cached_margin = self.calculate_standard_margin()
+            self.max_margin = max(self.max_margin, self._cached_margin)
+            self._margin_dirty = False
+        return self._cached_margin
 
     def calculate_standard_margin(self) -> float:
         """
@@ -157,7 +207,7 @@ class Portfolio:
             del self._position_dict[key]
 
     def add_trade(self, trade: Trade):
-        self.cash += trade.credit - trade.commission
+        self.cash += trade.credit
         for leg in trade.legs:
             # Use integer strike keys for stability
             key = (leg.symbol, int(round(leg.strike)), leg.side)
@@ -193,8 +243,10 @@ class Portfolio:
         
         self._update_strikes(trade)
         self.trades.append(trade)
-        current_margin = self.calculate_standard_margin()
-        self.max_margin = max(self.max_margin, current_margin)
+        self._margin_dirty = True
+        # Max margin is updated lazily via the property or explicitly if needed, 
+        # but for safety we trigger a check here.
+        _ = self.current_margin 
 
     def get_all_deltas(self, snap: Optional[pd.DataFrame] = None) -> Dict[str, float]:
         sc_d = lc_d = sp_d = lp_d = 0.0

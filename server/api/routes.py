@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, List, Any
 from datetime import datetime
+from zoneinfo import ZoneInfo
+CHICAGO = ZoneInfo("America/Chicago")
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -13,7 +15,7 @@ def get_monitor():
 @router.get("/status")
 async def get_status(monitor = Depends(get_monitor)):
     return {
-        "ts": datetime.now().isoformat(),
+        "ts": datetime.now(CHICAGO).isoformat(),
         "status": monitor.status,
         "is_running": monitor.is_running,
         "broker_connected": monitor.broker_connected,
@@ -37,15 +39,19 @@ async def stop_monitor(monitor = Depends(get_monitor)):
     monitor.is_running = False
     return {"msg": "Monitor stop requested"}
 
-@router.post("/trading/enable")
-async def enable_trading(monitor = Depends(get_monitor)):
-    monitor.trading_enabled = True
-    return {"status": "Trading enabled"}
+@router.post("/trading/toggle")
+async def toggle_trading(monitor = Depends(get_monitor)):
+    new_state = not monitor.trading_enabled
+    monitor.set_trading_enabled(new_state)
+    state = "enabled" if monitor.trading_enabled else "disabled"
+    return {"status": f"Trading {state}", "enabled": monitor.trading_enabled}
 
-@router.post("/trading/disable")
-async def disable_trading(monitor = Depends(get_monitor)):
-    monitor.trading_enabled = False
-    return {"status": "Trading disabled"}
+@router.post("/trading/reconnect")
+async def reconnect_broker(monitor = Depends(get_monitor)):
+    # Trigger a fresh initialization of the Schwab client
+    import asyncio
+    asyncio.create_task(monitor.initialize_schwab_client())
+    return {"status": "Reconnect triggered"}
 
 @router.get("/portfolio")
 async def get_portfolio(monitor = Depends(get_monitor)):
