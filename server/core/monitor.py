@@ -529,6 +529,10 @@ class LiveTradingMonitor:
             if now.time() >= time(8, 30) and db_path and os.path.exists(db_path) and db_path != '/dev/null':
                 self.status = "Catching up..."
                 try:
+                    # Bug 3 Fix: Perform explicit initial broker sync before bootstrap reads broker_trades
+                    self.logger.info("Performing initial broker sync before bootstrap...")
+                    await self._sync_broker_data() 
+                    
                     # Collect TRUE broker trades from restored live portfolio for the Live replay
                     # Issue Fix: We used to use s.portfolio.trades (Sim) which caused curves to overlap
                     with self._data_lock:
@@ -609,8 +613,9 @@ class LiveTradingMonitor:
             return
 
         try:
-            # Current time in Chicago for order filtering
-            now_chi = datetime.now(CHICAGO)
+            # Bug 4 Fix: Standardize to_entered_datetime to use UTC (matching get_live_trades)
+            now_utc = datetime.now(timezone.utc)
+            now_chi = now_utc.astimezone(CHICAGO)
             today_830 = now_chi.replace(hour=8, minute=30, second=0, microsecond=0)
             
             # --- CALL 1: Account Balances & Positions ---
@@ -621,24 +626,25 @@ class LiveTradingMonitor:
             resp_ord = await self.client.get_orders_for_account(
                 self.account_hash,
                 from_entered_datetime=today_830,
-                to_entered_datetime=now_chi
+                to_entered_datetime=now_utc
             )
 
-            # --- Heartbeat Tracking ---
-            if resp_acc.status_code == 200 and resp_ord.status_code == 200:
-                with self._data_lock:
-                    self.broker_connected = True
-                    self.heartbeat_failures = 0
-            else:
+            # --- Data Processing (Bug 1 Fix: Parse FIRST, then mark healthy) ---
+            if resp_acc.status_code != 200 or resp_ord.status_code != 200:
                 self.logger.warning(f"Broker Sync partial failure: Acc {resp_acc.status_code}, Ord {resp_ord.status_code}")
                 # Treat as failure for heartbeat logic
                 raise Exception(f"API Error: Acc={resp_acc.status_code}, Ord={resp_ord.status_code}")
 
-            # --- Data Processing ---
             ord_data = resp_ord.json()
             if not isinstance(ord_data, list):
-                self.logger.warning(f"Unexpected orders response format: {type(ord_data)} - data: {str(ord_data)[:200]}")
-                ord_data = []
+                self.logger.error(f"Unexpected orders response format (type={type(ord_data).__name__}): {str(ord_data)[:300]}")
+                # Raising ensures heartbeat_failures increments and broker_connected is not marked True
+                raise Exception(f"Malformed orders response: expected list, got {type(ord_data).__name__}")
+
+            # --- Heartbeat Tracking (Only if data parsed correctly) ---
+            with self._data_lock:
+                self.broker_connected = True
+                self.heartbeat_failures = 0
 
             acc_data = resp_acc.json().get('securitiesAccount', {})
             with self._data_lock:
@@ -656,9 +662,17 @@ class LiveTradingMonitor:
                     trades = self._convert_order_to_trade(o)
                     broker_trades.extend(trades)
 
-                self.live_combined_portfolio.trades = broker_trades
-                # Recalculate live cash from trades to show PnL correctly
-                self.live_combined_portfolio.cash = sum(t.credit for t in broker_trades)
+                # Bug 2 Fix: Merge incoming filled trades with existing set instead of replacing
+                # Use order_id as deduplication key to prevent losing history on empty API responses
+                existing_ids = {t.order_id for t in self.live_combined_portfolio.trades if t.order_id}
+                new_trades = [t for t in broker_trades if t.order_id and t.order_id not in existing_ids]
+                
+                if new_trades:
+                    self.live_combined_portfolio.trades.extend(new_trades)
+                    self.logger.info(f"Added {len(new_trades)} new filled trade(s) from broker sync.")
+
+                # Recalculate live cash from the full combined list
+                self.live_combined_portfolio.cash = sum(t.credit for t in self.live_combined_portfolio.trades)
 
                 # 3. Update Working Orders
                 self.working_orders = [o for o in ord_data if o.get('status') in ['WORKING', 'QUEUED', 'ACCEPTED', 'PENDING_ACTIVATION']]
@@ -1562,24 +1576,26 @@ class LiveTradingMonitor:
         if not self.client or not self.account_hash: return None
         try:
             # 0. Timezone Awareness: Correctly fetch Chicago morning (08:30) for orders
+            # 0. Timezone Awareness: Correctly fetch today's orders (Broaden to 4:00 AM to be safe)
             now = datetime.now(timezone.utc)
-            today_start_chi = datetime.now(CHICAGO).replace(hour=8, minute=30, second=0, microsecond=0)
-            # Ensure it is a valid aware datetime (today_start_chi is already aware via CHICAGO)
+            today_start_chi = datetime.now(CHICAGO).replace(hour=4, minute=0, second=0, microsecond=0)
             
+            # Fetch ALL orders for today, we filter status in python naturally (Issue: Schwab API param mismatch)
             resp = await self.client.get_orders_for_account(
                 self.account_hash, 
                 from_entered_datetime=today_start_chi, 
-                to_entered_datetime=now,
-                status=['FILLED']
+                to_entered_datetime=now
             )
             if resp.status_code != 200:
                 self.logger.error(f"Failed to fetch account orders: {resp.status_code}")
                 return None
             
-            orders = resp.json()
+            ord_data = resp.json()
+            filled_orders = [o for o in ord_data if o.get('status') == 'FILLED']
+            
             trades = []
-            self.logger.debug(f"Fetched {len(orders)} filled orders from Schwab.")
-            for order in orders:
+            self.logger.debug(f"Fetched {len(ord_data)} total orders. Found {len(filled_orders)} filled orders.")
+            for order in filled_orders:
                 trades.extend(self._convert_order_to_trade(order))
 
             self.logger.debug(f"Processed {len(trades)} SPX trades for display.")
@@ -1621,7 +1637,11 @@ class LiveTradingMonitor:
         for oleg in order.get('orderLegCollection', []):
             instr = oleg.get('instrument', {})
             symbol = instr.get('symbol', '')
-            if instr.get('underlyingSymbol') == '$SPX' or symbol.startswith('SPX'):
+            # Robust Check: Match SPX, $SPX, SPXW, or $SPXW (Task: Fix missing Live Trades)
+            is_spx = (instr.get('underlyingSymbol') in ['$SPX', 'SPX', '$SPXW', 'SPXW'] or 
+                      symbol.startswith('$SPX') or symbol.startswith('SPX'))
+            
+            if is_spx:
                 parsed = self._parse_schwab_symbol(symbol)
                 if parsed:
                     instruction = oleg.get('instruction', '')
