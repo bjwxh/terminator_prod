@@ -2370,8 +2370,9 @@ class LiveTradingMonitor:
                         s.portfolio.add_trade(trade)
                         t_trades[sid].append(trade)
                         s.has_traded_today = True
-                # Check for rebalance logic if we have positions
-                elif s.portfolio.positions:
+                # Check for entry/rebalance logic only in HARD mode
+                # Soft mode is purely a replay of live_trades.
+                elif mode == 'hard' and s.portfolio.positions:
                     if t_time >= end_time_obj:
                         exit_t = self._create_exit_trade(s, snap, ts, spx)
                         if exit_t:
