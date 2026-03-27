@@ -163,9 +163,9 @@ def generate_intraday_chart(history):
     if not history: return
     
     df = pd.DataFrame(history)
-    # Align with monitor.py key 'ts'
-    t_col = 'ts' if 'ts' in df.columns else 'timestamp'
-    df['timestamp'] = pd.to_datetime(df[t_col])
+    # Align with monitor.py key 'timestamp'
+    t_col = 'timestamp' if 'timestamp' in df.columns else 'ts'
+    df['timestamp'] = pd.to_datetime(df[t_col], format='ISO8601', errors='coerce')
     
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 16), sharex=True)
     
