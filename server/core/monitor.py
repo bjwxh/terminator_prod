@@ -296,6 +296,7 @@ class LiveTradingMonitor:
             s.init_s_delta = self.config['initial_sum_delta'] / 2
             s.init_l_delta = max((self.config['initial_sum_delta'] / 2) - self.config['init_wing_delta'], 
                                 self.config.get('min_long_delta', 0.025))
+            s.unit_size = self.config.get('default_unit_size', 1)
             
             self.sub_strategies[sid] = s
             curr += interval
@@ -2466,10 +2467,10 @@ class LiveTradingMonitor:
             
             if all([sc is not None, lc is not None, sp is not None, lp is not None]):
                 legs = [
-                    OptionLeg(sc['symbol'], sc['strike_price'], 'CALL', -1, sc['delta'], sc['theta'], price=sc['mid_price'], target_delta=st),
-                    OptionLeg(lc['symbol'], lc['strike_price'], 'CALL', 1, lc['delta'], lc['theta'], price=lc['mid_price'], target_delta=lt),
-                    OptionLeg(sp['symbol'], sp['strike_price'], 'PUT', -1, sp['delta'], sp['theta'], price=sp['mid_price'], target_delta=-st),
-                    OptionLeg(lp['symbol'], lp['strike_price'], 'PUT', 1, lp['delta'], lp['theta'], price=lp['mid_price'], target_delta=-lt)
+                    OptionLeg(sc['symbol'], sc['strike_price'], 'CALL', -s.unit_size, sc['delta'], sc['theta'], price=sc['mid_price'], target_delta=st),
+                    OptionLeg(lc['symbol'], lc['strike_price'], 'CALL', s.unit_size, lc['delta'], lc['theta'], price=lc['mid_price'], target_delta=lt),
+                    OptionLeg(sp['symbol'], sp['strike_price'], 'PUT', -s.unit_size, sp['delta'], sp['theta'], price=sp['mid_price'], target_delta=-st),
+                    OptionLeg(lp['symbol'], lp['strike_price'], 'PUT', s.unit_size, lp['delta'], lp['theta'], price=lp['mid_price'], target_delta=-lt)
                 ]
                 credit = sum(-l.quantity * l.price for l in legs) * 100
                 comm = self.config.get('commission_per_contract', 1.13) * len(legs)
@@ -2505,7 +2506,7 @@ class LiveTradingMonitor:
             tr = None
             if not on_side and (sn_needs or ln_needs):
                 # Only if currently empty on this side
-                tr = self._create_new_spread_trade(s, snap, t_short, t_long, side, ts)
+                tr = self._create_new_spread_trade(s, snap, t_short, t_long, side, ts, s.unit_size)
             elif sn_needs:
                 tr = self._create_rebalance_trade(s, snap, t_short, side, ts, True, t_long=t_long)
             elif ln_needs:
@@ -2515,7 +2516,7 @@ class LiveTradingMonitor:
                 trades.append(tr)
         return trades
 
-    def _create_new_spread_trade(self, s: SubStrategy, snap: pd.DataFrame, st: float, lt: float, side: str, ts: datetime) -> Optional[Trade]:
+    def _create_new_spread_trade(self, s: SubStrategy, snap: pd.DataFrame, st: float, lt: float, side: str, ts: datetime, quantity: int) -> Optional[Trade]:
         max_diff = self.config['max_spread_diff']
         opt_s = self._find_option(snap, st, side, ts)
         if opt_s is None: return None
@@ -2523,8 +2524,8 @@ class LiveTradingMonitor:
         if opt_l is None: return None
         
         legs = [
-            OptionLeg(opt_s['symbol'], opt_s['strike_price'], side, -1, opt_s['delta'], opt_s.get('theta', 0), price=opt_s['mid_price'], target_delta=st if side == 'CALL' else -st),
-            OptionLeg(opt_l['symbol'], opt_l['strike_price'], side, 1, opt_l['delta'], opt_l.get('theta', 0), price=opt_l['mid_price'], target_delta=lt if side == 'CALL' else -lt)
+            OptionLeg(opt_s['symbol'], opt_s['strike_price'], side, -quantity, opt_s['delta'], opt_s.get('theta', 0), price=opt_s['mid_price'], target_delta=st if side == 'CALL' else -st),
+            OptionLeg(opt_l['symbol'], opt_l['strike_price'], side, quantity, opt_l['delta'], opt_l.get('theta', 0), price=opt_l['mid_price'], target_delta=lt if side == 'CALL' else -lt)
         ]
         credit = sum(-lg.quantity*lg.price for lg in legs)*100
         # Bug 10 Fix: current_sum_delta should be the sum of deltas of the legs
@@ -2546,7 +2547,7 @@ class LiveTradingMonitor:
             
             legs = [
                 OptionLeg(ex.symbol, ex.strike, ex.side, -ex.quantity, ex.delta, ex.theta, price=ex.price, target_delta=ex.target_delta),
-                OptionLeg(new_s['symbol'], new_s['strike_price'], side, -1, new_s['delta'], new_s.get('theta',0), price=new_s['mid_price'], target_delta=target if side == 'CALL' else -target)
+                OptionLeg(new_s['symbol'], new_s['strike_price'], side, -abs(ex.quantity), new_s['delta'], new_s.get('theta',0), price=new_s['mid_price'], target_delta=target if side == 'CALL' else -target)
             ]
             
             # Width cap check
@@ -2558,7 +2559,7 @@ class LiveTradingMonitor:
                     new_l = self._find_option(snap, t_long, side, ts, max_diff=max_diff, short_strike=new_s['strike_price'])
                     if new_l is not None:
                         legs.append(OptionLeg(l_ex.symbol, l_ex.strike, l_ex.side, -l_ex.quantity, l_ex.delta, l_ex.theta, price=l_ex.price, target_delta=l_ex.target_delta))
-                        legs.append(OptionLeg(new_l['symbol'], new_l['strike_price'], side, 1, new_l['delta'], new_l.get('theta',0), price=new_l['mid_price'], target_delta=t_long if side == 'CALL' else -t_long))
+                        legs.append(OptionLeg(new_l['symbol'], new_l['strike_price'], side, abs(ex.quantity), new_l['delta'], new_l.get('theta',0), price=new_l['mid_price'], target_delta=t_long if side == 'CALL' else -t_long))
             
             credit = sum(-l.quantity * l.price for l in legs) * 100
             comm = self.config.get('commission_per_contract', 1.13) * len(legs)
@@ -2574,7 +2575,7 @@ class LiveTradingMonitor:
             
             legs = [
                 OptionLeg(ex.symbol, ex.strike, ex.side, -ex.quantity, ex.delta, ex.theta, price=ex.price, target_delta=ex.target_delta),
-                OptionLeg(new_l['symbol'], new_l['strike_price'], side, 1, new_l['delta'], new_l.get('theta',0), price=new_l['mid_price'], target_delta=target if side == 'CALL' else -target)
+                OptionLeg(new_l['symbol'], new_l['strike_price'], side, abs(ex.quantity), new_l['delta'], new_l.get('theta',0), price=new_l['mid_price'], target_delta=target if side == 'CALL' else -target)
             ]
             credit = sum(-l.quantity * l.price for l in legs) * 100
             comm = self.config.get('commission_per_contract', 1.13) * len(legs)

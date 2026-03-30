@@ -12,6 +12,7 @@ CONFIG = {
     'min_credit': 0.05,                # Minimum credit to accept for a trade
     'min_long_delta': 0.025,           # Minimum delta for long legs
     'max_spread_diff': 50,             # Maximum width between short and long strikes
+    'default_unit_size': 3,            # Number of units per sub-strategy (Issue 42)
 
     # === Timing ===
     'start_time': '08:30:00',          # Market open

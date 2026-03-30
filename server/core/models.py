@@ -310,6 +310,7 @@ class SubStrategy:
     # Delta targets
     init_s_delta: float = 0.0
     init_l_delta: float = 0.0
+    unit_size: int = 1
 
     def __post_init__(self):
         # We'll initialize these from config in the monitor
