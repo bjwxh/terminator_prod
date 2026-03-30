@@ -587,7 +587,7 @@ class LiveTradingMonitor:
                     # Estimate SPX if not already done in monitor_step
                     spx = self._last_spx_price if hasattr(self, '_last_spx_price') else None
                     self.session_history.append({
-                        'timestamp': datetime.now(CHICAGO).isoformat(),
+                        'ts': datetime.now(CHICAGO).isoformat(),
                         'spx': spx,
                         'sim_pnl': round(self.combined_portfolio.net_pnl, 2),
                         'live_pnl': round(self.live_combined_portfolio.net_pnl, 2)
@@ -2270,7 +2270,7 @@ class LiveTradingMonitor:
                 curr_pad = start_dt
                 while curr_pad < first_avail_ts:
                     history.append({
-                        'timestamp': curr_pad.isoformat(), 'spx': first_spx,
+                        'ts': curr_pad.isoformat(), 'spx': first_spx,
                         'sim_sc_strike': None, 'sim_sp_strike': None,
                         'live_sc_strike': None, 'live_sp_strike': None,
                         'sim_sc_delta': 0.0, 'sim_sp_delta': 0.0,
@@ -2296,7 +2296,8 @@ class LiveTradingMonitor:
                 self.live_combined_portfolio.add_trade(lt)
 
             # 2. Update Simulation Sub-Strategies
-            spx = self._last_spx_price or self.estimate_spx_price(snap)
+            # [FIX]: Prioritize historical estimate during catch-up to avoid shadowing with current price
+            spx = self.estimate_spx_price(snap) or self._last_spx_price
             decay_c = calculate_delta_decay(ts, 'CALL', self.config['initial_sum_delta']/2, start_time_obj, end_time_obj)
             decay_p = calculate_delta_decay(ts, 'PUT', self.config['initial_sum_delta']/2, start_time_obj, end_time_obj)
             t_short = (decay_c + decay_p) / 2
@@ -2378,7 +2379,7 @@ class LiveTradingMonitor:
                 sim_d = self.combined_portfolio.get_all_deltas(snap)
                 live_d = self.live_combined_portfolio.get_all_deltas(snap)
                 history.append({
-                    'timestamp': ts.isoformat(), 'spx': spx,
+                    'ts': ts.isoformat(), 'spx': spx,
                     'sim_sc_strike': self.combined_portfolio.short_call_strike,
                     'sim_sp_strike': self.combined_portfolio.short_put_strike,
                     'live_sc_strike': self.live_combined_portfolio.short_call_strike,
