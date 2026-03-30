@@ -1937,22 +1937,24 @@ class LiveTradingMonitor:
             
             # 2. Greeks and Pricing lookup
             delta, theta = self._greek_cache.get(k, (0.0, 0.0))
-            # Raw positions JSON usually has marketValue and averagePrice, but not bid/ask.
             bid_price = 0.0
             ask_price = 0.0
             
-            # If Greeks or Prices missing, attempt look at the last snapshot (Bug 9 Fix)
-            if (k not in self._greek_cache or delta == 0) and self._last_snap is not None:
+            # Always attempt to look at the last snapshot to seed prices (Prevents the 0.0 race condition)
+            if self._last_snap is not None:
                 mask = (self._last_snap['strike_price'].round().astype(int) == int(round(strike_val))) & \
                        (self._last_snap['side'] == side_val)
                 r = self._last_snap[mask]
                 if not r.empty:
-                    delta = float(r['delta'].iloc[0])
-                    theta_val = r['theta'].iloc[0] if 'theta' in r.columns else 0.0
-                    theta = float(theta_val) if not pd.isna(theta_val) else 0.0
+                    # If Greeks were missing from cache, update them from the current snap
+                    if delta == 0:
+                        delta = float(r['delta'].iloc[0])
+                        theta_val = r['theta'].iloc[0] if 'theta' in r.columns else 0.0
+                        theta = float(theta_val) if not pd.isna(theta_val) else 0.0
+                        self._greek_cache[k] = (delta, theta)
+                    
                     bid_price = float(r['bidprice'].iloc[0])
                     ask_price = float(r['askprice'].iloc[0])
-                    self._greek_cache[k] = (delta, theta)
 
             # 3. Add to live portfolio
             mkt_val = bp.get('marketValue', 0)

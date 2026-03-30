@@ -454,11 +454,11 @@ function updateOrdersTable(orders) {
     orders.forEach(o => {
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td>${o.orderId}</td>
-            <td>${o.symbol || 'SPX'}</td>
-            <td>${o.side || '---'}</td>
-            <td>${o.quantity || o.requestedQuantity || 0}</td>
-            <td>${o.price || 'MKT'}</td>
+            <td>${o.time || '--:--:--'}</td>
+            <td title="${o.symbol}">${o.symbol || 'SPX'}</td>
+            <td class="${o.side === 'credit' ? 'green' : 'orange'}">${o.side || '---'}</td>
+            <td>${o.qty || 0}</td>
+            <td>$${(o.price || 0).toFixed(2)}</td>
             <td class="primary">${o.status}</td>
         `;
         tbody.appendChild(row);

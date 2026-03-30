@@ -72,12 +72,52 @@ async def broadcast_state(monitor):
                 heartbeat_failures = monitor.heartbeat_failures
                 working_orders = []
                 for o in monitor.working_orders:
-                    legs_coll = o.get('orderLegCollection', [{}])
-                    sym = legs_coll[0].get('instrument', {}).get('symbol', 'N/A')
+                    # 1. Extraction of entered time (Chicago)
+                    entered_str = "--:--:--"
+                    et = o.get('enteredTime')
+                    if et:
+                        try:
+                            # Schwab timestamp: "2026-03-30T14:15:22Z"
+                            edt = datetime.fromisoformat(et.replace('Z', '+00:00')).astimezone(CHICAGO)
+                            entered_str = edt.strftime('%H:%M:%S')
+                        except: pass
+
+                    # 2. Extract Leg Details
+                    legs_coll = o.get('orderLegCollection', [])
+                    leg_texts = []
+                    total_qty = 0
+                    for leg in legs_coll:
+                        instr = leg.get('instrument', {})
+                        sym = instr.get('symbol', 'N/A')
+                        l_qty = int(leg.get('quantity', 0))
+                        total_qty += l_qty
+                        
+                        # Use existing monitor helper to parse strikes/sides
+                        parsed = monitor._parse_schwab_symbol(sym)
+                        if parsed:
+                            instruction = leg.get('instruction', '')
+                            prefix = '-' if 'SELL' in instruction else '+'
+                            side_ch = parsed['side'][0] # 'C' or 'P'
+                            strike = int(parsed['strike'])
+                            leg_texts.append(f"{prefix}{l_qty}{side_ch}{strike}")
+                        else:
+                            leg_texts.append(sym)
+
+                    # 3. Determine Side (Credit/Debit)
+                    order_type = o.get('orderType', '')
+                    side = "---"
+                    if 'CREDIT' in order_type: side = 'credit'
+                    elif 'DEBIT' in order_type: side = 'debit'
+                    elif legs_coll:
+                        # Fallback for individual leg orders
+                        side = 'debit' if 'BUY' in legs_coll[0].get('instruction', '') else 'credit'
+                    
                     working_orders.append({
+                        "time": entered_str,
                         "id": o.get('orderId'), 
-                        "symbol": sym, 
-                        "qty": o.get('quantity'), 
+                        "symbol": ", ".join(leg_texts),
+                        "side": side,
+                        "qty": total_qty, 
                         "price": o.get('price'), 
                         "status": o.get('status')
                     })
