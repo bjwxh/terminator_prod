@@ -146,6 +146,7 @@ class LiveTradingMonitor:
         self._peak_equity = 0.0 # Initializing peak equity for stats
         self.session_history: List[Dict] = [] # Time-series for charts: {ts, spx, sim_pnl, live_pnl}
         self._last_spx_price: Optional[float] = None # Latest SPX estimate
+        self._last_spx_ts: int = 0  # Latest SPX exchange timestamp (ms)
         self._last_vix_price: Optional[float] = None
         self.stream_client: Optional[StreamClient] = None
         self.last_dismissed_recon_time: float = 0 # Cooldown for GAP_SYNC (Bug 16 Fix)
@@ -746,6 +747,9 @@ class LiveTradingMonitor:
                 if price is not None:
                     if key == '$SPX':
                         self._last_spx_price = float(price)
+                        ts_ms = entry.get('QUOTE_TIME_MILLIS') or entry.get('TRADE_TIME_MILLIS') or entry.get('1')
+                        if ts_ms:
+                            self._last_spx_ts = int(ts_ms)
                     elif key == '$VIX':
                         self._last_vix_price = float(price)
         

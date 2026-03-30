@@ -3,7 +3,7 @@ import json
 import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from api.routes import get_monitor
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 CHICAGO = ZoneInfo("America/Chicago")
 from typing import List, Set, Dict, Any
@@ -195,8 +195,17 @@ async def broadcast_state(monitor):
                         }
 
             # 2. Build and send OUTSIDE the lock
+            spx_ts = monitor._last_spx_ts
+            latency = 0
+            if spx_ts > 0:
+                # spx_ts is in milliseconds since epoch
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                latency = max(0, now_ms - spx_ts)
+                
             state = {
                 "ts": datetime.now(CHICAGO).isoformat(),
+                "exchange_ts": spx_ts, # In ms
+                "latency_ms": latency,
                 "spx": spx,
                 "vix": vix,
                 "status": status,

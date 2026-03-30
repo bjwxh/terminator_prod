@@ -15,6 +15,9 @@ let spxChart, pnlChart;
 let lastChartUpdate = 0;
 let isMuted = localStorage.getItem('isMuted') === 'true';
 let currentVersion = null; // Track backend version for auto-refresh
+let latencyHistory = []; // Buffer for SMA
+let lastSeenExchangeTs = 0; // Filter sawtooth jitter
+const SMA_WINDOW = 10;    // Number of real data updates to average
 
 // Initialize Mute UI
 function initMuteUI() {
@@ -181,8 +184,8 @@ function updateUI(state) {
     tradingBtn.textContent = state.trading_enabled ? 'Disable trading' : 'Enable trading';
 
     // Exchange Clock (Chicago)
-    if (state.ts) {
-        const d = new Date(state.ts);
+    if (state.exchange_ts && state.exchange_ts > 0) {
+        const d = new Date(state.exchange_ts);
         const timeStr = d.toLocaleTimeString('en-US', { 
             hour12: false, 
             hour: '2-digit', 
@@ -192,6 +195,36 @@ function updateUI(state) {
         });
         const clockEl = document.getElementById('exchange-time');
         if (clockEl) clockEl.textContent = timeStr;
+    }
+
+    if (state.latency_ms !== undefined) {
+        const latencyEl = document.getElementById('latency-ms');
+        if (latencyEl) {
+            // Update SMA buffer ONLY when a new exchange update actually arrives
+            // This filters out the "sawtooth" jitter caused by heartbeat frequency vs update frequency
+            if (state.exchange_ts > lastSeenExchangeTs) {
+                lastSeenExchangeTs = state.exchange_ts;
+                latencyHistory.push(state.latency_ms);
+                if (latencyHistory.length > SMA_WINDOW) {
+                    latencyHistory.shift();
+                }
+            }
+
+            // Always calculate moving average if we have samples
+            if (latencyHistory.length > 0) {
+                const avgLatency = Math.round(latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length);
+                latencyEl.textContent = `${avgLatency}ms`;
+                
+                // Color code latency based on the smoothed value
+                if (avgLatency > 1000) {
+                    latencyEl.className = 'value status-disconnected';
+                } else if (avgLatency > 500) {
+                    latencyEl.className = 'value status-disabled'; 
+                } else {
+                    latencyEl.className = 'value'; // Normal
+                }
+            }
+        }
     }
 
     // SPX Price
