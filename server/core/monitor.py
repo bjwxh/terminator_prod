@@ -2681,14 +2681,26 @@ class LiveTradingMonitor:
         # 2. Sort the pulled ICs by delta: High Delta (most critical) first
         ics.sort(key=lambda x: x[1], reverse=True)
         
-        # 3. Form final chunks: (Non-IC legs first, then ICs)
+        # 3. Form final chunks: (Aggregated Non-IC legs first, then ICs)
         chunks = []
-        # Remaining odd legs (Non-IC) first
-        for i in range(0, len(remaining), 4):
-            chunks.append(remaining[i:i+4])
-        # Ranked ICs
+        
+        # Aggregate remaining unit-legs into full legs before chunking
+        rolled_remaining = self._roll_legs(remaining)
+        for i in range(0, len(rolled_remaining), 4):
+            # Group into chunks of up to 4 unique legs
+            # We unroll them back so execute_net_trade's GCD logic sees the full contract count
+            chunks.append(self._unroll_legs(rolled_remaining[i:i+4]))
+            
+        # Group identical IC combos by their leg signatures to avoid splitting units
+        grouped_ics = defaultdict(list)
         for ic_combo, delta in ics:
-            chunks.append(ic_combo)
+            # Deterministic signature: sorted list of symbols
+            sig = tuple(sorted([l.symbol for l in ic_combo]))
+            grouped_ics[sig].extend(ic_combo)
+            
+        # Add the consolidated IC chunks
+        for sig, combo_legs in grouped_ics.items():
+            chunks.append(combo_legs)
             
         return chunks
 
