@@ -2773,54 +2773,80 @@ class LiveTradingMonitor:
         """
         Calculates which chunks to submit/cancel by deduplicating against 
         current Live Working Orders (supports partial overlaps).
+        Now uses a 'Subset' strategy to prevent oscillation: Only subtract quantities
+        from orders that are fully within the target trade.
         """
         self.logger.debug(f"Creating execution plan for trade {trade.strategy_id}")
+        target_keys = {(int(round(float(tl.strike))), tl.side) for tl in trade.legs}
         
-        # 1. Map all working orders to a sum of quantities per leg
-        working_qtys = defaultdict(float)
-        matched_ids = set()
-        for o in self.working_orders:
-            wid = str(o.get('orderId'))
-            if not self._is_spx_0dte_order(o): continue
+        # 1. Categorize all working orders (Is it 'Good' or 'Stale'?)
+        to_cancel = []
+        protected_ids = set()
+        working_qtys = defaultdict(float) # Maps (strike, side) -> signed net quantity
+        
+        for wo in self.working_orders:
+            wid = str(wo.get('orderId'))
+            if not self._is_spx_0dte_order(wo): continue
             
-            for leg in o.get('orderLegCollection', []):
+            # Check if order belongs to THIS rebalance/strategy intent
+            # (If strategy mismatch AND not a reconciliation gap-sync, we cancel it)
+            belongs_here = (self.order_to_strategy.get(wid) == trade.strategy_id or trade.purpose == TradePurpose.RECONCILIATION)
+            
+            is_stale = not belongs_here
+            order_legs_data = [] # List of ((strike, side), signed_qty)
+            
+            for leg in wo.get('orderLegCollection', []):
                 instr = leg.get('instruction', '')
                 qty = float(leg.get('quantity', 0))
                 instr_obj = leg.get('instrument', {})
-                if instr_obj.get('assetType') == 'OPTION':
-                    symbol = instr_obj.get('symbol')
-                    parsed = self._parse_schwab_symbol(symbol)
-                    
+                strike = instr_obj.get('strikePrice', 0)
+                side = instr_obj.get('putCall', '')
+                
+                if not strike or not side:
+                    # Try parsing symbol
+                    parsed = self._parse_schwab_symbol(instr_obj.get('symbol', ''))
                     if parsed:
-                        key = (int(round(parsed['strike'])), parsed['side'])
-                        mult = 1.0 if 'BUY' in instr else -1.0
-                        working_qtys[key] += (qty * mult)
-                        matched_ids.add(wid)
-                    else:
-                        strike = instr_obj.get('strikePrice')
-                        side = instr_obj.get('putCall')
-                        if strike and side:
-                            key = (int(round(float(strike))), side)
-                            mult = 1.0 if 'BUY' in instr else -1.0
-                            working_qtys[key] += (qty * mult)
-                            matched_ids.add(wid)
+                        strike, side = parsed['strike'], parsed['side']
+                
+                if strike and side:
+                    k = (int(round(float(strike))), side)
+                    mult = 1.0 if 'BUY' in instr else -1.0
+                    order_legs_data.append((k, qty * mult))
+                    
+                    # If this leg is NOT in our target reconciliation set, the whole order is stale
+                    if k not in target_keys:
+                        is_stale = True
+                else:
+                    # Cannot parse leg? Mark stale just in case
+                    is_stale = True
 
-        # 2. Subtract working quantities from Trade needed quantities
+            if is_stale:
+                to_cancel.append(wo)
+            else:
+                # This order is a "Perfect Subset" of our current need.
+                # Protect it and subtract its quantities from the gap.
+                protected_ids.add(wid)
+                for k, signed_v in order_legs_data:
+                    working_qtys[k] += signed_v
+
+        # 2. Subtract protected working quantities from Trade needed quantities
         remaining_legs = []
         covered_count = 0
         for leg in trade.legs:
+            # Bug Fix: Ensure we use consistent rounding for multi-leg matching
             key = (int(round(float(leg.strike))), leg.side)
             needed = float(leg.quantity)
             already_covered = working_qtys.get(key, 0.0)
             
-            # If target direction is same, subtract
+            # Use same-direction overlap logic
+            # (Ensures that if we need +1 and have +1 working, we submit 0)
             if (needed > 0 and already_covered > 0) or (needed < 0 and already_covered < 0):
                 if abs(needed) > abs(already_covered):
                     to_fill = needed - already_covered
-                    working_qtys[key] = 0 
+                    working_qtys[key] = 0 # All working used up
                 else:
                     to_fill = 0
-                    working_qtys[key] -= needed 
+                    working_qtys[key] -= needed # Some working remains
             else:
                 to_fill = needed
 
@@ -2832,30 +2858,12 @@ class LiveTradingMonitor:
                 covered_count += 1
 
         if covered_count > 0:
-            self.logger.info(f"Adjusted execution plan: {covered_count} legs partially or fully covered by working orders.")
+            self.logger.info(f"Adjusted execution plan: {covered_count} legs covered by working orders. Remaining: {len(remaining_legs)}")
 
         to_submit = self._get_smart_chunks(remaining_legs)
 
-        # 3. Find orders to CANCEL (stale ones)
-        # Bug Fix (Issue 5): Any order containing legs NOT in our current target strikes is stale.
-        # Short-circuit logic was wrong: it was keeping orders if ANY leg matched.
-        target_keys = {(int(round(float(tl.strike))), tl.side) for tl in trade.legs}
-        to_cancel = []
-        for wo in self.working_orders:
-            wid = str(wo.get('orderId'))
-            if wid in matched_ids:
-                if self.order_to_strategy.get(wid) == trade.strategy_id or trade.purpose == TradePurpose.RECONCILIATION:
-                    is_stale = False
-                    for leg in wo.get('orderLegCollection', []):
-                        inst_obj = leg.get('instrument', {})
-                        k = (int(round(float(inst_obj.get('strikePrice', 0)))), inst_obj.get('putCall', ''))
-                        if k not in target_keys:
-                            is_stale = True
-                            break # Any single wrong leg makes the entire order stale
-                    if is_stale: to_cancel.append(wo)
-
         return {
-            'to_keep': [o for o in self.working_orders if str(o.get('orderId')) in matched_ids and o not in to_cancel],
+            'to_keep': [o for o in self.working_orders if str(o.get('orderId')) in protected_ids],
             'to_submit': to_submit,
             'to_cancel': to_cancel
         }
