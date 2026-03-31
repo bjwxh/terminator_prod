@@ -2012,6 +2012,11 @@ class LiveTradingMonitor:
         self.live_combined_portfolio.max_margin = self.live_combined_portfolio.calculate_standard_margin()
         self.logger.info(f"Updated live portfolio: {len(self.live_combined_portfolio.positions)} active positions. Margin: ${self.live_combined_portfolio.max_margin:,.2f}")
 
+    def _get_live_filled_positions(self) -> Dict[Tuple[int, str], float]:
+        """Returns ONLY filled positions from the broker (not including working orders)."""
+        with self._data_lock:
+            return { (int(round(p.strike)), p.side): float(p.quantity) for p in self.live_combined_portfolio.positions }
+
     def _get_effective_live_positions(self) -> Dict[Tuple[int, str], float]:
         """
         Combines FILLED positions with WORKING orders to get the 'Target' live state.
@@ -2056,7 +2061,9 @@ class LiveTradingMonitor:
         # Issue 9: Always run reconciliation logic to track divergence
         # Issue 35: Deduplicate against Working Orders
         sim_pos = self.combined_portfolio.positions
-        eff_live_dict = self._get_effective_live_positions()
+        # Stability Fix: Detect gap against FILLED positions only.
+        # Deduplication against working orders will happen in create_execution_plan.
+        eff_live_dict = self._get_live_filled_positions()
         
         sim_dict = { (int(round(p.strike)), p.side): float(p.quantity) for p in sim_pos }
         
