@@ -1287,15 +1287,18 @@ class LiveTradingMonitor:
                 unit_mid_price = total_mid_price / num_units
                 
                 # Task #28: Apply Manual Price Override from UI if exists
+                # Determine final intent (Credit vs. Debit)
                 override = self.price_overrides.get(trade.strategy_id, {}).get(i)
                 if override is not None:
-                    # User provided the FINAL price per unit (+Cr, -Db)
+                    # User provided the FINAL signed price per unit (+Cr, -Db)
                     raw_price = abs(override)
+                    is_final_credit = override >= 0
                     self.logger.info(f"Chunk {i}: Using manual override price {override:.2f} (Abs: {raw_price:.2f})")
                 else:
                     offset = self.config.get('order_offset', 0.0)
+                    is_final_credit = total_chunk_credit >= 0
                     # Passive offset: Submit further away from the spread to avoid immediate fill
-                    if total_chunk_credit >= 0:
+                    if is_final_credit:
                         # Credit structure: Asking for MORE credit is more passive
                         raw_price = unit_mid_price + offset
                     else:
@@ -1335,7 +1338,7 @@ class LiveTradingMonitor:
                         builder = OrderBuilder()
                         builder.set_order_strategy_type(OrderStrategyType.SINGLE)
                         builder.set_complex_order_strategy_type(ComplexOrderStrategyType.IRON_CONDOR)
-                        builder.set_order_type(OrderType.NET_CREDIT if total_chunk_credit > 0 else OrderType.NET_DEBIT)
+                        builder.set_order_type(OrderType.NET_CREDIT if is_final_credit else OrderType.NET_DEBIT)
                         builder.set_price(price_str)
                         builder.set_quantity(num_units)
                         builder.set_session(Session.NORMAL)
@@ -1351,7 +1354,7 @@ class LiveTradingMonitor:
                     builder = OrderBuilder()
                     builder.set_order_strategy_type(OrderStrategyType.SINGLE)
                     builder.set_complex_order_strategy_type(ComplexOrderStrategyType.CUSTOM)
-                    builder.set_order_type(OrderType.NET_CREDIT if total_chunk_credit >= 0 else OrderType.NET_DEBIT)
+                    builder.set_order_type(OrderType.NET_CREDIT if is_final_credit else OrderType.NET_DEBIT)
                     builder.set_price(price_str)
                     builder.set_quantity(num_units)
                     builder.set_session(Session.NORMAL)
