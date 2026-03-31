@@ -417,6 +417,18 @@ class LiveTradingMonitor:
                 self._pending_trade_confirmed = False
                 self.confirmation_event.clear()
                 
+                # Safety-0 Fix: Re-check redundancy IMMEDIATELY before broadcast to UI
+                # This prevents modals from popping up for trades covered in the lag time
+                if self._is_trade_redundant(trade):
+                    self.logger.info(f"Suppressed redundant signal for {trade.strategy_id} before broadcast.")
+                    # Still clean up trackers to avoid memory leak or monitoring skips
+                    with self._data_lock:
+                        if trade.strategy_id in self.active_order_signals:
+                            self.active_order_signals.discard(trade.strategy_id)
+                    self.pending_trade = None
+                    self.order_queue.task_done()
+                    continue
+
                 self.logger.info(f"Awaiting confirmation for trade: {trade.strategy_id} ({trade.purpose})")
                 
                 # Build REFINED payload for showTradeModal in app.js (Bug 15 Fix: extracted to helper)
@@ -2001,14 +2013,22 @@ class LiveTradingMonitor:
                     instr_obj = leg.get('instrument', {})
                     
                     if instr_obj.get('assetType') == 'OPTION':
-                        strike = instr_obj.get('strikePrice')
-                        side = instr_obj.get('putCall')
+                        symbol = instr_obj.get('symbol')
+                        parsed = self._parse_schwab_symbol(symbol)
                         
-                        if strike and side:
+                        if parsed:
                             # BUY instructions increase position, SELL instructions decrease (long-centric math)
                             multiplier = 1.0 if 'BUY' in instr else -1.0
-                            key = (int(round(strike)), side)
+                            key = (int(round(parsed['strike'])), parsed['side'])
                             eff_dict[key] = eff_dict.get(key, 0.0) + (qty * multiplier)
+                        else:
+                            # Fallback if parsing failed but top-level fields exist
+                            strike = instr_obj.get('strikePrice')
+                            side = instr_obj.get('putCall')
+                            if strike and side:
+                                multiplier = 1.0 if 'BUY' in instr else -1.0
+                                key = (int(round(float(strike))), side)
+                                eff_dict[key] = eff_dict.get(key, 0.0) + (qty * multiplier)
             return eff_dict
 
     async def _check_reconciliation(self, snap: pd.DataFrame):
@@ -2739,13 +2759,22 @@ class LiveTradingMonitor:
                 qty = float(leg.get('quantity', 0))
                 instr_obj = leg.get('instrument', {})
                 if instr_obj.get('assetType') == 'OPTION':
-                    strike = instr_obj.get('strikePrice')
-                    side = instr_obj.get('putCall')
-                    if strike and side:
-                        key = (int(round(float(strike))), side)
+                    symbol = instr_obj.get('symbol')
+                    parsed = self._parse_schwab_symbol(symbol)
+                    
+                    if parsed:
+                        key = (int(round(parsed['strike'])), parsed['side'])
                         mult = 1.0 if 'BUY' in instr else -1.0
                         working_qtys[key] += (qty * mult)
                         matched_ids.add(wid)
+                    else:
+                        strike = instr_obj.get('strikePrice')
+                        side = instr_obj.get('putCall')
+                        if strike and side:
+                            key = (int(round(float(strike))), side)
+                            mult = 1.0 if 'BUY' in instr else -1.0
+                            working_qtys[key] += (qty * mult)
+                            matched_ids.add(wid)
 
         # 2. Subtract working quantities from Trade needed quantities
         remaining_legs = []
