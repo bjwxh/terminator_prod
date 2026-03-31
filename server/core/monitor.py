@@ -456,6 +456,8 @@ class LiveTradingMonitor:
                 from api.ws import manager
                 if manager.active_connections:
                     asyncio.create_task(manager.broadcast(msg))
+                    # Stability Fix: Only trigger the sound alert/notification exactly when the modal pops up
+                    self._broadcast_alert("chime", "New Trade Signal", f"Trade required for {trade.strategy_id} ({trade.purpose.value})")
                 
                 # BUG 30: Also notify via push/email when signal appears (not just when filled)
                 # This provides the user with the snapshot summary for context
@@ -2179,7 +2181,7 @@ class LiveTradingMonitor:
                     # Bug 5 & 8 trackers: Prevent duplicates while in queue (Task #45)
                     self.active_order_signals.add(recon_trade.strategy_id)
                     self._queued_purposes.add(recon_trade.purpose)
-                    self._broadcast_alert("chime", "New Trade Signal", f"Reconciliation trade queued for {recon_trade.strategy_id}")
+                    # Alert logic moved to execution_loop to avoid noise
                 else:
                     self.logger.info(f"Updated reconciliation trade available for GUI sync (Already in queue: {recon_trade.strategy_id})")
             else:
