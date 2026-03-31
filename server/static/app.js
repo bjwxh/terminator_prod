@@ -757,7 +757,8 @@ function updateTotalCreditDisplay() {
     
     const totalEl = document.getElementById('modal-total-credit');
     if (totalEl) {
-        totalEl.textContent = formatUSD(total);
+        // Show unit-based summary style matching backend ($1.10 Credit / $1.10 Debit)
+        totalEl.textContent = `${formatUSD(Math.abs(total))} ${total >= 0 ? 'Credit' : 'Debit'}`;
         totalEl.classList.add('modified');
     }
 }

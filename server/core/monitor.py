@@ -192,7 +192,8 @@ class LiveTradingMonitor:
         """Centralized helper to build consistent UI signals for a trade (Bug 15 Fix)"""
         plan = self.create_execution_plan(trade)
         orders_data = []
-        
+        total_adjusted_credit = 0.0
+
         # 1. New Orders being submitted (matching logic in run_order_execution_loop)
         for i, chunk in enumerate(plan['to_submit']):
             rolled = self._roll_legs(chunk)
@@ -221,13 +222,15 @@ class LiveTradingMonitor:
             # Round to tick for UI display consistency
             price_with_offset = self._round_to_tick(price_with_offset, num_legs=len(rolled))
 
+            signed_price_ea = price_with_offset if is_credit else -price_with_offset
+            total_adjusted_credit += signed_price_ea * num_units
             orders_data.append({
                 "type": "TRADE",
                 "idx": i,
                 "qty": num_units,
                 "desc": " | ".join(leg_texts),
                 "credit": f"${price_with_offset:.2f} {'Cr' if is_credit else 'Db'} (ea)",
-                "price_ea": price_with_offset if is_credit else -price_with_offset # Maintain signed logic
+                "price_ea": signed_price_ea
             })
         
         # 2. Orders being cancelled
@@ -244,7 +247,7 @@ class LiveTradingMonitor:
             "type": "trade_signal",
             "strat_id": trade.strategy_id,
             "purpose": trade.purpose.value,
-            "total_credit": f"${abs(trade.credit/100.0):.2f} {'Credit' if trade.credit >= 0 else 'Debit'}",
+            "total_credit": f"${abs(total_adjusted_credit):.2f} {'Credit' if total_adjusted_credit >= 0 else 'Debit'}",
             "orders": orders_data,
             "is_paused": self.is_trade_timer_paused,
             "timeout": self.config.get('order_auto_execute_timeout', 20)
@@ -1297,9 +1300,6 @@ class LiveTradingMonitor:
                         # Debit structure: Offering to pay LESS debit is more passive
                         raw_price = max(0.0, unit_mid_price - offset)
                 
-                # Task #28: Ensure 5-cent increment (SPX Rule)
-                raw_price = round(round(raw_price / 0.05) * 0.05, 2)
-
                 ticked_price = self._round_to_tick(raw_price, num_legs=num_legs)
                 price_str = f"{ticked_price:.2f}"
                 
