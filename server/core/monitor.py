@@ -206,13 +206,28 @@ class LiveTradingMonitor:
                 side = "SHORT" if l.quantity < 0 else "LONG"
                 leg_texts.append(f"{side} {l.side} {int(l.strike)} x{abs(l.quantity)//num_units}")
             
+            # Apply the configuration offset here too so UI matches expected execution
+            offset = self.config.get('order_offset', 0.0)
+            mid_price_abs = abs(chunk_credit / 100.0 / num_units)
+            is_credit = chunk_credit >= 0
+            
+            if is_credit:
+                # Passive offset: Add to mid-price to ask for MORE credit
+                price_with_offset = mid_price_abs + offset
+            else:
+                # Passive offset: Subtract from mid-price to pay LESS debit
+                price_with_offset = max(0.00, mid_price_abs - offset)
+
+            # Round to tick for UI display consistency
+            price_with_offset = self._round_to_tick(price_with_offset, num_legs=len(rolled))
+
             orders_data.append({
                 "type": "TRADE",
                 "idx": i,
                 "qty": num_units,
                 "desc": " | ".join(leg_texts),
-                "credit": f"${abs(chunk_credit/100.0/num_units):.2f} {'Cr' if chunk_credit >= 0 else 'Db'} (ea)",
-                "price_ea": chunk_credit/100.0/num_units # Numeric signed value: + = Cr, - = Db
+                "credit": f"${price_with_offset:.2f} {'Cr' if is_credit else 'Db'} (ea)",
+                "price_ea": price_with_offset if is_credit else -price_with_offset # Maintain signed logic
             })
         
         # 2. Orders being cancelled
@@ -1274,10 +1289,12 @@ class LiveTradingMonitor:
                     self.logger.info(f"Chunk {i}: Using manual override price {override:.2f} (Abs: {raw_price:.2f})")
                 else:
                     offset = self.config.get('order_offset', 0.0)
-                    # Apply offset and tick rounding to UNIT price
+                    # Passive offset: Submit further away from the spread to avoid immediate fill
                     if total_chunk_credit >= 0:
+                        # Credit structure: Asking for MORE credit is more passive
                         raw_price = unit_mid_price + offset
                     else:
+                        # Debit structure: Offering to pay LESS debit is more passive
                         raw_price = max(0.0, unit_mid_price - offset)
                 
                 # Task #28: Ensure 5-cent increment (SPX Rule)
