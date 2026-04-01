@@ -2143,6 +2143,9 @@ class LiveTradingMonitor:
         legs = []
         total_credit = 0.0
         
+        # Bug 11: Index snap for O(1) reconciliation lookups
+        snap_indexed = snap.set_index(['strike_int', 'side']) if 'strike_int' in snap.columns else snap.set_index([snap['strike_price'].round().astype(int), 'side'])
+
         # Track live positions locally to correctly determine instructions for split legs (flipping)
         tracked_live_positions = dict(eff_live_dict)
 
