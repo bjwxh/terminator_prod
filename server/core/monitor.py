@@ -2108,13 +2108,15 @@ class LiveTradingMonitor:
             lq = eff_live_dict.get(k, 0.0)
             diff = sq - lq
             if abs(diff) > 0.01: # Use epsilon for float safety
-                # Bypass broker restriction: do not close and open in one order.
-                # If flipping (e.g., -1 to +1), only go to 0 first.
+                # NO FLIP RULE: If crossing zero, we need two separate legs across different orders (Task #22)
                 if (lq < 0 and sq > 0) or (lq > 0 and sq < 0):
-                    self.logger.info(f"Flipping detected for {k[0]}{k[1]}: Live {lq}, Sim {sq}. Clipping to 0 first.")
-                    diff = -lq
-                
-                needed_adjustments.append((k[0], k[1], diff))
+                    self.logger.info(f"Flipping detected for {k[0]}{k[1]}: Live {lq}, Sim {sq}. Splitting into separate Exit and Entry legs.")
+                    # 1. Exit portion: suggest the size that gets us back to 0
+                    needed_adjustments.append((k[0], k[1], -lq))
+                    # 2. Entry portion: suggest the target size from 0
+                    needed_adjustments.append((k[0], k[1], sq))
+                else:
+                    needed_adjustments.append((k[0], k[1], diff))
         
         if not needed_adjustments:
             self.logger.debug("Reconciliation passed: Sim matches Live")
@@ -2141,8 +2143,8 @@ class LiveTradingMonitor:
         legs = []
         total_credit = 0.0
         
-        # Bug 11: Index snap for O(1) reconciliation lookups
-        snap_indexed = snap.set_index(['strike_int', 'side']) if 'strike_int' in snap.columns else snap.set_index([snap['strike_price'].round().astype(int), 'side'])
+        # Track live positions locally to correctly determine instructions for split legs (flipping)
+        tracked_live_positions = dict(eff_live_dict)
 
         for strike, side, qty in needed_adjustments:
             # Bug 11: O(1) lookup
@@ -2159,12 +2161,15 @@ class LiveTradingMonitor:
             theta_val = r_row['theta'] if 'theta' in r_row.index else 0.0
             theta = float(theta_val) if not pd.isna(theta_val) else 0.0
             
-            # Determine instruction based on live position (lq)
-            lq = eff_live_dict.get(key, 0)
+            # Determine instruction based on tracked live position (lq)
+            lq = tracked_live_positions.get(key, 0)
             if qty > 0: # Needs to BUY
                 inst = "BUY_TO_CLOSE" if lq < 0 else "BUY_TO_OPEN"
             else: # Needs to SELL
                 inst = "SELL_TO_CLOSE" if lq > 0 else "SELL_TO_OPEN"
+            
+            # Update tracked position for next leg determination in this trade group
+            tracked_live_positions[key] = tracked_live_positions.get(key, 0) + qty
             
             leg = OptionLeg(
                 symbol=symbol,
@@ -2366,6 +2371,8 @@ class LiveTradingMonitor:
 
         # Minute-by-minute simulation loop
         for ts, snap in groups:
+            if ts > end_dt:
+                break
             snap = snap.reset_index(drop=True)
             snap['strike_int'] = snap['strike_price'].round().astype(int)
             snap_indexed = snap.set_index(['strike_int', 'side'])
@@ -2714,72 +2721,93 @@ class LiveTradingMonitor:
         return list(agg.values())
 
     def _get_smart_chunks(self, legs: List[OptionLeg]) -> List[List[OptionLeg]]:
-        """Ported from spt_v4: Priorities Iron Condors and Rank by Delta for fill stability."""
+        """
+        Prioritized chunking hierarchy (Task #24):
+        1. Iron Condors (4 unique strikes: 1LC, 1SC, 1LP, 1SP)
+        2. Side-Specific Rolls (4 unique strikes: 2L, 2S on one side)
+        3. Vertical Spreads (2 unique strikes: 1L, 1S)
+        4. Residuals
+        """
         unrolled = self._unroll_legs(legs)
         if not unrolled: return []
-        if len(unrolled) <= 4: return [unrolled]
+        
+        remaining = list(unrolled)
+        found_combos = [] # List of combo lists
 
-        ics = []
-        remaining = list(unrolled) # Already sorted by Side/Strike from _unroll_legs
-        
-        # 1. Extract possible Iron Condors greedily (Deterministic combination search)
-        while len(remaining) >= 4:
-            found_ic = False
-            best_ic_combo = None
-            best_indices = None
-            min_absolute_delta = float('inf')
-            
-            # Note: Combinations are deterministic over the sorted remaining list
-            for indices in combinations(range(len(remaining)), 4):
+        def extract_chunk(num_legs, constraint_func):
+            nonlocal remaining
+            # Deterministic scan over current remaining list
+            for indices in combinations(range(len(remaining)), num_legs):
                 combo = [remaining[i] for i in indices]
-                sc = any(l.side == 'CALL' and l.quantity < 0 for l in combo)
-                lc = any(l.side == 'CALL' and l.quantity > 0 for l in combo)
-                sp = any(l.side == 'PUT' and l.quantity < 0 for l in combo)
-                lp = any(l.side == 'PUT' and l.quantity > 0 for l in combo)
                 
-                if sc and lc and sp and lp:
-                    net_delta = sum(l.delta * l.quantity for l in combo)
-                    abs_delta = abs(net_delta)
-                    # We greedily find the most balanced IC to pull into the list
-                    if abs_delta < min_absolute_delta:
-                        min_absolute_delta = abs_delta
-                        best_ic_combo = combo
-                        best_indices = indices
-                        found_ic = True
-            
-            if found_ic:
-                ics.append((best_ic_combo, min_absolute_delta))
-                # Remove from remaining in reverse
-                for i in sorted(best_indices, reverse=True):
-                    remaining.pop(i)
-            else:
-                break
+                # UNIQUE STRIKE RULE: No repeated strike/side in one order
+                # This ensures we don't put BTC and BTO of the same symbol in the same order
+                strike_keys = {(l.strike, l.side) for l in combo}
+                if len(strike_keys) != num_legs: continue
+                
+                if constraint_func(combo):
+                    # Success: extract from remaining list in reverse order
+                    for i in sorted(indices, reverse=True):
+                        remaining.pop(i)
+                    return combo
+            return None
+
+        # Priority 1: Iron Condors (4 legs: 1xLC, 1xSC, 1xLP, 1xSP)
+        while len(remaining) >= 4:
+            ic = extract_chunk(4, lambda c: 
+                sum(1 for l in c if l.side == 'CALL' and l.quantity > 0) == 1 and
+                sum(1 for l in c if l.side == 'CALL' and l.quantity < 0) == 1 and
+                sum(1 for l in c if l.side == 'PUT' and l.quantity > 0) == 1 and
+                sum(1 for l in c if l.side == 'PUT' and l.quantity < 0) == 1
+            )
+            if not ic: break
+            found_combos.append(ic)
+
+        # Priority 2: Side-Specific Condors / Rolls (4 legs: 2L, 2S on same side)
+        while len(remaining) >= 4:
+            roll = extract_chunk(4, lambda c:
+                len({l.side for l in c}) == 1 and
+                sum(1 for l in c if l.quantity > 0) == 2 and
+                sum(1 for l in c if l.quantity < 0) == 2
+            )
+            if not roll: break
+            found_combos.append(roll)
+
+        # Priority 3: Vertical Spreads (2 legs: 1L, 1S on same side)
+        while len(remaining) >= 2:
+            vs = extract_chunk(2, lambda c:
+                len({l.side for l in c}) == 1 and
+                sum(1 for l in c if l.quantity > 0) == 1 and
+                sum(1 for l in c if l.quantity < 0) == 1
+            )
+            if not vs: break
+            found_combos.append(vs)
+
+        # Residuals: Aggregate whatever is left into chunks of 4 unique strikes
+        leftover_rolled = self._roll_legs(remaining)
         
-        # 2. Sort the pulled ICs by delta: High Delta (most critical) first
-        ics.sort(key=lambda x: x[1], reverse=True)
-        
-        # 3. Form final chunks: (Aggregated Non-IC legs first, then ICs)
-        chunks = []
-        
-        # Aggregate remaining unit-legs into full legs before chunking
-        rolled_remaining = self._roll_legs(remaining)
-        for i in range(0, len(rolled_remaining), 4):
-            # Group into chunks of up to 4 unique legs
-            # We unroll them back so execute_net_trade's GCD logic sees the full contract count
-            chunks.append(self._unroll_legs(rolled_remaining[i:i+4]))
+        # Consolidation: Group identical combo units to maximize order quantities
+        # (e.g., 10 units of the same IC should be ONE order with higher quantity)
+        grouped = defaultdict(list)
+        for combo in found_combos:
+            # Deterministic signature: sorted (symbol, instruction) tuples
+            sig = tuple(sorted([(l.symbol, getattr(l, 'instruction', None)) for l in combo]))
+            grouped[sig].append(combo)
             
-        # Group identical IC combos by their leg signatures to avoid splitting units
-        grouped_ics = defaultdict(list)
-        for ic_combo, delta in ics:
-            # Deterministic signature: sorted list of symbols
-            sig = tuple(sorted([l.symbol for l in ic_combo]))
-            grouped_ics[sig].extend(ic_combo)
-            
-        # Add the consolidated IC chunks
-        for sig, combo_legs in grouped_ics.items():
-            chunks.append(combo_legs)
-            
-        return chunks
+        final_chunks = []
+        for sig, combos in grouped.items():
+            all_unit_legs = []
+            for combo in combos:
+                all_unit_legs.extend(combo)
+            # Re-aggregate into full-quantity legs
+            final_chunks.append(self._roll_legs(all_unit_legs))
+
+        # Add residual chunks
+        if leftover_rolled:
+            for i in range(0, len(leftover_rolled), 4):
+                final_chunks.append(leftover_rolled[i:i+4])
+
+        return final_chunks
 
     def _get_legs_signature(self, legs: List[OptionLeg]) -> Set[Tuple[str, int]]:
         """Return a set of (symbol, quantity) for content-based matching."""
