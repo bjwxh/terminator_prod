@@ -507,7 +507,7 @@ function updateOrdersTable(orders) {
             <td>$${(o.price || 0).toFixed(2)}</td>
             <td class="primary">${o.status}</td>
             <td style="text-align: right;">
-                <button class="btn btn-danger btn-small" onclick="confirmCancelOrder('${o.orderId}', '${o.symbol}')">Cancel</button>
+                <button class="btn btn-danger btn-small" onclick="confirmCancelOrder('${o.id}', '${o.symbol}')">Cancel</button>
             </td>
         `;
         tbody.appendChild(row);
