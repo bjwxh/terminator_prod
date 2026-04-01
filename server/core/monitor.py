@@ -1296,14 +1296,22 @@ class LiveTradingMonitor:
                     self.logger.info(f"Chunk {i}: Using manual override price {override:.2f} (Abs: {raw_price:.2f})")
                 else:
                     offset = self.config.get('order_offset', 0.0)
-                    is_final_credit = total_chunk_credit >= 0
-                    # Passive offset: Submit further away from the spread to avoid immediate fill
-                    if is_final_credit:
-                        # Credit structure: Asking for MORE credit is more passive
-                        raw_price = unit_mid_price + offset
+                    # Structural intent (Credit vs. Debit) based on mid price
+                    is_credit_struct = total_chunk_credit >= 0
+                    
+                    # Calculate signed target price per unit (+Cr, -Db)
+                    signed_mid = total_chunk_credit / (100.0 * num_units) if num_units > 0 else 0.0
+                    signed_target = signed_mid + offset
+                    
+                    if not is_credit_struct:
+                        # BROKER RULE: For debit spreads, limit price cannot be negative (cannot earn money on debit spread)
+                        # We stay in NET_DEBIT mode. We clamp at 0.0 because Schwab rejects negative debit limits.
+                        raw_price = max(0.0, -signed_target)
+                        is_final_credit = False
                     else:
-                        # Debit structure: Offering to pay LESS debit is more passive
-                        raw_price = max(0.0, unit_mid_price - offset)
+                        # For credit structures, "the other way is fine" (allows signed credit prices)
+                        raw_price = signed_target
+                        is_final_credit = True
                 
                 ticked_price = self._round_to_tick(raw_price, num_legs=num_legs)
                 price_str = f"{ticked_price:.2f}"
