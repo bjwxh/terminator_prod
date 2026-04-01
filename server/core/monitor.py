@@ -207,17 +207,17 @@ class LiveTradingMonitor:
                 side = "SHORT" if l.quantity < 0 else "LONG"
                 leg_texts.append(f"{side} {l.side} {int(l.strike)} x{abs(l.quantity)//num_units}")
             
-            # Apply the configuration offset here too so UI matches expected execution
-            offset = self.config.get('order_offset', 0.0)
-            mid_price_abs = abs(chunk_credit / 100.0 / num_units)
+            # Fix Task #32: Use locked structural intent for UI consistency
+            signed_mid = (chunk_credit / 100.0 / num_units) if num_units > 0 else 0.0
+            signed_target = signed_mid + offset
             is_credit = chunk_credit >= 0
             
             if is_credit:
-                # Passive offset: Add to mid-price to ask for MORE credit
-                price_with_offset = mid_price_abs + offset
+                # Credit spread: floor at 0.0
+                price_with_offset = max(0.0, signed_target)
             else:
-                # Passive offset: Subtract from mid-price to pay LESS debit
-                price_with_offset = max(0.00, mid_price_abs - offset)
+                # Debit spread: floor at 0.0 cost
+                price_with_offset = max(0.0, -signed_target)
 
             # Round to tick for UI display consistency
             price_with_offset = self._round_to_tick(price_with_offset, num_legs=len(rolled))
@@ -229,6 +229,7 @@ class LiveTradingMonitor:
                 "idx": i,
                 "qty": num_units,
                 "desc": " | ".join(leg_texts),
+                "is_credit": is_credit,  # Flag for UI to enforce floor logic
                 "credit": f"${price_with_offset:.2f} {'Cr' if is_credit else 'Db'} (ea)",
                 "price_ea": signed_price_ea
             })
@@ -1286,31 +1287,36 @@ class LiveTradingMonitor:
                 # Price per unit for the broker
                 unit_mid_price = total_mid_price / num_units
                 
+                # Structural intent (Credit vs. Debit) locked based on market mid-price
+                is_credit_struct = total_chunk_credit >= 0
+                
                 # Task #28: Apply Manual Price Override from UI if exists
-                # Determine final intent (Credit vs. Debit)
                 override = self.price_overrides.get(trade.strategy_id, {}).get(i)
                 if override is not None:
-                    # User provided the FINAL signed price per unit (+Cr, -Db)
-                    raw_price = abs(override)
-                    is_final_credit = override >= 0
-                    self.logger.info(f"Chunk {i}: Using manual override price {override:.2f} (Abs: {raw_price:.2f})")
+                    # Locked structural intent prevents broker structural rejections (Task #32 Fix)
+                    is_final_credit = is_credit_struct
+                    if is_credit_struct:
+                        # Price is Cr amount. Floor at 0.0.
+                        raw_price = max(0.0, override)
+                    else:
+                        # Price is Db cost (Abs of negative UI value). Floor at 0.0.
+                        raw_price = max(0.0, -override)
+                    self.logger.info(f"Chunk {i}: Using manual override price {override:.2f} (Lock Cr: {is_final_credit}, Price: {raw_price:.2f})")
                 else:
                     offset = self.config.get('order_offset', 0.0)
-                    # Structural intent (Credit vs. Debit) based on mid price
-                    is_credit_struct = total_chunk_credit >= 0
-                    
                     # Calculate signed target price per unit (+Cr, -Db)
                     signed_mid = total_chunk_credit / (100.0 * num_units) if num_units > 0 else 0.0
                     signed_target = signed_mid + offset
                     
                     if not is_credit_struct:
                         # BROKER RULE: For debit spreads, limit price cannot be negative (cannot earn money on debit spread)
-                        # We stay in NET_DEBIT mode. We clamp at 0.0 because Schwab rejects negative debit limits.
+                        # We stay in NET_DEBIT mode and clamp at 0.0 to avoid rejections.
                         raw_price = max(0.0, -signed_target)
                         is_final_credit = False
                     else:
-                        # For credit structures, "the other way is fine" (allows signed credit prices)
-                        raw_price = signed_target
+                        # Rule: Limit price for multi-leg orders must not be negative on Schwab.
+                        # We stay in NET_CREDIT mode and clamp at 0.0 to avoid rejections.
+                        raw_price = max(0.0, signed_target)
                         is_final_credit = True
                 
                 ticked_price = self._round_to_tick(raw_price, num_legs=num_legs)

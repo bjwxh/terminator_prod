@@ -750,13 +750,28 @@ function formatOrderPrice(price) {
 
 function adjustPrice(idx, delta) {
     if (!currentTradeOrders[idx]) return;
+    const order = currentTradeOrders[idx];
+    const isCredit = order.is_credit;
     
-    // Passive (+) / Aggressive (-) adjustment
-    currentTradeOrders[idx].price_ea = Number((currentTradeOrders[idx].price_ea + delta).toFixed(2));
+    // Task #32: Enforce 0.00 limit price floor for debit spreads when making them passive (+)
+    if (!isCredit && delta > 0 && order.price_ea >= -0.001) {
+        alert("Broker Rule: We cannot be more passive because the price for a debit spread must be non-negative (max 0.00 debit).");
+        return;
+    }
+
+    // Apply adjustment and floor/clamp based on structural nature
+    let newPrice = Number((order.price_ea + delta).toFixed(2));
+    if (!isCredit) {
+        // Debit must stay <= 0 in signed price logic (0 to -X)
+        order.price_ea = Math.min(0.00, newPrice);
+    } else {
+        // Credit must stay >= 0 in signed price logic (0 to +X)
+        order.price_ea = Math.max(0.00, newPrice);
+    }
     
     const priceEl = document.getElementById(`price-val-${idx}`);
     if (priceEl) {
-        priceEl.textContent = formatOrderPrice(currentTradeOrders[idx].price_ea);
+        priceEl.textContent = formatOrderPrice(order.price_ea);
         priceEl.classList.add('modified');
     }
     
