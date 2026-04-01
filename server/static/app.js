@@ -479,10 +479,23 @@ function updatePositionTable(livePos, simPos) {
 
 function updateOrdersTable(orders) {
     const tbody = document.getElementById('orders-tbody');
+    const cancelAllBtn = document.getElementById('cancel-all-orders-btn');
     tbody.innerHTML = '';
+    
     if (!orders || orders.length === 0) {
         tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-secondary);">No working orders</td></tr>';
+        if (cancelAllBtn) {
+            cancelAllBtn.disabled = true;
+            cancelAllBtn.style.opacity = '0.4';
+            cancelAllBtn.style.cursor = 'not-allowed';
+        }
         return;
+    }
+    
+    if (cancelAllBtn) {
+        cancelAllBtn.disabled = false;
+        cancelAllBtn.style.opacity = '1';
+        cancelAllBtn.style.cursor = 'pointer';
     }
     orders.forEach(o => {
         const row = document.createElement('tr');
