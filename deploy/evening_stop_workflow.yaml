@@ -1,0 +1,22 @@
+main:
+  steps:
+    - stop_primary:
+        try:
+          call: googleapis.compute.v1.instances.stop
+          args:
+            instance: "production-server"
+            project: "terminator-478221"
+            zone: "us-central1-a"
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+    - stop_backup:
+        try:
+          call: googleapis.compute.v1.instances.stop
+          args:
+            instance: "production-server-backup"
+            project: "terminator-478221"
+            zone: "us-central1-c"
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3

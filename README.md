@@ -69,14 +69,19 @@ terminator_prod/
    python3 server/main.py
    ```
 
-### 2. Production Deployment
-Deployment is handled by syncing the `server/` directory to the GCE instance and restarting the systemd service:
+### 2. Production Deployment (Both VMs)
+Deployment is now unified across both the Primary and Backup VMs. Use the `full_deploy.sh` script which handles Git commits, multi-VM synchronization, and service restarts:
+
 ```bash
-# Sync and Restart (Unified)
-tar -czf /tmp/update.tar.gz -C server .
-gcloud compute scp /tmp/update.tar.gz production-server:~/
-gcloud compute ssh production-server --command "sudo tar -xzf ~/update.tar.gz -C /opt/terminator/server && sudo systemctl restart terminator"
+# Unified Git Commit, Sync, and Restart
+./deploy/full_deploy.sh "Your commit message here"
 ```
+
+The script will:
+1.  **Commit** any uncommitted local changes to Git.
+2.  **Archive** the project for deployment (excluding logs/DBs).
+3.  **Detect** which VMs are running (`production-server` and `production-server-backup`).
+4.  **Upload** code to all active VMs and **Restart** the services.
 
 ---
 

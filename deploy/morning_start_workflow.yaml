@@ -1,0 +1,36 @@
+main:
+  steps:
+    - try_primary:
+        try:
+          call: googleapis.compute.v1.instances.start
+          args:
+            instance: "production-server"
+            project: "terminator-478221"
+            zone: "us-central1-a"
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+        # If start fails (e.g. RESOURCE_EXHAUSTED), jump to backup
+        except:
+          as: e
+          steps:
+            - skip_to_backup:
+                next: try_backup
+    - check_status:
+        call: googleapis.compute.v1.instances.get
+        args:
+          instance: "production-server"
+          project: "terminator-478221"
+          zone: "us-central1-a"
+        result: primary_res
+    - evaluate:
+        switch:
+          - condition: ${primary_res.status == "RUNNING" or primary_res.status == "PROVISIONING" or primary_res.status == "STAGING"}
+            next: end
+        next: try_backup
+    - try_backup:
+        call: googleapis.compute.v1.instances.start
+        args:
+          instance: "production-server-backup"
+          project: "terminator-478221"
+          zone: "us-central1-c"

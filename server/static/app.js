@@ -481,7 +481,7 @@ function updateOrdersTable(orders) {
     const tbody = document.getElementById('orders-tbody');
     tbody.innerHTML = '';
     if (!orders || orders.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-secondary);">No working orders</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-secondary);">No working orders</td></tr>';
         return;
     }
     orders.forEach(o => {
@@ -493,6 +493,9 @@ function updateOrdersTable(orders) {
             <td>${o.qty || 0}</td>
             <td>$${(o.price || 0).toFixed(2)}</td>
             <td class="primary">${o.status}</td>
+            <td style="text-align: right;">
+                <button class="btn btn-danger btn-small" onclick="confirmCancelOrder('${o.orderId}', '${o.symbol}')">Cancel</button>
+            </td>
         `;
         tbody.appendChild(row);
     });
@@ -958,6 +961,69 @@ document.getElementById('reconnect-broker-btn').addEventListener('click', () => 
         fetch('/api/trading/reconnect', { method: 'POST' });
     }
 });
+
+// Order Cancellation
+function confirmCancelOrder(orderId, symbol) {
+    showConfirmModal(
+        "Cancel Working Order",
+        `Are you sure you want to cancel order <strong>#${orderId}</strong> (${symbol})?<br><br>This action cannot be undone.`,
+        () => {
+            fetch(`/api/orders/${orderId}/cancel`, { method: 'POST' })
+                .then(resp => {
+                    if (!resp.ok) throw new Error("Cancel failed");
+                    console.log(`Cancel requested for order ${orderId}`);
+                    closeConfirmModal();
+                })
+                .catch(err => {
+                    alert("Error cancelling order: " + err.message);
+                });
+        }
+    );
+}
+
+function confirmCancelAll() {
+    showConfirmModal(
+        "⚠️ Cancel ALL Orders",
+        "Are you sure you want to cancel <strong>ALL</strong> currently working orders?<br><br>This will attempt to cancel every open order at the broker.",
+        () => {
+            fetch('/api/orders/cancel_all', { method: 'POST' })
+                .then(resp => {
+                    if (!resp.ok) throw new Error("Cancel all failed");
+                    return resp.json();
+                })
+                .then(data => {
+                    console.log("Cancel all result:", data);
+                    closeConfirmModal();
+                })
+                .catch(err => {
+                    alert("Error cancelling all orders: " + err.message);
+                });
+        }
+    );
+}
+
+// Confirmation Modal Helpers
+function showConfirmModal(title, message, onConfirm) {
+    const modal = document.getElementById('confirm-modal');
+    const titleEl = document.getElementById('confirm-modal-title');
+    const msgEl = document.getElementById('confirm-modal-message');
+    const confirmBtn = document.getElementById('confirm-modal-btn');
+    
+    titleEl.innerHTML = title;
+    msgEl.innerHTML = message;
+    
+    // Use a fresh listener to avoid accumulation
+    const newBtn = confirmBtn.cloneNode(true);
+    confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
+    newBtn.addEventListener('click', onConfirm);
+    
+    modal.classList.add('show');
+}
+
+function closeConfirmModal() {
+    const modal = document.getElementById('confirm-modal');
+    if (modal) modal.classList.remove('show');
+}
 
 initCharts();
 initMuteUI();

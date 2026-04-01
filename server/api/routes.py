@@ -104,6 +104,13 @@ async def cancel_order(order_id: str, monitor = Depends(get_monitor)):
         raise HTTPException(status_code=500, detail="Cancel failed")
     return {"msg": f"Order {order_id} cancel requested"}
 
+@router.post("/orders/cancel_all")
+async def cancel_all_orders(monitor = Depends(get_monitor)):
+    result = await monitor.cancel_all_orders()
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("msg", "Cancel all failed"))
+    return result
+
 @router.get("/session")
 async def download_session(monitor = Depends(get_monitor)):
     # Return full session state as JSON (useful for EOD pull without scp)

@@ -1793,7 +1793,7 @@ class LiveTradingMonitor:
                 if order_id in self.order_to_strategy:
                     sid = self.order_to_strategy.pop(order_id)
                     if sid in self.working_strategy_ids:
-                        self.working_strategy_ids.remove(sid)
+                        self.working_strategy_ids.discard(sid)
                 return True
             else:
                 self.logger.error(f"Failed to cancel order {order_id}: {resp.status_code} {resp.text}")
@@ -1801,6 +1801,34 @@ class LiveTradingMonitor:
         except Exception as e:
             self.logger.error(f"Error cancelling order {order_id}: {e}")
             return False
+
+    async def cancel_all_orders(self) -> Dict[str, Any]:
+        """Cancel all working orders at the broker"""
+        if not self.client or not self.account_hash:
+            return {"success": False, "msg": "Client not initialized"}
+        
+        # We use a copy of the list to avoid mutation issues while iterating/awaiting
+        with self._data_lock:
+            to_cancel = list(self.working_orders)
+        
+        if not to_cancel:
+            return {"success": True, "msg": "No working orders to cancel", "count": 0}
+        
+        self.logger.info(f"Requested cancellation of all {len(to_cancel)} working orders.")
+        
+        results = []
+        for order in to_cancel:
+            oid = str(order.get('orderId'))
+            success = await self.cancel_order(oid)
+            results.append({"orderId": oid, "success": success})
+            
+        success_count = sum(1 for r in results if r['success'])
+        return {
+            "success": success_count > 0,
+            "msg": f"Cancelled {success_count} of {len(to_cancel)} orders",
+            "count": success_count,
+            "total": len(to_cancel)
+        }
 
     def send_email_alert(self, trade: Trade, report_data: Dict):
         """Send trade alert via email (blocking call, should be run in thread)"""
