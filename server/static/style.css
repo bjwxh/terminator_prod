@@ -754,42 +754,56 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
     .trades-grid { grid-template-columns: 1fr; }
 }
 
-/* Sticky Columns for Aggregated Positions */
-#positions-table {
-    border-collapse: separate; /* Required for sticky borders to look right */
+/* Sticky Columns for Tables */
+#positions-table, #orders-table {
+    border-collapse: separate; 
     border-spacing: 0;
 }
 
 #positions-table th:nth-child(1),
-#positions-table td:nth-child(1) {
+#positions-table td:nth-child(1),
+#orders-table th:nth-child(1),
+#orders-table td:nth-child(1) {
     position: sticky;
     left: 0;
-    z-index: 10;
-    background-color: #161b22; /* Solid color matching --card-bg */
-    min-width: 80px;
-    border-right: 1px solid var(--border-color);
-}
-
-#positions-table th:nth-child(2),
-#positions-table td:nth-child(2) {
-    position: sticky;
-    left: 80px;
     z-index: 10;
     background-color: #161b22;
     min-width: 80px;
     border-right: 1px solid var(--border-color);
 }
 
-/* Ensure header is above body cells */
-#positions-table th:nth-child(1),
-#positions-table th:nth-child(2) {
-    z-index: 11;
-    background-color: #1c2128; /* Slightly lighter for header */
+#positions-table th:nth-child(2),
+#positions-table td:nth-child(2),
+#orders-table th:nth-child(2),
+#orders-table td:nth-child(2) {
+    position: sticky;
+    left: 80px;
+    z-index: 10;
+    background-color: #161b22;
+    min-width: 80px;
+    border-right: 1px solid var(--border-color);
+    white-space: nowrap;
 }
 
-/* Fix shadows or indicators for scrolling if desired */
+/* Specific z-index to keep horizontal headers above vertical sticky cells */
+#positions-table th, #orders-table th {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+}
+
+#positions-table th:nth-child(1),
+#positions-table th:nth-child(2),
+#orders-table th:nth-child(1),
+#orders-table th:nth-child(2) {
+    z-index: 13;
+    background-color: #1c2128;
+}
+
 .table-container {
     position: relative;
+    max-height: 500px;
+    overflow: auto;
 }
 
 /* Price Adjuster Task #28 */
