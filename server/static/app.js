@@ -752,21 +752,33 @@ function adjustPrice(idx, delta) {
     if (!currentTradeOrders[idx]) return;
     const order = currentTradeOrders[idx];
     const isCredit = order.is_credit;
+    const lockFloor = order.lock_floor === true;
     
-    // Task #32: Enforce 0.00 limit price floor for debit spreads when making them passive (+)
-    if (!isCredit && delta > 0 && order.price_ea >= -0.001) {
-        alert("Broker Rule: We cannot be more passive because the price for a debit spread must be non-negative (max 0.00 debit).");
-        return;
+    // Task #32: Conditional 0.00 limit price floor based on strategy classification
+    if (lockFloor) {
+        // Enforce structural intent (cannot flip to other side)
+        if (!isCredit && delta > 0 && order.price_ea >= -0.001) {
+            alert("Structural Constraint: We cannot be more passive because the price for a " + order.order_type.toUpperCase() + " must stay non-negative (max 0.00 debit).");
+            return;
+        }
+        if (isCredit && delta < 0 && order.price_ea <= 0.001) {
+            alert("Structural Constraint: We cannot be more aggressive because the price for a " + order.order_type.toUpperCase() + " must stay non-negative (min 0.00 credit).");
+            return;
+        }
     }
 
-    // Apply adjustment and floor/clamp based on structural nature
+    // Apply adjustment
     let newPrice = Number((order.price_ea + delta).toFixed(2));
-    if (!isCredit) {
-        // Debit must stay <= 0 in signed price logic (0 to -X)
-        order.price_ea = Math.min(0.00, newPrice);
+    
+    if (lockFloor) {
+        if (!isCredit) {
+            order.price_ea = Math.min(0.00, newPrice);
+        } else {
+            order.price_ea = Math.max(0.00, newPrice);
+        }
     } else {
-        // Credit must stay >= 0 in signed price logic (0 to +X)
-        order.price_ea = Math.max(0.00, newPrice);
+        // Unknown structure: Allow crossing zero
+        order.price_ea = newPrice;
     }
     
     const priceEl = document.getElementById(`price-val-${idx}`);

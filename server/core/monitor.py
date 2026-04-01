@@ -9,6 +9,7 @@ from datetime import datetime, date, time, timedelta, timezone
 from typing import Dict, List, Tuple, Optional, Set, Any
 from collections import defaultdict, OrderedDict
 from itertools import combinations
+import copy
 import threading
 import traceback
 import queue
@@ -207,18 +208,24 @@ class LiveTradingMonitor:
                 side = "SHORT" if l.quantity < 0 else "LONG"
                 leg_texts.append(f"{side} {l.side} {int(l.strike)} x{abs(l.quantity)//num_units}")
             
-            # Fix Task #32: Use locked structural intent for UI consistency
+            # Fix Task #32: Use classification to determine structural intent and floor-locking
+            order_type, is_credit_structural = self._classify_order_type(rolled)
+            lock_floor = (order_type != "unknown")
+            
+            if is_credit_structural is not None:
+                is_credit = is_credit_structural
+            else:
+                is_credit = chunk_credit >= 0
+            
             offset = self.config.get('order_offset', 0.0)
             signed_mid = (chunk_credit / 100.0 / num_units) if num_units > 0 else 0.0
             signed_target = signed_mid + offset
-            is_credit = chunk_credit >= 0
             
-            if is_credit:
-                # Credit spread: floor at 0.0
-                price_with_offset = max(0.0, signed_target)
+            if lock_floor:
+                price_with_offset = max(0.0, signed_target if is_credit else -signed_target)
             else:
-                # Debit spread: floor at 0.0 cost
-                price_with_offset = max(0.0, -signed_target)
+                is_credit = signed_target >= 0
+                price_with_offset = abs(signed_target)
 
             # Round to tick for UI display consistency
             price_with_offset = self._round_to_tick(price_with_offset, num_legs=len(rolled))
@@ -229,8 +236,10 @@ class LiveTradingMonitor:
                 "type": "TRADE",
                 "idx": i,
                 "qty": num_units,
-                "desc": " | ".join(leg_texts),
-                "is_credit": is_credit,  # Flag for UI to enforce floor logic
+                "desc": f"[{order_type.upper()}] " + " | ".join(leg_texts),
+                "is_credit": is_credit,
+                "order_type": order_type,
+                "lock_floor": lock_floor,
                 "credit": f"${price_with_offset:.2f} {'Cr' if is_credit else 'Db'} (ea)",
                 "price_ea": signed_price_ea
             })
@@ -1285,40 +1294,42 @@ class LiveTradingMonitor:
                 total_chunk_credit = sum(-l.quantity * l.price for l in rolled_chunk_legs) * 100
                 total_mid_price = abs(total_chunk_credit / 100.0)
                 
-                # Price per unit for the broker
-                unit_mid_price = total_mid_price / num_units
+                # Classify structure to determine if 0.00 floor is mandatory (Task #32 Improvements)
+                order_type, is_credit_structural = self._classify_order_type(rolled_chunk_legs)
+                lock_floor = (order_type != "unknown")
                 
-                # Structural intent (Credit vs. Debit) locked based on market mid-price
-                is_credit_struct = total_chunk_credit >= 0
+                # Structural intent (+Cr, -Db) locked to avoid structural rejections on Schwab
+                if is_credit_structural is not None:
+                    is_credit_struct = is_credit_structural
+                else:
+                    # Fallback to mid price for spreads and unknown structures
+                    is_credit_struct = total_chunk_credit >= 0
                 
                 # Task #28: Apply Manual Price Override from UI if exists
                 override = self.price_overrides.get(trade.strategy_id, {}).get(i)
                 if override is not None:
-                    # Locked structural intent prevents broker structural rejections (Task #32 Fix)
-                    is_final_credit = is_credit_struct
-                    if is_credit_struct:
-                        # Price is Cr amount. Floor at 0.0.
-                        raw_price = max(0.0, override)
+                    if lock_floor:
+                        # Intent Locked (Safe structures)
+                        is_final_credit = is_credit_struct
+                        raw_price = max(0.0, override if is_credit_struct else -override)
                     else:
-                        # Price is Db cost (Abs of negative UI value). Floor at 0.0.
-                        raw_price = max(0.0, -override)
-                    self.logger.info(f"Chunk {i}: Using manual override price {override:.2f} (Lock Cr: {is_final_credit}, Price: {raw_price:.2f})")
+                        # Intent Dynamic (Exotic structures)
+                        is_final_credit = override >= 0
+                        raw_price = abs(override)
+                    self.logger.info(f"Chunk {i}: Override {override:.2f} -> Price: {raw_price:.2f} (Lock: {lock_floor})")
                 else:
                     offset = self.config.get('order_offset', 0.0)
-                    # Calculate signed target price per unit (+Cr, -Db)
                     signed_mid = total_chunk_credit / (100.0 * num_units) if num_units > 0 else 0.0
                     signed_target = signed_mid + offset
                     
-                    if not is_credit_struct:
-                        # BROKER RULE: For debit spreads, limit price cannot be negative (cannot earn money on debit spread)
-                        # We stay in NET_DEBIT mode and clamp at 0.0 to avoid rejections.
-                        raw_price = max(0.0, -signed_target)
-                        is_final_credit = False
+                    if lock_floor:
+                        # Intent Locked + Mandatory Floor (Safe structures)
+                        is_final_credit = is_credit_struct
+                        raw_price = max(0.0, signed_target if is_credit_struct else -signed_target)
                     else:
-                        # Rule: Limit price for multi-leg orders must not be negative on Schwab.
-                        # We stay in NET_CREDIT mode and clamp at 0.0 to avoid rejections.
-                        raw_price = max(0.0, signed_target)
-                        is_final_credit = True
+                        # Intent Dynamic + No Floor (Exotic structures)
+                        is_final_credit = signed_target >= 0
+                        raw_price = abs(signed_target)
                 
                 ticked_price = self._round_to_tick(raw_price, num_legs=num_legs)
                 price_str = f"{ticked_price:.2f}"
@@ -2721,22 +2732,78 @@ class LiveTradingMonitor:
         return unrolled
 
     def _roll_legs(self, legs: List[OptionLeg]) -> List[OptionLeg]:
-        """Aggregate unrolled unit legs back into grouped legs by symbol."""
+        """Aggregate duplicate symbols into single legs before submission (Bug 11 Fix)"""
         agg = {}
         for l in legs:
-            inst = getattr(l, 'instruction', None)
-            k = (l.symbol, inst)
-            if k not in agg:
-                agg[k] = OptionLeg(
-                    symbol=l.symbol, strike=l.strike, side=l.side,
-                    quantity=l.quantity, delta=l.delta, theta=l.theta,
-                    price=l.price, entry_price=l.entry_price,
-                    bid_price=l.bid_price, ask_price=l.ask_price
-                )
-                if inst: agg[k].instruction = inst
+            if l.symbol in agg:
+                agg[l.symbol].quantity += l.quantity
             else:
-                agg[k].quantity += l.quantity
-        return list(agg.values())
+                agg[l.symbol] = copy.copy(l)
+        # Remove zero-quantity legs (netted out)
+        return [l for l in agg.values() if l.quantity != 0]
+
+    def _classify_order_type(self, legs: List[OptionLeg]) -> Tuple[str, Optional[bool]]:
+        """
+        Structural classification of an option spread for floor enforcement.
+        Ref: docs/order_type_classification_plan.md
+        Returns: (type_str, is_credit_structural)
+        """
+        n = len(legs)
+        if n == 0: return ("unknown", None)
+        
+        # 1. Single Leg
+        if n == 1:
+            is_credit = legs[0].quantity < 0
+            return ("single", is_credit)
+        
+        # 2. Vertical Spread / Risk Reversal
+        if n == 2:
+            l1, l2 = legs
+            # One long, one short, exact equal quantities
+            if l1.quantity * l2.quantity < 0 and abs(l1.quantity) == abs(l2.quantity):
+                return ("vertical", None) # mid-price determines Cr/Db
+        
+        # Sort by strike for multi-leg topology checks
+        sorted_legs = sorted(legs, key=lambda x: x.strike)
+        quantities = [l.quantity for l in sorted_legs]
+        
+        # Determine GCD unit for ratios
+        unit = abs(quantities[0])
+        for q in quantities[1:]: 
+            unit = math.gcd(unit, abs(q))
+        
+        ratios = [q // unit for q in quantities] if unit > 0 else []
+        
+        # 3. Butterfly (3 legs, ratios 1/-2/1) — all same side required
+        if n == 3:
+            same_side = len(set(l.side for l in sorted_legs)) == 1
+            if same_side and ratios == [1, -2, 1]: return ("butterfly", False) # Long Fly = Debit
+            if same_side and ratios == [-1, 2, -1]: return ("butterfly", True)  # Short Fly = Credit
+
+        # 4. Condors and Iron Structures
+        if n == 4:
+            # Same-Type Condor (+1/-1/-1/+1) — must be all same side to avoid matching IC
+            same_side = len(set(l.side for l in sorted_legs)) == 1
+            if same_side and ratios == [1, -1, -1, 1]: return ("condor", False) # Long outer = Debit
+            if same_side and ratios == [-1, 1, 1, -1]: return ("condor", True)  # Short outer = Credit
+            
+            # Iron Condor / Iron Butterfly (2 Put + 2 Call)
+            p_legs = [l for l in sorted_legs if l.side == 'PUT']
+            c_legs = [l for l in sorted_legs if l.side == 'CALL']
+            if len(p_legs) == 2 and len(c_legs) == 2:
+                lp = next((l for l in p_legs if l.quantity > 0), None)
+                sp = next((l for l in p_legs if l.quantity < 0), None)
+                lc = next((l for l in c_legs if l.quantity > 0), None)
+                sc = next((l for l in c_legs if l.quantity < 0), None)
+                
+                if all([lp, sp, lc, sc]):
+                    # Short inner = Credit, Long inner = Debit
+                    is_credit = (sp.strike > lp.strike and sc.strike < lc.strike)
+                    # Iron fly when either the short body or long body shares a strike
+                    t_str = "iron_fly" if (sp.strike == sc.strike or lp.strike == lc.strike) else "iron_condor"
+                    return (t_str, is_credit)
+
+        return ("unknown", None)
 
     def _get_smart_chunks(self, legs: List[OptionLeg]) -> List[List[OptionLeg]]:
         """

@@ -15,6 +15,8 @@ export PATH="/Users/fw/google-cloud-sdk/bin:$PATH"
 LOCAL_API_JSON="$HOME/.api_keys/schwab/sli_api.json"
 LOCAL_TOKEN_JSON="$HOME/.api_keys/schwab/sli_token.json"
 VM_TARGET_DIR="/home/fw/.api_keys"
+VM_EOD_DIR="/home/fw/terminator_prod/eod"
+LOCAL_HISTORY_CSV="/Users/fw/Git/terminator_prod/eod/terminator_eod_history.csv"
 
 # NTFY configuration for alerts
 NTFY_TOPIC="terminator-prod-api-key-copy-failure"
@@ -79,6 +81,20 @@ done
 if [ $SUCCESS -eq 0 ]; then
     send_alert "FAILED to sync Schwab keys to $VM_NAME ($ZONE)."
     exit 1
+fi
+
+# 2.1 Sync History CSV to VM (Push)
+echo "Syncing history CSV to $VM_NAME..."
+if [ -f "$LOCAL_HISTORY_CSV" ]; then
+    $GCLOUD compute scp "$LOCAL_HISTORY_CSV" "$VM_NAME:$VM_EOD_DIR/" \
+        --project="$PROJECT" --zone="$ZONE" --quiet
+    if [ $? -eq 0 ]; then
+        echo "History CSV synced successfully."
+    else
+        echo "Warning: History CSV sync failed, but continuing with service restart."
+    fi
+else
+    echo "Local history CSV not found at $LOCAL_HISTORY_CSV. Skipping."
 fi
 
 # 3. Restart service on VM
