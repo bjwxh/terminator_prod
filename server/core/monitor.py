@@ -208,6 +208,7 @@ class LiveTradingMonitor:
                 leg_texts.append(f"{side} {l.side} {int(l.strike)} x{abs(l.quantity)//num_units}")
             
             # Fix Task #32: Use locked structural intent for UI consistency
+            offset = self.config.get('order_offset', 0.0)
             signed_mid = (chunk_credit / 100.0 / num_units) if num_units > 0 else 0.0
             signed_target = signed_mid + offset
             is_credit = chunk_credit >= 0
