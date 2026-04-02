@@ -2374,7 +2374,7 @@ class LiveTradingMonitor:
             self.logger.warning(f"No historical data available for simulation catch-up on {sim_date_str}")
             return []
         
-        dt_series = pd.to_datetime(data['datetime'], format='ISO8601')
+        dt_series = pd.to_datetime(data['datetime'])
         if dt_series.dt.tz is None:
             data['datetime'] = dt_series.dt.tz_localize('America/Chicago')
         else:
