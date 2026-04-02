@@ -266,14 +266,14 @@ async def websocket_endpoint(websocket: WebSocket, monitor = Depends(get_monitor
         "type": "history_init",
         "history": history,
         "config": CONFIG # P5 Fix: Send config once on connect
-    }))
+    }, cls=MonitorEncoder))
     
     # If there's an active trade awaiting confirmation, re-send signal 
     # so the UI can restore the modal after a page refresh (Bug 14 Fix)
     if monitor.pending_trade:
         payload = monitor.get_trade_signal_payload(monitor.pending_trade)
         payload["is_reconnect"] = True
-        await websocket.send_text(json.dumps(payload))
+        await websocket.send_text(json.dumps(payload, cls=MonitorEncoder))
     
     try:
         while True:
