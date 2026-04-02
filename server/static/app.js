@@ -79,44 +79,41 @@ function connect() {
     };
 
     socket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'state_update') {
-            // Auto-refresh on deployment/restart
-            if (data.state.version) {
-                if (currentVersion && data.state.version !== currentVersion) {
-                    console.log("New version detected. Reloading...");
-                    window.location.reload();
+        try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'state_update') {
+                // Auto-refresh on deployment/restart
+                if (data.state.version) {
+                    if (currentVersion && data.state.version !== currentVersion) {
+                        console.log("New version detected. Reloading...");
+                        window.location.reload();
+                    }
+                    currentVersion = data.state.version;
                 }
-                currentVersion = data.state.version;
-            }
-            updateUI(data.state);
-        } else if (data.type === 'history_init') {
-            populateCharts(data.history);
-            if (data.config) updateConfigTable(data.config);
-        } else if (data.type === 'alert') {
-            handleAlert(data);
-        } else if (data.type === 'trade_signal') {
-            // Clear any stale pending dismiss when a fresh trade signal arrives
-            pendingDismissStratId = null;
-            
-            // Task: Force refresh. If a modal is already showing (even if paused), 
-            // it's likely stale context for a trade currently being auto-executed or replaced.
-            // We clear it to ensure the fresh signal's timer and price context takes precedence.
-            closeTradeModal();
-            
-            // Task: Play HIGH priority alert for trade signals
-            playSound('alert');
-            showTradeModal(data);
-        } else if (data.type === 'trade_action') {
-            console.log("Remote trade action received:", data);
-            if (data.action === 'close_modal') {
+                updateUI(data.state);
+            } else if (data.type === 'history_init') {
+                populateCharts(data.history);
+                if (data.config) updateConfigTable(data.config);
+            } else if (data.type === 'alert') {
+                handleAlert(data);
+            } else if (data.type === 'trade_signal') {
+                pendingDismissStratId = null;
                 closeTradeModal();
-            } else if (data.action === 'pause_sync') {
-                isTradeTimerPaused = data.is_paused;
-                const btn = document.getElementById('modal-pause-btn');
-                if (btn) btn.textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
-                updateTradeTimerUI();
+                playSound('alert');
+                showTradeModal(data);
+            } else if (data.type === 'trade_action') {
+                console.log("Remote trade action received:", data);
+                if (data.action === 'close_modal') {
+                    closeTradeModal();
+                } else if (data.action === 'pause_sync') {
+                    isTradeTimerPaused = data.is_paused;
+                    const btn = document.getElementById('modal-pause-btn');
+                    if (btn) btn.textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
+                    updateTradeTimerUI();
+                }
             }
+        } catch (err) {
+            console.error("FATAL ERROR IN WS ONMESSAGE:", err);
         }
     };
 
