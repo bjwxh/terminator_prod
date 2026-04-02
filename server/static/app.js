@@ -329,7 +329,8 @@ function updateUI(state) {
             }
         } else {
             // If the server heartbeat says no trade is pending, ensure the modal is closed
-            if (modalShowing && window.isTradeTimerPaused === false) {
+            if (modalShowing) {
+                 console.log("No pending trade on server — auto-dismissing modal");
                  closeTradeModal();
             }
         }
