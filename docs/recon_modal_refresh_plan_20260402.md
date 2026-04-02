@@ -101,4 +101,136 @@ The execution loop naturally picks up the new trade from the queue, broadcasts a
 
 ---
 
-*Status: Planned (2026-04-02)*
+*Status: Implemented (2026-04-02)*
+
+---
+
+## Post-Deployment Bug: Modal No Longer Showing (2026-04-02)
+
+### Symptom
+After deploying the implementation, the order confirmation modal stopped appearing entirely. The backend still detects the position gap, logs "Awaiting confirmation for trade: GAP_SYNC_XXXXXX", and auto-executes after the countdown — but the frontend never shows the modal.
+
+### What the Logs Confirm
+- Backend reaches `run_order_execution_loop` and logs "Awaiting confirmation" → the broadcast **is attempted**
+- Auto-execute fires at the correct timeout (30s) → the execution loop is processing normally
+- No modal appears at any point during the countdown
+
+This rules out the execution loop crashing. The broadcast path at `monitor.py:473` (`if manager.active_connections: asyncio.create_task(manager.broadcast(msg))`) was reached, but either the WS had no active connections or the frontend received the message but did not render the modal.
+
+---
+
+### Confirmed Bug: `time()` Import Collision in `_check_reconciliation` (line 2273)
+
+**Status: Confirmed bug, needs fix.**
+
+`monitor.py` line 8 imports `time` from `datetime`:
+```python
+from datetime import datetime, date, time, timedelta, timezone
+```
+
+The new code at line 2273 calls:
+```python
+now = time()
+```
+
+This calls `datetime.time()` (the time-of-day constructor), not `time.time()` (the Unix timestamp function). `datetime.time()` returns `datetime.time(0, 0, 0)` (midnight) — no exception on first call.
+
+On the **second** recon cycle where legs are still changed, line 2281 evaluates:
+```python
+elif (now - self._recon_leg_change_first_seen) >= 5.0:
+```
+
+Both `now` and `self._recon_leg_change_first_seen` are `datetime.time(0, 0, 0)` objects. Subtracting two `datetime.time` objects raises:
+```
+TypeError: unsupported operand type(s) for -: 'datetime.time' and 'datetime.time'
+```
+
+This exception propagates up through `_check_reconciliation` and is caught by the recon loop's outer handler (`except Exception`), which logs it as an error and sleeps 1 second before continuing. **The debounce never triggers and no replacement ever fires.** However, this only affects the leg-change detection path (`else` branch when `in_queue` is True) — it does not explain why the initial modal broadcast fails to show.
+
+**Fix:** Replace `now = time()` at line 2273 with a local import:
+```python
+from time import time as _time
+now = _time()
+```
+Or use `datetime.now(CHICAGO).timestamp()` which is already available in scope.
+
+---
+
+### Suspected Primary Cause: Unknown — Needs More Evidence
+
+The `time()` collision explains why the **replacement feature** is broken, but does not directly explain why the **initial modal** (never-before-seen trade, fresh queue entry) fails to appear. The broadcast for the initial modal occurs in a completely separate code path (execution loop, line 473) that is unaffected by the `_check_reconciliation` bug.
+
+**Candidates to investigate, in order of likelihood:**
+
+| # | Hypothesis | How to Verify |
+|---|---|---|
+| 1 | No active WS connections at moment of broadcast — browser tab disconnected or not refreshed after deployment | Check browser console for WS connection errors; check if app showed as "disconnected" |
+| 2 | `_is_trade_redundant` incorrectly returns `True` on the first tick (`elapsed_total=0.0`), triggering immediate `close_modal` before user sees it | Add debug log in `_is_trade_redundant` showing return value; look for `close_modal` WS message in browser network tab immediately after `trade_signal` |
+| 3 | TypeError exception in `_check_reconciliation` (from the `time()` bug) corrupts some shared state (e.g. `_recon_last_seen_legs`, `_recon_leg_change_first_seen`) in a way that indirectly affects the execution loop | Check server error logs for `TypeError: unsupported operand type(s) for -` |
+| 4 | Frontend received `trade_signal` but `showTradeModal` failed silently | Check browser console for JS errors at the time a trade was expected |
+
+**Recommended next step:** Check server error logs for `TypeError` lines, and check the browser console for WS messages and JS errors around the time a trade was expected.
+
+---
+
+### Verified Root Cause: `numpy.bool_` JSON Serialization Failure (Confirmed via `logs/server_production.log`)
+
+**Status: Fixed.**
+
+Log evidence at `11:44:53`:
+```
+asyncio - ERROR - Task exception was never retrieved
+future: <Task finished name='Task-52' coro=<ConnectionManager.broadcast() ...>
+  exception=TypeError('Object of type bool_ is not JSON serializable')>
+TypeError: Object of type bool_ is not JSON serializable
+```
+
+The broadcast failed immediately after "Awaiting confirmation" was logged — the `trade_signal` payload was constructed but `json.dumps` threw before any data reached the browser.
+
+**Cause:** In `_classify_order_type`, the iron condor branch (line 2875) computed:
+```python
+is_credit = (sp.strike > lp.strike and sc.strike < lc.strike)
+```
+`sp.strike` and `lp.strike` are `numpy.float64` (originating from a pandas DataFrame row). Comparing two `numpy.float64` values returns `numpy.bool_`, not a Python `bool`. This value propagated into the `trade_signal` payload at `get_trade_signal_payload` line 245 (`"is_credit": is_credit`), causing `json.dumps` to fail.
+
+The chime/email notification still fired because those go through a separate code path that does not serialize the full payload.
+
+**Fix applied** (`monitor.py` line 2875):
+```python
+# Before
+is_credit = (sp.strike > lp.strike and sc.strike < lc.strike)
+
+# After
+is_credit = bool(sp.strike > lp.strike and sc.strike < lc.strike)
+```
+
+---
+
+### Fix: `time()` Import Collision in Debounce Logic (Confirmed, Fixed)
+
+**Status: Fixed.**
+
+`monitor.py` line 8 imports `time` from `datetime`:
+```python
+from datetime import datetime, date, time, timedelta, timezone
+```
+
+The debounce code at line 2273 called `time()`, which resolved to `datetime.time()` (the time-of-day constructor) rather than the Unix timestamp function. On the first call it returns `datetime.time(0, 0, 0)` without raising. On the second cycle, the subtraction `now - self._recon_leg_change_first_seen` raises:
+```
+TypeError: unsupported operand type(s) for -: 'datetime.time' and 'datetime.time'
+```
+This was caught silently by the recon loop's `except Exception` handler, so the debounce clock never advanced and the modal replacement feature never triggered.
+
+**Fix applied** (`monitor.py` line 2273):
+```python
+# Before
+now = time()
+
+# After
+from time import time as _monotime
+now = _monotime()
+```
+
+---
+
+*Status: All bugs resolved (2026-04-02)*

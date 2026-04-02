@@ -2087,7 +2087,7 @@ class LiveTradingMonitor:
             
         # Trigger margin recalculation
         self.live_combined_portfolio.max_margin = self.live_combined_portfolio.calculate_standard_margin()
-        self.logger.info(f"Updated live portfolio: {len(self.live_combined_portfolio.positions)} active positions. Margin: ${self.live_combined_portfolio.max_margin:,.2f}")
+        self.logger.debug(f"Updated live portfolio: {len(self.live_combined_portfolio.positions)} active positions. Margin: ${self.live_combined_portfolio.max_margin:,.2f}")
 
     def _get_live_filled_positions(self) -> Dict[Tuple[int, str], float]:
         """Returns ONLY filled positions from the broker (not including working orders)."""
@@ -2270,7 +2270,8 @@ class LiveTradingMonitor:
                     # Plan 2026-04-02: Live refresh if the required legs have shifted structurally.
                     if self.pending_trade and self.pending_trade.purpose == TradePurpose.RECONCILIATION:
                         if self._recon_legs_changed(self.pending_trade, recon_trade):
-                            now = time()
+                            from time import time as _monotime
+                            now = _monotime()
                             new_legs = self._get_leg_fingerprint(recon_trade)
                             
                             # Standard debounce against transient states
@@ -2872,7 +2873,7 @@ class LiveTradingMonitor:
                 
                 if all([lp, sp, lc, sc]):
                     # Short inner = Credit, Long inner = Debit
-                    is_credit = (sp.strike > lp.strike and sc.strike < lc.strike)
+                    is_credit = bool(sp.strike > lp.strike and sc.strike < lc.strike)
                     # Iron fly when either the short body or long body shares a strike
                     t_str = "iron_fly" if (sp.strike == sc.strike or lp.strike == lc.strike) else "iron_condor"
                     return (t_str, is_credit)
