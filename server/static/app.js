@@ -23,7 +23,7 @@ const SMA_WINDOW = 10;    // Number of real data updates to average
 function initMuteUI() {
     const icon = document.getElementById('mute-icon');
     if (icon) icon.textContent = isMuted ? '🔕' : '🔔';
-    
+
     const btn = document.getElementById('mute-toggle-btn');
     if (btn) {
         btn.addEventListener('click', () => {
@@ -124,7 +124,7 @@ function connect() {
             statusEl.textContent = 'DISCONNECTED - RECONNECTING...';
             statusEl.className = 'value status-disconnected flash-alert';
         }
-        
+
         // Show a temporary banner if not exists
         if (!document.getElementById('disconnect-banner')) {
             const banner = document.createElement('div');
@@ -150,10 +150,10 @@ function playSound(level) {
 
 function handleAlert(data) {
     console.log("System Alert:", data);
-    
+
     // Play sound
     playSound(data.level);
-    
+
     // Show a temporary browser notification if allowed
     if (Notification.permission === "granted") {
         new Notification(data.title || "Terminator Alert", {
@@ -185,7 +185,7 @@ function updateUI(state) {
         }
         serverEl.className = 'value ' + (state.server_name === 'production-server' ? 'status-connected' : 'primary');
     }
-    
+
     const tradingBtn = document.getElementById('toggle-trading-btn');
     document.getElementById('trading-status').textContent = state.trading_enabled ? 'ENABLED' : 'DISABLED';
     document.getElementById('trading-status').className = 'value ' + (state.trading_enabled ? 'status-connected' : 'status-disabled');
@@ -194,10 +194,10 @@ function updateUI(state) {
     // Exchange Clock (Chicago)
     if (state.exchange_ts && state.exchange_ts > 0) {
         const d = new Date(state.exchange_ts);
-        const timeStr = d.toLocaleTimeString('en-US', { 
-            hour12: false, 
-            hour: '2-digit', 
-            minute: '2-digit', 
+        const timeStr = d.toLocaleTimeString('en-US', {
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
             second: '2-digit',
             timeZone: 'America/Chicago'
         });
@@ -222,12 +222,12 @@ function updateUI(state) {
             if (latencyHistory.length > 0) {
                 const avgLatency = Math.round(latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length);
                 latencyEl.textContent = `${avgLatency}ms`;
-                
+
                 // Color code latency based on the smoothed value
                 if (avgLatency > 1000) {
                     latencyEl.className = 'value status-disconnected';
                 } else if (avgLatency > 500) {
-                    latencyEl.className = 'value status-disabled'; 
+                    latencyEl.className = 'value status-disabled';
                 } else {
                     latencyEl.className = 'value'; // Normal
                 }
@@ -258,14 +258,14 @@ function updateUI(state) {
     // 2. Metrics - Sim
     const simNetPnl = formatUSD(state.sim.net_pnl);
     const simPnlClass = (state.sim.net_pnl >= 0 ? 'green' : 'red');
-    
+
     document.getElementById('sim-margin').textContent = formatUSD(state.sim.margin);
     document.getElementById('sim-trades-count').textContent = state.sim.trades;
     document.getElementById('sim-net-pnl').textContent = simNetPnl;
     document.getElementById('sim-net-pnl').className = 'value ' + simPnlClass;
     document.getElementById('sim-net-pnl-summary').textContent = simNetPnl;
     document.getElementById('sim-net-pnl-summary').className = 'value ' + simPnlClass;
-    
+
     document.getElementById('sim-total-delta').textContent = state.sim.delta.toFixed(3);
     document.getElementById('sim-fees').textContent = formatUSD(state.sim.fees);
     document.getElementById('sim-gross-pnl').textContent = formatUSD(state.sim.pnl);
@@ -283,7 +283,7 @@ function updateUI(state) {
     document.getElementById('live-net-pnl').className = 'value ' + livePnlClass;
     document.getElementById('live-net-pnl-summary').textContent = liveNetPnl;
     document.getElementById('live-net-pnl-summary').className = 'value ' + livePnlClass;
-    
+
     document.getElementById('live-total-delta').textContent = state.live.delta.toFixed(3);
     document.getElementById('live-fees').textContent = formatUSD(state.live.fees);
     document.getElementById('live-gross-pnl').textContent = formatUSD(state.live.pnl);
@@ -318,7 +318,7 @@ function updateUI(state) {
     try {
         const modal = document.getElementById('trade-modal');
         const modalShowing = modal?.classList.contains('show');
-        
+
         if (state.pending_trade) {
             // Re-open modal if a trade is pending but modal is not showing, 
             // OR the strategy has changed (rare race condition)
@@ -329,9 +329,8 @@ function updateUI(state) {
             }
         } else {
             // If the server heartbeat says no trade is pending, ensure the modal is closed
-            if (modalShowing) {
-                 console.log("No pending trade on server — auto-dismissing modal");
-                 closeTradeModal();
+            if (modalShowing && window.isTradeTimerPaused === false) {
+                closeTradeModal();
             }
         }
     } catch (err) {
@@ -341,17 +340,17 @@ function updateUI(state) {
 
 function updateCharts(state) {
     if (!spxChart || !pnlChart) return;
-    
+
     const now = new Date(state.ts).getTime();
     // Only push to chart every 30 seconds to keep performance smooth
-    if (now - lastChartUpdate >= 30000) { 
+    if (now - lastChartUpdate >= 30000) {
         lastChartUpdate = now;
-        
+
         if (state.spx) {
             spxChart.data.datasets[0].data.push({ x: now, y: state.spx });
             spxChart.update('none');
         }
-        
+
         pnlChart.data.datasets[0].data.push({ x: now, y: state.live.net_pnl });
         pnlChart.data.datasets[1].data.push({ x: now, y: state.sim.net_pnl });
         pnlChart.update('none');
@@ -360,18 +359,18 @@ function updateCharts(state) {
 
 function populateCharts(history) {
     if (!history || !spxChart || !pnlChart) return;
-    
+
     const spxData = history.filter(p => p.spx).map(p => ({ x: new Date(p.ts).getTime(), y: p.spx }));
     const livePnlData = history.map(p => ({ x: new Date(p.ts).getTime(), y: p.live_pnl }));
     const simPnlData = history.map(p => ({ x: new Date(p.ts).getTime(), y: p.sim_pnl }));
-    
+
     spxChart.data.datasets[0].data = spxData;
     pnlChart.data.datasets[0].data = livePnlData;
     pnlChart.data.datasets[1].data = simPnlData;
-    
+
     spxChart.update();
     pnlChart.update();
-    
+
     if (history.length > 0) {
         lastChartUpdate = new Date(history[history.length - 1].ts).getTime();
     }
@@ -393,16 +392,16 @@ function initCharts() {
                 grid: { color: 'rgba(255,255,255,0.05)' },
                 ticks: { color: '#8b949e', font: { size: 10 } }
             },
-            y: { 
+            y: {
                 grid: { color: 'rgba(255,255,255,0.05)' },
                 ticks: { color: '#8b949e', font: { size: 10 } }
             }
         },
-        plugins: { 
-            legend: { 
+        plugins: {
+            legend: {
                 display: true,
                 position: 'top',
-                labels: { color: '#8b949e', boxWidth: 12, font: { size: 11 } } 
+                labels: { color: '#8b949e', boxWidth: 12, font: { size: 11 } }
             },
             tooltip: { mode: 'index', intersect: false }
         }
@@ -411,15 +410,17 @@ function initCharts() {
     const spxCtx = document.getElementById('spx-chart').getContext('2d');
     spxChart = new Chart(spxCtx, {
         type: 'line',
-        data: { datasets: [{ 
-            label: 'SPX', 
-            data: [], 
-            borderColor: '#58a6ff', 
-            borderWidth: 2, 
-            pointRadius: 0, 
-            fill: false, 
-            tension: 0.1 
-        }] },
+        data: {
+            datasets: [{
+                label: 'SPX',
+                data: [],
+                borderColor: '#58a6ff',
+                borderWidth: 2,
+                pointRadius: 0,
+                fill: false,
+                tension: 0.1
+            }]
+        },
         options: commonOptions
     });
 
@@ -428,24 +429,24 @@ function initCharts() {
         type: 'line',
         data: {
             datasets: [
-                { 
-                    label: 'Live PnL', 
-                    data: [], 
-                    borderColor: '#2ea043', 
-                    borderWidth: 2, 
-                    pointRadius: 0, 
-                    fill: false, 
+                {
+                    label: 'Live PnL',
+                    data: [],
+                    borderColor: '#2ea043',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: false,
                     tension: 0.1,
                     order: 2 // Higher order = Bottom layer
                 },
-                { 
-                    label: 'Sim PnL', 
-                    data: [], 
-                    borderColor: '#58a6ff', 
-                    borderWidth: 2, 
-                    borderDash: [5, 5], 
-                    pointRadius: 0, 
-                    fill: false, 
+                {
+                    label: 'Sim PnL',
+                    data: [],
+                    borderColor: '#58a6ff',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    pointRadius: 0,
+                    fill: false,
                     tension: 0.1,
                     order: 1 // Lower order = Top layer
                 }
@@ -458,11 +459,11 @@ function initCharts() {
 function updatePositionTable(livePos, simPos) {
     const tbody = document.getElementById('positions-tbody');
     tbody.innerHTML = '';
-    
+
     const merged = {};
     simPos.forEach(p => {
         const key = `${p.symbol}-${p.strike}-${p.side}`;
-        merged[key] = { 
+        merged[key] = {
             strike: p.strike, side: p.side, symbol: p.symbol,
             qty_sim: p.qty, qty_live: 0,
             delta: p.delta, bid: p.bid, ask: p.ask
@@ -476,7 +477,7 @@ function updatePositionTable(livePos, simPos) {
             merged[key].bid = p.bid;
             merged[key].ask = p.ask;
         } else {
-            merged[key] = { 
+            merged[key] = {
                 strike: p.strike, side: p.side, symbol: p.symbol,
                 qty_sim: 0, qty_live: p.qty,
                 delta: p.delta, bid: p.bid, ask: p.ask
@@ -486,13 +487,13 @@ function updatePositionTable(livePos, simPos) {
 
     // Sort by strike ascending
     const sortedPositions = Object.values(merged).sort((a, b) => a.strike - b.strike);
-    
+
     sortedPositions.forEach(p => {
         const row = document.createElement('tr');
         const sQty = p.qty_sim || 0;
         const lQty = p.qty_live || 0;
         const diff = sQty - lQty;
-        
+
         row.innerHTML = `
             <td>${p.strike}</td>
             <td class="${p.side === 'CALL' ? 'primary' : 'orange'}">${p.side}</td>
@@ -511,9 +512,9 @@ function updateOrdersTable(orders) {
     const tbody = document.getElementById('orders-tbody');
     const cancelAllBtn = document.getElementById('cancel-all-orders-btn');
     tbody.innerHTML = '';
-    
+
     if (!orders || orders.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-secondary);">No working orders</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-secondary);">No working orders</td></tr>';
         if (cancelAllBtn) {
             cancelAllBtn.disabled = true;
             cancelAllBtn.style.opacity = '0.4';
@@ -521,7 +522,7 @@ function updateOrdersTable(orders) {
         }
         return;
     }
-    
+
     if (cancelAllBtn) {
         cancelAllBtn.disabled = false;
         cancelAllBtn.style.opacity = '1';
@@ -535,6 +536,7 @@ function updateOrdersTable(orders) {
             <td class="${o.side === 'credit' ? 'green' : 'orange'}">${o.side || '---'}</td>
             <td>${o.qty || 0}</td>
             <td>$${(o.price || 0).toFixed(2)}</td>
+            <td>${o.mark !== null ? (o.mark < 0 ? '$' + Math.abs(o.mark).toFixed(2) + ' Cr' : '$' + o.mark.toFixed(2) + ' Db') : '--'}</td>
             <td class="primary">${o.status}</td>
             <td style="text-align: right;">
                 <button class="btn btn-danger btn-small" onclick="confirmCancelOrder('${o.id}', '${o.symbol}')">Cancel</button>
@@ -552,10 +554,10 @@ function updateTradesTable(tbodyId, trades) {
         return;
     }
     // Sort by timestamp descending
-    const sorted = [...trades].sort((a,b) => new Date(b.ts) - new Date(a.ts));
+    const sorted = [...trades].sort((a, b) => new Date(b.ts) - new Date(a.ts));
     sorted.forEach(t => {
         const row = document.createElement('tr');
-        const time = new Date(t.ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+        const time = new Date(t.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const summary = t.legs.map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
         const qtySum = t.legs.reduce((acc, l) => acc + Math.abs(l.qty), 0);
         row.innerHTML = `
@@ -574,7 +576,7 @@ function updateConfigTable(config) {
     if (!config) return;
     const tbody = document.getElementById('config-tbody');
     if (!tbody) return;
-    
+
     tbody.innerHTML = '';
     const sortedKeys = Object.keys(config).sort();
     sortedKeys.forEach(key => {
@@ -584,7 +586,7 @@ function updateConfigTable(config) {
         if (typeof val === 'object' && val !== null) {
             val = JSON.stringify(val);
         }
-        
+
         row.innerHTML = `
             <td><code>${key}</code></td>
             <td style="word-break: break-all;">${val}</td>
@@ -598,7 +600,7 @@ function updateStrategies(strategies) {
     for (let sid in strategies) {
         let s = strategies[sid];
         let card = document.getElementById(`strat-card-${sid}`);
-        
+
         if (!card) {
             card = document.createElement('div');
             card.id = `strat-card-${sid}`;
@@ -610,7 +612,7 @@ function updateStrategies(strategies) {
         const historyArr = s.history || [];
         const posCount = (s.positions && s.positions.length) ? s.positions.length : 0;
         const isExpanded = strategyFoldStates[sid] || false;
-        
+
         card.innerHTML = `
             <div class="strat-header foldable-header ${isExpanded ? 'active' : ''}" onclick="toggleStrategyFold('${sid}')">
                 <div class="strat-title-group">
@@ -660,17 +662,17 @@ function updateStrategies(strategies) {
                         </thead>
                         <tbody>
                             ${historyArr.map(t => {
-                                const time = new Date(t.ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                                const summary = (t.legs || []).map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
-                                const qtySum = (t.legs || []).reduce((acc, l) => acc + Math.abs(l.qty), 0);
-                                return `
+            const time = new Date(t.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const summary = (t.legs || []).map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
+            const qtySum = (t.legs || []).reduce((acc, l) => acc + Math.abs(l.qty), 0);
+            return `
                                     <tr>
                                         <td style="padding: 0.5rem; font-size: 0.8rem;">${time}</td>
                                         <td style="padding: 0.5rem; font-size: 0.8rem;">${summary}</td>
                                         <td style="padding: 0.5rem; font-size: 0.8rem;">${qtySum}</td>
                                     </tr>
                                 `;
-                            }).join('')}
+        }).join('')}
                             ${historyArr.length === 0 ? '<tr><td colspan="4" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">No history</td></tr>' : ''}
                         </tbody>
                     </table>
@@ -700,27 +702,27 @@ function showTradeModal(tradeData) {
         return;
     }
     console.log("showTradeModal() triggered for:", tradeData.strat_id);
-    
+
     try {
         const titleEl = document.getElementById('modal-strat-title');
         if (titleEl) titleEl.textContent = `Strategy: ${tradeData.strat_id || 'N/A'}`;
-        
+
         const orderListEl = document.getElementById('modal-order-list');
         if (!orderListEl) {
             console.error("Critical: modal-order-list not found in DOM");
             return;
         }
         orderListEl.innerHTML = '';
-        
+
         const orders = tradeData.orders || [];
         currentTradeOrders = JSON.parse(JSON.stringify(orders));
-        
+
         currentTradeOrders.forEach((order, idx) => {
             const orderCard = document.createElement('div');
             const typeClass = (order.type || 'TRADE').toLowerCase();
             orderCard.className = `order-card type-${typeClass}`;
             const price = order.price_ea || 0;
-            
+
             orderCard.innerHTML = `
                 <div class="order-header">
                     <span class="order-title">Order #${idx + 1}: ${order.type || 'TRADE'}</span>
@@ -746,17 +748,17 @@ function showTradeModal(tradeData) {
 
         const creditEl = document.getElementById('modal-total-credit');
         if (creditEl) creditEl.textContent = tradeData.total_credit || '$0.00';
-        
+
         window.currentTradeMaxTime = tradeData.timeout || TRADE_TIMEOUT_SEC;
         tradeTimeLeft = window.currentTradeMaxTime;
         window.currentModalStratId = tradeData.strat_id;
-        
+
         isTradeTimerPaused = tradeData.is_paused || false;
         const pauseBtn = document.getElementById('modal-pause-btn');
         if (pauseBtn) pauseBtn.textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
-        
+
         updateTradeTimerUI();
-        
+
         const modal = document.getElementById('trade-modal');
         if (modal) modal.classList.add('show');
 
@@ -778,7 +780,7 @@ function adjustPrice(idx, delta) {
     const order = currentTradeOrders[idx];
     const isCredit = order.is_credit;
     const lockFloor = order.lock_floor === true;
-    
+
     // Task #32: Conditional 0.00 limit price floor based on strategy classification
     if (lockFloor) {
         // Enforce structural intent (cannot flip to other side)
@@ -794,7 +796,7 @@ function adjustPrice(idx, delta) {
 
     // Apply adjustment
     let newPrice = Number((order.price_ea + delta).toFixed(2));
-    
+
     if (lockFloor) {
         if (!isCredit) {
             order.price_ea = Math.min(0.00, newPrice);
@@ -805,13 +807,13 @@ function adjustPrice(idx, delta) {
         // Unknown structure: Allow crossing zero
         order.price_ea = newPrice;
     }
-    
+
     const priceEl = document.getElementById(`price-val-${idx}`);
     if (priceEl) {
         priceEl.textContent = formatOrderPrice(order.price_ea);
         priceEl.classList.add('modified');
     }
-    
+
     updateTotalCreditDisplay();
 }
 
@@ -822,7 +824,7 @@ function updateTotalCreditDisplay() {
             total += (order.price_ea || 0) * (order.qty || 1);
         }
     });
-    
+
     const totalEl = document.getElementById('modal-total-credit');
     if (totalEl) {
         // Show unit-based summary style matching backend ($1.10 Credit / $1.10 Debit)
@@ -833,10 +835,10 @@ function updateTotalCreditDisplay() {
 
 function updateTradeTimer() {
     if (isTradeTimerPaused) return;
-    
+
     tradeTimeLeft--;
     updateTradeTimerUI();
-    
+
     if (tradeTimeLeft <= 0) {
         console.log("Timer expired, auto-confirming trade...");
         confirmLiveTrade();
@@ -848,10 +850,10 @@ function updateTradeTimerUI() {
     const stat = document.getElementById('modal-timer-stat');
     const maxTime = window.currentTradeMaxTime || TRADE_TIMEOUT_SEC;
     const pct = Math.max(0, (tradeTimeLeft / maxTime) * 100);
-    
+
     if (bar) bar.style.width = pct + '%';
     if (stat) stat.textContent = isTradeTimerPaused ? 'Timer Paused' : `Auto-sending in ${tradeTimeLeft}s`;
-    
+
     // Visual feedback for urgency
     if (bar) {
         bar.className = 'timer-progress';
@@ -865,7 +867,7 @@ function toggleTradeTimer() {
     isTradeTimerPaused = !isTradeTimerPaused;
     const btn = document.getElementById('modal-pause-btn');
     if (btn) btn.textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
-    
+
     // Notify server to pause/resume auto-confirm timer (Issue 20 Fix)
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
@@ -873,7 +875,7 @@ function toggleTradeTimer() {
             is_paused: isTradeTimerPaused
         }));
     }
-    
+
     updateTradeTimerUI();
 }
 
@@ -941,7 +943,7 @@ function confirmLiveTrade() {
 }
 
 // For demonstration purposes
-window.demoTradeConfirmation = function() {
+window.demoTradeConfirmation = function () {
     showTradeModal({
         strat_id: 'SPX-20260319-V4',
         total_credit: '$1,850.50',
@@ -957,7 +959,7 @@ let lastLogMsg = null;
 function updateLogs(logs) {
     const consoleEl = document.getElementById('log-console');
     if (!logs || logs.length === 0) return;
-    
+
     let newLogs = [];
 
     if (lastLogCount === 0 || logs[logs.length - 1] !== lastLogMsg) {
@@ -971,9 +973,9 @@ function updateLogs(logs) {
                 }
             }
         }
-        
+
         newLogs = logs.slice(splitIdx + 1);
-        
+
         // If we found NO overlap and it's not the first time, or it's a server reset
         if (splitIdx === -1 && lastLogCount > 0) {
             consoleEl.innerHTML = ''; // Start fresh if we lost sync
@@ -986,7 +988,7 @@ function updateLogs(logs) {
     newLogs.forEach(msg => {
         const entry = document.createElement('div');
         entry.className = 'log-entry';
-        
+
         let levelClass = '';
         if (msg.includes('ERROR')) {
             levelClass = 'red';
@@ -997,11 +999,11 @@ function updateLogs(logs) {
             playSound('info');
         }
         else if (msg.includes('INFO')) levelClass = 'primary';
-        
+
         entry.innerHTML = `<span class="${levelClass}">${msg}</span>`;
         consoleEl.prepend(entry); // Prepend to keep NEWEST at top
     });
-    
+
     lastLogCount = logs.length;
     lastLogMsg = logs[logs.length - 1];
 }
@@ -1016,7 +1018,7 @@ document.getElementById('toggle-trading-btn').addEventListener('click', () => {
     const statusEl = document.getElementById('trading-status');
     const isEnabled = statusEl.textContent === 'ENABLED';
     const action = isEnabled ? 'DISABLE' : 'ENABLE';
-    
+
     if (confirm(`⚠️ Are you sure you want to ${action} live trading?\n\n${isEnabled ? 'This will stop all live execution.' : 'This will allow the system to send live orders to Schwab.'}`)) {
         fetch('/api/trading/toggle', { method: 'POST' });
     }
@@ -1025,10 +1027,10 @@ document.getElementById('toggle-trading-btn').addEventListener('click', () => {
 document.getElementById('reconnect-broker-btn').addEventListener('click', () => {
     const statusEl = document.getElementById('broker-status');
     const isLive = statusEl.textContent === 'LIVE';
-    const msg = isLive 
+    const msg = isLive
         ? '⚠️ Broker is currently LIVE. Reconnecting will reset the session and potentially lose real-time sync for a few seconds. Proceed?'
         : 'Reconnect to Schwab API?';
-        
+
     if (confirm(msg)) {
         fetch('/api/trading/reconnect', { method: 'POST' });
     }
@@ -1080,15 +1082,15 @@ function showConfirmModal(title, message, onConfirm) {
     const titleEl = document.getElementById('confirm-modal-title');
     const msgEl = document.getElementById('confirm-modal-message');
     const confirmBtn = document.getElementById('confirm-modal-btn');
-    
+
     titleEl.innerHTML = title;
     msgEl.innerHTML = message;
-    
+
     // Use a fresh listener to avoid accumulation
     const newBtn = confirmBtn.cloneNode(true);
     confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
     newBtn.addEventListener('click', onConfirm);
-    
+
     modal.classList.add('show');
 }
 

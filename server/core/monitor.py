@@ -1825,6 +1825,42 @@ class LiveTradingMonitor:
             self.logger.error(f"Error fetching working orders: {e}")
             return []
 
+    def get_order_mark(self, o: Dict) -> Optional[float]:
+        """Calculate the net mid-price (Mark) for a Schwab order dictionary. (Issue 101 Fix)"""
+        with self._data_lock:
+            if self._last_snap is None: return None
+            
+            legs = o.get('orderLegCollection', [])
+            if not legs: return None
+            
+            total_mark = 0.0
+            for leg in legs:
+                instr = leg.get('instrument', {})
+                symbol = instr.get('symbol')
+                if not symbol: continue
+                
+                parsed = self._parse_schwab_symbol(symbol)
+                if not parsed: continue
+                
+                strike = int(round(parsed['strike']))
+                side = parsed['side']
+                
+                # Lookup in snap
+                mask = (self._last_snap['strike_price'].round().astype(int) == strike) & \
+                       (self._last_snap['side'] == side)
+                r = self._last_snap[mask]
+                if not r.empty:
+                    mid = (float(r['bidprice'].iloc[0]) + float(r['askprice'].iloc[0])) / 2
+                    instr_type = leg.get('instruction', '')
+                    # BUY = adds to net cost (positive), SELL = reduces net cost (negative)
+                    qty = int(leg.get('quantity', 1))
+                    if 'SELL' in instr_type:
+                        total_mark -= mid * (qty / o.get('quantity', 1))
+                    else:
+                        total_mark += mid * (qty / o.get('quantity', 1))
+            
+            return round(total_mark, 2)
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a specific order by ID"""
         if not self.client or not self.account_hash: return False

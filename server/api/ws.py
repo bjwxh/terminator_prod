@@ -134,6 +134,7 @@ async def broadcast_state(monitor):
                         "side": side,
                         "qty": total_qty, 
                         "price": o.get('price'), 
+                        "mark": monitor.get_order_mark(o),
                         "status": o.get('status')
                     })
                 logs = list(monitor.logs)
