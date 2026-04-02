@@ -29,7 +29,7 @@ fi
 
 # 2. Package current directory (excluding logs and secrets)
 echo "🏗️  Archiving current project state..."
-tar --exclude='./logs/*' --exclude='./data/*.db' --exclude='./.venv' \
+tar --exclude='./logs/*' --exclude='*.db' --exclude='./.venv' \
     --exclude='.git' --exclude='**/__pycache__' \
     -czf /tmp/terminator_deploy.tar.gz .
 
