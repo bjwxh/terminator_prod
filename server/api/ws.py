@@ -11,6 +11,20 @@ from core.config import CONFIG
 import socket
 
 import time
+import numpy as np
+
+class MonitorEncoder(json.JSONEncoder):
+    """Custom JSON encoder to handle numpy types (Bug 20260402 Fix)"""
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, (datetime, ZoneInfo)):
+            return str(obj)
+        return super().default(obj)
 router = APIRouter()
 logger = logging.getLogger("API_WS")
 APP_VERSION = str(int(time.time())) # Deploy tracking
@@ -35,7 +49,7 @@ class ConnectionManager:
             return
             
         if not isinstance(message, str):
-            json_msg = json.dumps(message)
+            json_msg = json.dumps(message, cls=MonitorEncoder)
         else:
             json_msg = message
             

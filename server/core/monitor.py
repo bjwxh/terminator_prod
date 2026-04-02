@@ -2828,7 +2828,7 @@ class LiveTradingMonitor:
         
         # 1. Single Leg
         if n == 1:
-            is_credit = legs[0].quantity < 0
+            is_credit = bool(legs[0].quantity < 0)
             return ("single", is_credit)
         
         # 2. Vertical Spread / Risk Reversal
