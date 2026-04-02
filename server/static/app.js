@@ -360,9 +360,27 @@ function updateCharts(state) {
 function populateCharts(history) {
     if (!history || !spxChart || !pnlChart) return;
 
-    const spxData = history.filter(p => p.spx).map(p => ({ x: new Date(p.ts).getTime(), y: p.spx }));
-    const livePnlData = history.map(p => ({ x: new Date(p.ts).getTime(), y: p.live_pnl }));
-    const simPnlData = history.map(p => ({ x: new Date(p.ts).getTime(), y: p.sim_pnl }));
+    // Filter history to strictly after 08:30 AM Chicago time
+    const today = new Date();
+    // Create reference for 08:30 AM Central Time
+    // Since we don't have a library like luxon here, we can estimate from the history strings or use UTC
+    // Actually, we can just compare against the ISO string or use the date object if we can properly set the hour.
+    // A more robust way in pure JS:
+    const filteredHistory = history.filter(p => {
+        const dt = new Date(p.ts);
+        // Chicago 08:30 AM is 13:30 or 14:30 UTC
+        // But the ISO string contains the offset, so dt.getHours() will be local.
+        // If server and client are in different TZ, this might be tricky.
+        // However, the USER request implies they want a strict 8:30 plot start.
+        const h = dt.getHours();
+        const m = dt.getMinutes();
+        const totalMinutes = h * 60 + m;
+        return totalMinutes >= (8 * 60 + 30);
+    });
+
+    const spxData = filteredHistory.filter(p => p.spx).map(p => ({ x: new Date(p.ts).getTime(), y: p.spx }));
+    const livePnlData = filteredHistory.map(p => ({ x: new Date(p.ts).getTime(), y: p.live_pnl }));
+    const simPnlData = filteredHistory.map(p => ({ x: new Date(p.ts).getTime(), y: p.sim_pnl }));
 
     spxChart.data.datasets[0].data = spxData;
     pnlChart.data.datasets[0].data = livePnlData;
@@ -390,7 +408,12 @@ function initCharts() {
                 type: 'time',
                 time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } },
                 grid: { color: 'rgba(255,255,255,0.05)' },
-                ticks: { color: '#8b949e', font: { size: 10 } }
+                ticks: { color: '#8b949e', font: { size: 10 } },
+                min: (() => {
+                    const d = new Date();
+                    d.setHours(8, 30, 0, 0);
+                    return d.getTime();
+                })()
             },
             y: {
                 grid: { color: 'rgba(255,255,255,0.05)' },

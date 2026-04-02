@@ -638,15 +638,17 @@ class LiveTradingMonitor:
                 self._update_stats() # Enhancement 2: Update session stats
                 
                 # Record history point for charts (30s cadence)
-                with self._data_lock:
-                    # Estimate SPX if not already done in monitor_step
-                    spx = self._last_spx_price if hasattr(self, '_last_spx_price') else None
-                    self.session_history.append({
-                        'ts': datetime.now(CHICAGO).isoformat(),
-                        'spx': spx,
-                        'sim_pnl': round(self.combined_portfolio.net_pnl, 2),
-                        'live_pnl': round(self.live_combined_portfolio.net_pnl, 2)
-                    })
+                now_chicago = datetime.now(CHICAGO)
+                if now_chicago.time() >= time(8, 30):
+                    with self._data_lock:
+                        # Estimate SPX if not already done in monitor_step
+                        spx = self._last_spx_price if hasattr(self, '_last_spx_price') else None
+                        self.session_history.append({
+                            'ts': now_chicago.isoformat(),
+                            'spx': spx,
+                            'sim_pnl': round(self.combined_portfolio.net_pnl, 2),
+                            'live_pnl': round(self.live_combined_portfolio.net_pnl, 2)
+                        })
                 
                 try:
                     interval = self.config['check_interval_minutes'] * 60
