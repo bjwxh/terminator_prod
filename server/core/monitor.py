@@ -2440,11 +2440,9 @@ class LiveTradingMonitor:
             self.logger.warning(f"No historical data available for simulation catch-up on {sim_date_str}")
             return []
         
-        dt_series = pd.to_datetime(data['datetime'])
-        if dt_series.dt.tz is None:
-            data['datetime'] = dt_series.dt.tz_localize('America/Chicago')
-        else:
-            data['datetime'] = dt_series.dt.tz_convert('America/Chicago')
+        dt_series = pd.to_datetime(data['datetime'], format='ISO8601', utc=True).dt.tz_convert('America/Chicago')
+        data['datetime'] = dt_series
+        
 
         data = data.sort_values('datetime')
         data['mid_price'] = (data['bidprice'] + data['askprice']) / 2
