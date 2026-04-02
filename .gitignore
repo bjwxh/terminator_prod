@@ -21,3 +21,11 @@ server/logs/
 .AppleDouble
 .LSOverride
 Icon
+
+# Databases & Data (NEVER COMMIT)
+*.db
+*.sqlite
+data/
+server/market_data.db
+server/spx_0dte.db
+!data/README.md  # If you want to keep the folder structure
