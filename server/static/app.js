@@ -104,9 +104,9 @@ function connect() {
             // We clear it to ensure the fresh signal's timer and price context takes precedence.
             closeTradeModal();
             
-            // Task: Play sound for trade signal
-            playSound('info');
-            showTradeModal(data);
+            // Task: Play HIGH priority alert for trade signals
+            playSound('alert');
+            showTradeModal(data.trade);
         } else if (data.type === 'trade_action') {
             console.log("Remote trade action received:", data);
             if (data.action === 'close_modal') {
