@@ -150,9 +150,14 @@ class LiveTradingMonitor:
         self._last_spx_ts: int = 0  # Latest SPX exchange timestamp (ms)
         self._last_vix_price: Optional[float] = None
         self.stream_client: Optional[StreamClient] = None
-        self.last_dismissed_recon_time: float = 0 # Cooldown for GAP_SYNC (Bug 16 Fix)
-        # Scalability #6: Tracker for periodic saves (5min)
         self._last_save_time: float = 0 
+        
+        self.last_dismissed_recon_time: float = 0 # Cooldown for GAP_SYNC (Bug 16 Fix)
+
+        # Recon Modal Refresh (Plan 2026-04-02)
+        self._recon_modal_replacing: bool = False
+        self._recon_leg_change_first_seen: float = 0.0
+        self._recon_last_seen_legs: Set[Tuple[int, str, int]] = set()
         self.logger.info(f"Monitor initialized with DB: {self.db_path}")
 
     def set_trading_enabled(self, enabled: bool):
@@ -492,6 +497,7 @@ class LiveTradingMonitor:
                 
                 # BUG 3 Fix: Support "Pause" by replacing wait_for with a manual interval loop
                 elapsed_while_active = 0.0
+                elapsed_total = 0.0  # Always increments regardless of pause state
                 while self.is_running:
                     try:
                         # Check for confirmation/dismissal every 0.1s
@@ -499,8 +505,8 @@ class LiveTradingMonitor:
                         confirmed = self._pending_trade_confirmed
                         break
                     except asyncio.TimeoutError:
-                        # 5-second cadence check (matches broker sync frequency)
-                        if int(elapsed_while_active * 10) % 50 == 0:
+                        # 5-second redundancy check — runs even when timer is paused
+                        if int(elapsed_total * 10) % 50 == 0:
                             if self._is_trade_redundant(trade):
                                 self.logger.info(f"Trade for {trade.strategy_id} is no longer needed (filled manually?). Auto-dismissing.")
                                 confirmed = False
@@ -509,7 +515,10 @@ class LiveTradingMonitor:
                                 from api.ws import manager
                                 asyncio.create_task(manager.broadcast({"type": "trade_action", "action": "close_modal", "strat_id": trade.strategy_id}))
                                 break
+                            elif self.is_trade_timer_paused:
+                                self.logger.debug(f"Trade {trade.strategy_id} remains PAUSED. Time already elapsed: {elapsed_while_active:.1f}s")
 
+                        elapsed_total += 0.1
                         if not self.is_trade_timer_paused:
                             elapsed_while_active += 0.1
                             if timeout > 0 and elapsed_while_active >= timeout:
@@ -518,14 +527,10 @@ class LiveTradingMonitor:
                                     self.logger.warning(f"Timeout for {trade.strategy_id}, but trade is now redundant. Aborting!")
                                     confirmed = False
                                     break
-                                    
+
                                 self.logger.warning(f"Confirmation timeout for {trade.strategy_id} at {elapsed_while_active:.1f}s / {timeout}s. Auto-executing!")
                                 confirmed = True
                                 break
-                        else:
-                            # Still paused
-                            if int(elapsed_while_active * 10) % 50 == 0: # Log every 5 seconds while paused
-                                self.logger.debug(f"Trade {trade.strategy_id} remains PAUSED. Time already elapsed: {elapsed_while_active:.1f}s")
                         continue
                 
                 # Cleanup BEFORE notifying reconciliation (prevents race condition)
@@ -541,12 +546,16 @@ class LiveTradingMonitor:
                 else:
                     self.logger.info(f"Trade for {trade.strategy_id} was dismissed/rejected.")
                     trade.status = "cancelled"
-                    if trade.purpose == TradePurpose.RECONCILIATION:
+                    is_replacement = self._recon_modal_replacing
+                    if trade.purpose == TradePurpose.RECONCILIATION and not is_replacement:
                         from time import time
                         self.last_dismissed_recon_time = time()
+
+                    self._recon_modal_replacing = False
                     # POKE reconciliation again to re-evaluate the GAP
                     self.reconciliation_event.set()
-                    self._broadcast_alert("info", "Trade Dismissed", f"Trade for {trade.strategy_id} was cancelled/dismissed.")
+                    if not is_replacement:
+                        self._broadcast_alert("info", "Trade Dismissed", f"Trade for {trade.strategy_id} was cancelled/dismissed.")
 
             except asyncio.CancelledError:
                 break
@@ -2257,11 +2266,67 @@ class LiveTradingMonitor:
                     self._queued_purposes.add(recon_trade.purpose)
                     # Alert logic moved to execution_loop to avoid noise
                 else:
+                    # Reconciliation modal is already showing or in queue.
+                    # Plan 2026-04-02: Live refresh if the required legs have shifted structurally.
+                    if self.pending_trade and self.pending_trade.purpose == TradePurpose.RECONCILIATION:
+                        if self._recon_legs_changed(self.pending_trade, recon_trade):
+                            now = time()
+                            new_legs = self._get_leg_fingerprint(recon_trade)
+                            
+                            # Standard debounce against transient states
+                            if self._recon_leg_change_first_seen == 0.0 or new_legs != self._recon_last_seen_legs:
+                                self._recon_leg_change_first_seen = now
+                                self._recon_last_seen_legs = new_legs
+                                self.logger.debug(f"Recon legs changed detected. Starting 5s debounce for displacement of {self.pending_trade.strategy_id}.")
+                            elif (now - self._recon_leg_change_first_seen) >= 5.0:
+                                self.logger.info(f"Recon displacement confirmed (5s). Replacing {self.pending_trade.strategy_id} with {recon_trade.strategy_id}.")
+                                self._trigger_recon_modal_replacement(recon_trade)
+                                self._recon_leg_change_first_seen = 0.0
+                                self._recon_last_seen_legs = set()
+                        else:
+                            # Legs match current pending modal — reset debounce clock
+                            if self._recon_leg_change_first_seen != 0.0:
+                                self.logger.debug("Recon legs reverted to matching modal. Resetting debounce.")
+                                self._recon_leg_change_first_seen = 0.0
+                                self._recon_last_seen_legs = set()
+
                     self.logger.info(f"Updated reconciliation trade available for GUI sync (Already in queue: {recon_trade.strategy_id})")
             else:
                 self.logger.debug(f"Sim divergence detected but trading is disabled. GAP_SYNC updated for {len(legs)} legs.")
         else:
             self.logger.info("Reconciliation built NO legs. Skipping trade creation.")
+
+
+    def _get_leg_fingerprint(self, trade: Trade) -> Set[Tuple[int, str, int]]:
+        """Extract a structural fingerprint of trade legs (strike, side, qty) for comparison."""
+        return {(int(round(l.strike)), l.side, int(l.quantity)) for l in trade.legs}
+
+    def _recon_legs_changed(self, old_trade: Trade, new_trade: Trade) -> bool:
+        """Structural comparison to see if the required trade legs have fundamentally shifted."""
+        return self._get_leg_fingerprint(old_trade) != self._get_leg_fingerprint(new_trade)
+
+    def _trigger_recon_modal_replacement(self, new_trade: Trade):
+        """Displace the active reconciliation modal with a fresh update."""
+        if not self.pending_trade: return
+
+        self.logger.info(f"Triggering replacement for {self.pending_trade.strategy_id} -> {new_trade.strategy_id}")
+        self._recon_modal_replacing = True
+        self._pending_trade_confirmed = False
+        
+        # 1. Enqueue the replacement first
+        self.order_queue.put_nowait(new_trade)
+        with self._data_lock:
+            self.active_order_signals.add(new_trade.strategy_id)
+            self._queued_purposes.add(new_trade.purpose)
+        
+        # 2. Wake execution loop to dismiss the OLD modal
+        self.confirmation_event.set()
+        
+        # 3. Request UI refresh (Force signal broadcast for replacement)
+        # Note: Broadcaster in the execution loop will naturally handle the new trade when it's grabbed from the queue.
+        # However, resetting replacing flag must wait until the old trade is dismissed.
+        # We can simulate this by putting it back to false after a tiny sleep or in the dismiss path.
+        # The dismiss path is more robust.
 
 
     def _create_sync_entry(self, s: SubStrategy, snap: pd.DataFrame, ts: datetime, live_t: Trade) -> Optional[Trade]:
