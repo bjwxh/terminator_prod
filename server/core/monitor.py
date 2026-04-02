@@ -1333,6 +1333,9 @@ class LiveTradingMonitor:
                         raw_price = abs(signed_target)
                 
                 ticked_price = self._round_to_tick(raw_price, num_legs=num_legs)
+                if ticked_price == 0.0 and unit_mid_price > 0.05:
+                    self.logger.warning(f"PRICE SANITY WARNING: Ticked is 0.00 but unit mid is {unit_mid_price:.2f}. Potential structural floor clamp or stale override.")
+                
                 price_str = f"{ticked_price:.2f}"
                 
                 builder = None
@@ -1428,6 +1431,11 @@ class LiveTradingMonitor:
             self.logger.error(f"Error executing trade: {e}")
             self.logger.error(traceback.format_exc())
             trade.status = "error"
+        finally:
+            # Task #46 Fix: Always pop price overrides for a strategy once the execution phase is complete, 
+            # ensuring that the next signal for the same strategy (like GAP_SYNC) starts with a fresh baseline.
+            self.price_overrides.pop(trade.strategy_id, None)
+            self.logger.debug(f"Cleared price overrides for {trade.strategy_id}")
 
 
     async def get_live_options_data(self) -> Optional[pd.DataFrame]:
@@ -2224,7 +2232,7 @@ class LiveTradingMonitor:
                 commission=len(legs) * self.config.get('commission_per_contract', 1.13),
                 current_sum_delta=0.0,
                 purpose=TradePurpose.RECONCILIATION,
-                strategy_id="GAP_SYNC"
+                strategy_id=f"GAP_SYNC_{datetime.now(CHICAGO).strftime('%H%M%S')}"
             )
             
             # ATTACH EXECUTION PLAN - This allows the GUI to see what would happen

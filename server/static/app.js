@@ -98,12 +98,12 @@ function connect() {
         } else if (data.type === 'trade_signal') {
             // Clear any stale pending dismiss when a fresh trade signal arrives
             pendingDismissStratId = null;
-            // Bug 12 Defensive Fix: Don't overwrite a paused modal
-            const modal = document.getElementById('trade-modal');
-            if (modal && modal.classList.contains('show') && isTradeTimerPaused) {
-                console.warn("New trade signal ignored because current modal is paused.");
-                return;
-            }
+            
+            // Task: Force refresh. If a modal is already showing (even if paused), 
+            // it's likely stale context for a trade currently being auto-executed or replaced.
+            // We clear it to ensure the fresh signal's timer and price context takes precedence.
+            closeTradeModal();
+            
             // Task: Play sound for trade signal
             playSound('info');
             showTradeModal(data);
@@ -869,8 +869,11 @@ function closeTradeModal() {
         tradeTimer = null;
     }
     isTradeTimerPaused = false;
+    window.currentModalStratId = null;
     const modal = document.getElementById('trade-modal');
     if (modal) modal.classList.remove('show');
+    const pauseBtn = document.getElementById('modal-pause-btn');
+    if (pauseBtn) pauseBtn.textContent = 'Pause Timer';
 }
 
 function dismissTrade() {
@@ -935,8 +938,6 @@ function updateLogs(logs) {
     const consoleEl = document.getElementById('log-console');
     if (!logs || logs.length === 0) return;
     
-    // If the list of logs is completely different or we haven't seen any, we might need a full reset
-    const newLength = logs.length;
     let newLogs = [];
 
     if (lastLogCount === 0 || logs[logs.length - 1] !== lastLogMsg) {
