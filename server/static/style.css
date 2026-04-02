@@ -70,6 +70,17 @@ body {
 .status-disconnected { color: var(--accent-red); }
 .status-disabled { color: var(--text-secondary); }
 
+/* Fixed-width Header Metrics (Issue #XX) */
+#spx-price, #vix-price, #exchange-time, #latency-ms {
+    font-family: 'JetBrains Mono', monospace;
+    display: inline-block;
+}
+
+#spx-price { min-width: 9ch; text-align: right; }
+#vix-price { min-width: 6ch; text-align: right; }
+#exchange-time { min-width: 8ch; text-align: right; }
+#latency-ms { min-width: 6ch; text-align: right; }
+
 #status-bar .actions {
     margin-left: auto;
     display: flex;
