@@ -318,24 +318,26 @@ function updateUI(state) {
     updateCharts(state);
 
     // 12. Trade Modal Reconciliation (Resilience Fix)
-    const modalShowing = document.getElementById('trade-modal')?.classList.contains('show');
-    if (state.pending_trade) {
-        // Re-open modal if a trade is pending but modal is not showing, 
-        // OR the strategy has changed (rare race condition)
-        if (!modalShowing || window.currentModalStratId !== state.pending_trade.strat_id) {
-            console.log("Resuming pending trade from heartbeat:", state.pending_trade.strat_id);
-            pendingDismissStratId = null;
-            showTradeModal(state.pending_trade);
+    try {
+        const modal = document.getElementById('trade-modal');
+        const modalShowing = modal?.classList.contains('show');
+        
+        if (state.pending_trade) {
+            // Re-open modal if a trade is pending but modal is not showing, 
+            // OR the strategy has changed (rare race condition)
+            if (!modalShowing || window.currentModalStratId !== state.pending_trade.strat_id) {
+                console.log("Resuming pending trade from heartbeat:", state.pending_trade.strat_id);
+                pendingDismissStratId = null;
+                showTradeModal(state.pending_trade);
+            }
+        } else {
+            // If the server heartbeat says no trade is pending, ensure the modal is closed
+            if (modalShowing && window.isTradeTimerPaused === false) {
+                 closeTradeModal();
+            }
         }
-    } else {
-        // If the server heartbeat says no trade is pending, ensure the modal is closed
-        // (unless we're in the middle of a user dismissal/sync which handles itself)
-        if (modalShowing && window.isTradeTimerPaused === false) {
-             // We only auto-close if the server says nothing is pending and it's not paused.
-             // If paused, we assume the user is actively making an override.
-             // Actually, the server is authoritative. If pending_trade is null, close it.
-             closeTradeModal();
-        }
+    } catch (err) {
+        console.error("Error in modal reconciliation heartbeat:", err);
     }
 }
 
@@ -701,65 +703,70 @@ function showTradeModal(tradeData) {
     }
     console.log("showTradeModal() triggered for:", tradeData.strat_id);
     
-    document.getElementById('modal-strat-title').textContent = `Strategy: ${tradeData.strat_id || 'N/A'}`;
-    
-    const orderListEl = document.getElementById('modal-order-list');
-    orderListEl.innerHTML = ''; // Clear existing
-    
-    // Support either a single trade object or an array of orders
-    const orders = tradeData.orders || [];
-    currentTradeOrders = JSON.parse(JSON.stringify(orders)); // Deep copy for adjustments
-    
-    currentTradeOrders.forEach((order, idx) => {
-        const orderCard = document.createElement('div');
-        const typeClass = (order.type || 'TRADE').toLowerCase();
-        orderCard.className = `order-card type-${typeClass}`;
+    try {
+        const titleEl = document.getElementById('modal-strat-title');
+        if (titleEl) titleEl.textContent = `Strategy: ${tradeData.strat_id || 'N/A'}`;
         
-        // Initial price from server
-        const price = order.price_ea || 0;
+        const orderListEl = document.getElementById('modal-order-list');
+        if (!orderListEl) {
+            console.error("Critical: modal-order-list not found in DOM");
+            return;
+        }
+        orderListEl.innerHTML = '';
         
-        orderCard.innerHTML = `
-            <div class="order-header">
-                <span class="order-title">Order #${idx + 1}: ${order.type || 'TRADE'}</span>
-                <span class="order-qty">Qty: ${order.qty || 1}</span>
-            </div>
-            <div class="order-details-mini">
-                <div class="modal-detail">
-                    <span class="label">Structure</span>
-                    <span class="value">${order.desc || 'N/A'}</span>
+        const orders = tradeData.orders || [];
+        currentTradeOrders = JSON.parse(JSON.stringify(orders));
+        
+        currentTradeOrders.forEach((order, idx) => {
+            const orderCard = document.createElement('div');
+            const typeClass = (order.type || 'TRADE').toLowerCase();
+            orderCard.className = `order-card type-${typeClass}`;
+            const price = order.price_ea || 0;
+            
+            orderCard.innerHTML = `
+                <div class="order-header">
+                    <span class="order-title">Order #${idx + 1}: ${order.type || 'TRADE'}</span>
+                    <span class="order-qty">Qty: ${order.qty || 1}</span>
                 </div>
-                <div class="modal-detail">
-                    <span class="label">Price (ea)</span>
-                    <div class="price-adjust-container">
-                        <button class="adjust-btn minus" onclick="adjustPrice(${idx}, -0.05)">-</button>
-                        <span id="price-val-${idx}" class="value price-val">${formatOrderPrice(price)}</span>
-                        <button class="adjust-btn plus" onclick="adjustPrice(${idx}, 0.05)">+</button>
+                <div class="order-details-mini">
+                    <div class="modal-detail">
+                        <span class="label">Structure</span>
+                        <span class="value">${order.desc || 'N/A'}</span>
+                    </div>
+                    <div class="modal-detail">
+                        <span class="label">Price (ea)</span>
+                        <div class="price-adjust-container">
+                            <button class="adjust-btn minus" onclick="adjustPrice(${idx}, -0.05)">-</button>
+                            <span id="price-val-${idx}" class="value price-val">${formatOrderPrice(price)}</span>
+                            <button class="adjust-btn plus" onclick="adjustPrice(${idx}, 0.05)">+</button>
+                        </div>
                     </div>
                 </div>
-            </div>
-        `;
-        orderListEl.appendChild(orderCard);
-    });
+            `;
+            orderListEl.appendChild(orderCard);
+        });
 
-    document.getElementById('modal-total-credit').textContent = tradeData.total_credit || '$0.00';
-    
-    // Sync UI global scale
-    window.currentTradeMaxTime = tradeData.timeout || TRADE_TIMEOUT_SEC;
-    tradeTimeLeft = window.currentTradeMaxTime;
-    window.currentModalStratId = tradeData.strat_id;
-    
-    // Respect pause state from server
-    isTradeTimerPaused = tradeData.is_paused || false;
-    document.getElementById('modal-pause-btn').textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
-    
-    updateTradeTimerUI();
-    
-    const modal = document.getElementById('trade-modal');
-    if (modal) modal.classList.add('show');
+        const creditEl = document.getElementById('modal-total-credit');
+        if (creditEl) creditEl.textContent = tradeData.total_credit || '$0.00';
+        
+        window.currentTradeMaxTime = tradeData.timeout || TRADE_TIMEOUT_SEC;
+        tradeTimeLeft = window.currentTradeMaxTime;
+        window.currentModalStratId = tradeData.strat_id;
+        
+        isTradeTimerPaused = tradeData.is_paused || false;
+        const pauseBtn = document.getElementById('modal-pause-btn');
+        if (pauseBtn) pauseBtn.textContent = isTradeTimerPaused ? 'Resume Timer' : 'Pause Timer';
+        
+        updateTradeTimerUI();
+        
+        const modal = document.getElementById('trade-modal');
+        if (modal) modal.classList.add('show');
 
-    // Start Timer
-    if (tradeTimer) clearInterval(tradeTimer);
-    tradeTimer = setInterval(updateTradeTimer, 1000);
+        if (tradeTimer) clearInterval(tradeTimer);
+        tradeTimer = setInterval(updateTradeTimer, 1000);
+    } catch (err) {
+        console.error("Crash during showTradeModal:", err);
+    }
 }
 
 function formatOrderPrice(price) {
