@@ -316,6 +316,27 @@ function updateUI(state) {
 
     // 11. Real-time Chart Update (Incremental)
     updateCharts(state);
+
+    // 12. Trade Modal Reconciliation (Resilience Fix)
+    const modalShowing = document.getElementById('trade-modal')?.classList.contains('show');
+    if (state.pending_trade) {
+        // Re-open modal if a trade is pending but modal is not showing, 
+        // OR the strategy has changed (rare race condition)
+        if (!modalShowing || window.currentModalStratId !== state.pending_trade.strat_id) {
+            console.log("Resuming pending trade from heartbeat:", state.pending_trade.strat_id);
+            pendingDismissStratId = null;
+            showTradeModal(state.pending_trade);
+        }
+    } else {
+        // If the server heartbeat says no trade is pending, ensure the modal is closed
+        // (unless we're in the middle of a user dismissal/sync which handles itself)
+        if (modalShowing && window.isTradeTimerPaused === false) {
+             // We only auto-close if the server says nothing is pending and it's not paused.
+             // If paused, we assume the user is actively making an override.
+             // Actually, the server is authoritative. If pending_trade is null, close it.
+             closeTradeModal();
+        }
+    }
 }
 
 function updateCharts(state) {

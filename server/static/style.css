@@ -488,17 +488,21 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
     top: 0; left: 0; right: 0; bottom: 0;
     background: rgba(0, 0, 0, 0.75);
     backdrop-filter: blur(10px);
-    display: none;
+    display: flex;
     justify-content: center;
     align-items: center;
     z-index: 2000;
     opacity: 0;
-    transition: opacity 0.3s ease;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.3s ease, visibility 0s linear 0.3s;
 }
 
 .modal-backdrop.show {
-    display: flex !important;
     opacity: 1;
+    visibility: visible;
+    pointer-events: all;
+    transition: opacity 0.3s ease, visibility 0s linear 0s;
 }
 
 .modal-content {

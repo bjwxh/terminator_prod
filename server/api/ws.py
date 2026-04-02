@@ -217,6 +217,14 @@ async def broadcast_state(monitor):
                 now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                 latency = max(0, now_ms - spx_ts)
                 
+            # Resiliency Fix: Include pending trade in state so UI can re-home on refresh
+            pending_trade_payload = None
+            if monitor.pending_trade:
+                try:
+                    pending_trade_payload = monitor.get_trade_signal_payload(monitor.pending_trade)
+                except Exception:
+                    pass # Don't let transient serialization race break the heartbeat
+
             state = {
                 "ts": datetime.now(CHICAGO).isoformat(),
                 "exchange_ts": spx_ts, # In ms
@@ -233,6 +241,7 @@ async def broadcast_state(monitor):
                 "live": live_data,
                 "strategies": strategies_data,
                 "logs": logs,
+                "pending_trade": pending_trade_payload,
                 "version": APP_VERSION
             }
 
