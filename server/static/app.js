@@ -96,7 +96,6 @@ function connect() {
         } else if (data.type === 'alert') {
             handleAlert(data);
         } else if (data.type === 'trade_signal') {
-            console.log("Receiving trade_signal:", data);
             // Clear any stale pending dismiss when a fresh trade signal arrives
             pendingDismissStratId = null;
             
@@ -587,7 +586,8 @@ function updateStrategies(strategies) {
         }
 
         const pnlClass = s.pnl >= 0 ? 'green' : 'red';
-        const posCount = s.positions.length;
+        const historyArr = s.history || [];
+        const posCount = (s.positions && s.positions.length) ? s.positions.length : 0;
         const isExpanded = strategyFoldStates[sid] || false;
         
         card.innerHTML = `
@@ -638,20 +638,19 @@ function updateStrategies(strategies) {
                             </tr>
                         </thead>
                         <tbody>
-                            ${s.history.map(t => {
+                            ${historyArr.map(t => {
                                 const time = new Date(t.ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                                const summary = t.legs.map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
-                                const qtySum = t.legs.reduce((acc, l) => acc + Math.abs(l.qty), 0);
+                                const summary = (t.legs || []).map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
+                                const qtySum = (t.legs || []).reduce((acc, l) => acc + Math.abs(l.qty), 0);
                                 return `
                                     <tr>
                                         <td style="padding: 0.5rem; font-size: 0.8rem;">${time}</td>
                                         <td style="padding: 0.5rem; font-size: 0.8rem;">${summary}</td>
                                         <td style="padding: 0.5rem; font-size: 0.8rem;">${qtySum}</td>
-                                        <td style="padding: 0.5rem; font-size: 0.8rem;" class="${t.credit >= 0 ? 'green' : 'red'}">${formatUSD(t.credit/100)}</td>
                                     </tr>
                                 `;
                             }).join('')}
-                            ${s.history.length === 0 ? '<tr><td colspan="4" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">No history</td></tr>' : ''}
+                            ${historyArr.length === 0 ? '<tr><td colspan="4" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">No history</td></tr>' : ''}
                         </tbody>
                     </table>
                 </div>
@@ -849,14 +848,20 @@ function toggleTradeTimer() {
 }
 
 function closeTradeModal() {
+    console.log("closeTradeModal() triggered");
     if (tradeTimer) {
+        console.log("Clearing tradeTimer:", tradeTimer);
         clearInterval(tradeTimer);
         tradeTimer = null;
     }
     isTradeTimerPaused = false;
     window.currentModalStratId = null;
     const modal = document.getElementById('trade-modal');
-    if (modal) modal.classList.remove('show');
+    console.log("Found modal element:", modal);
+    if (modal) {
+        modal.classList.remove('show');
+        console.log("Removed 'show' class from modal");
+    }
     const pauseBtn = document.getElementById('modal-pause-btn');
     if (pauseBtn) pauseBtn.textContent = 'Pause Timer';
 }
