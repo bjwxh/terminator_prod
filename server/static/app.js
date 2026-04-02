@@ -96,6 +96,7 @@ function connect() {
         } else if (data.type === 'alert') {
             handleAlert(data);
         } else if (data.type === 'trade_signal') {
+            console.log("Receiving trade_signal:", data);
             // Clear any stale pending dismiss when a fresh trade signal arrives
             pendingDismissStratId = null;
             
@@ -106,7 +107,7 @@ function connect() {
             
             // Task: Play HIGH priority alert for trade signals
             playSound('alert');
-            showTradeModal(data.trade);
+            showTradeModal(data);
         } else if (data.type === 'trade_action') {
             console.log("Remote trade action received:", data);
             if (data.action === 'close_modal') {
