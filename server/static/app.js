@@ -616,7 +616,7 @@ function updateStrategies(strategies) {
                 
                 <h4 style="margin: 0.8rem 0 0.4rem 0; font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Current Positions</h4>
                 <div class="strat-legs">
-                    ${s.positions.map(p => `
+                    ${(s.positions || []).map(p => `
                         <div class="leg-row">
                             <span class="side ${p.side === 'CALL' ? 'primary' : 'orange'}">${p.side} ${p.strike}</span>
                             <span>Qty: ${p.qty}</span>
@@ -674,7 +674,11 @@ function togglePortfolioFold(type) {
 }
 
 function showTradeModal(tradeData) {
-    if (!tradeData) return;
+    if (!tradeData) {
+        console.error("showTradeModal called with null data!");
+        return;
+    }
+    console.log("showTradeModal() triggered for:", tradeData.strat_id);
     
     document.getElementById('modal-strat-title').textContent = `Strategy: ${tradeData.strat_id || 'N/A'}`;
     
