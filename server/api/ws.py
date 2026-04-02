@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 CHICAGO = ZoneInfo("America/Chicago")
 from typing import List, Set, Dict, Any
 from core.config import CONFIG
+import socket
 
 import time
 router = APIRouter()
@@ -208,6 +209,7 @@ async def broadcast_state(monitor):
                 "latency_ms": latency,
                 "spx": spx,
                 "vix": vix,
+                "server_name": socket.gethostname(),
                 "status": status,
                 "broker_connected": broker_connected,
                 "trading_enabled": trading_enabled,

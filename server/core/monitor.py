@@ -1293,6 +1293,8 @@ class LiveTradingMonitor:
                 # Calculate chunk credit/price (TOTAL dollar amount)
                 total_chunk_credit = sum(-l.quantity * l.price for l in rolled_chunk_legs) * 100
                 total_mid_price = abs(total_chunk_credit / 100.0)
+                signed_mid = total_chunk_credit / (100.0 * num_units) if num_units > 0 else 0.0
+                unit_mid_price = abs(signed_mid)
                 
                 # Classify structure to determine if 0.00 floor is mandatory (Task #32 Improvements)
                 order_type, is_credit_structural = self._classify_order_type(rolled_chunk_legs)
@@ -1319,7 +1321,6 @@ class LiveTradingMonitor:
                     self.logger.info(f"Chunk {i}: Override {override:.2f} -> Price: {raw_price:.2f} (Lock: {lock_floor})")
                 else:
                     offset = self.config.get('order_offset', 0.0)
-                    signed_mid = total_chunk_credit / (100.0 * num_units) if num_units > 0 else 0.0
                     signed_target = signed_mid + offset
                     
                     if lock_floor:

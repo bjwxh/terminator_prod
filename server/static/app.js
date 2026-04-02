@@ -177,6 +177,17 @@ function updateUI(state) {
     // 1. Status Bar
     document.getElementById('broker-status').textContent = state.broker_connected ? 'LIVE' : 'OFFLINE';
     document.getElementById('broker-status').className = 'value ' + (state.broker_connected ? 'status-connected' : 'status-disconnected');
+
+    const serverEl = document.getElementById('server-name');
+    if (serverEl && state.server_name) {
+        if (state.server_name === 'production-server') {
+            serverEl.textContent = 'MAIN';
+        } else {
+            const parts = state.server_name.split('-');
+            serverEl.textContent = parts[parts.length - 1].toUpperCase();
+        }
+        serverEl.className = 'value ' + (state.server_name === 'production-server' ? 'status-connected' : 'primary');
+    }
     
     const tradingBtn = document.getElementById('toggle-trading-btn');
     document.getElementById('trading-status').textContent = state.trading_enabled ? 'ENABLED' : 'DISABLED';
