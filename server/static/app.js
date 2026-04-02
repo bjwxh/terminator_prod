@@ -307,8 +307,6 @@ function updateUI(state) {
     // 7. Strategies Grid
     updateStrategies(state.strategies);
 
-    // 8. Session Stats
-    updateStats(state.stats);
 
     // 9. Config Table
     updateConfigTable(state.config);
@@ -549,20 +547,6 @@ function updateTradesTable(tbodyId, trades) {
     });
 }
 
-function updateStats(stats) {
-    if (!stats) return;
-    document.getElementById('stats-total').textContent = stats.total_trades || 0;
-    document.getElementById('stats-winners').textContent = stats.winners || 0;
-    document.getElementById('stats-losers').textContent = stats.losers || 0;
-    document.getElementById('stats-winrate').textContent = (stats.win_rate ? (stats.win_rate * 100).toFixed(1) : '0.0') + '%';
-    
-    const pnl = stats.total_pnl || 0;
-    document.getElementById('stats-pnl').textContent = formatUSD(pnl);
-    document.getElementById('stats-pnl').className = 'value ' + (pnl >= 0 ? 'green' : 'red');
-    
-    document.getElementById('stats-drawdown').textContent = formatUSD(stats.max_drawdown || 0);
-    document.getElementById('stats-duration').textContent = (stats.avg_duration ? stats.avg_duration.toFixed(1) : '0.0') + ' mins';
-}
 
 let configRendered = false;
 function updateConfigTable(config) {

@@ -215,15 +215,6 @@ async def broadcast_state(monitor):
                 "trading_enabled": trading_enabled,
                 "heartbeat_failures": heartbeat_failures,
                 "working_orders": working_orders,
-                "stats": {
-                    "total_trades": monitor.stats.total_trades,
-                    "winners": monitor.stats.winners,
-                    "losers": monitor.stats.losers,
-                    "win_rate": monitor.stats.win_rate,
-                    "total_pnl": round(monitor.stats.total_pnl, 2),
-                    "max_drawdown": round(monitor.stats.max_drawdown, 2),
-                    "avg_duration": round(monitor.stats.avg_duration_minutes, 1)
-                },
                 "sim": sim_data,
                 "live": live_data,
                 "strategies": strategies_data,
