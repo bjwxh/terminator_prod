@@ -513,6 +513,7 @@ class LiveTradingMonitor:
                                 self._pending_trade_confirmed = False
                                 # Notify UI to close modal
                                 from api.ws import manager
+                                self.logger.info(f"Broadcasting close_modal for {trade.strategy_id} due to redundancy.")
                                 asyncio.create_task(manager.broadcast({"type": "trade_action", "action": "close_modal", "strat_id": trade.strategy_id}))
                                 break
                             elif self.is_trade_timer_paused:
