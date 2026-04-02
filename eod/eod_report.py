@@ -60,6 +60,7 @@ async def run_simulation(target_date: date, live_trades=None, db_path=None):
     
     monitor = LiveTradingMonitor()
     monitor.config['db_path'] = db_path
+    monitor.db_path = db_path
     
     history = await monitor._run_historical_simulation(start_dt, end_dt, live_trades=live_trades, collect_history=True)
     
