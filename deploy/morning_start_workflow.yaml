@@ -16,6 +16,10 @@ main:
           steps:
             - skip_to_backup:
                 next: try_backup
+    - wait_for_init:
+        call: sys.sleep
+        args:
+          seconds: 60
     - check_status:
         call: googleapis.compute.v1.instances.get
         args:

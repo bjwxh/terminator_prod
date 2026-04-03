@@ -8,6 +8,7 @@ StartLimitIntervalSec=0
 Type=simple
 User=fw
 WorkingDirectory=/home/fw/terminator_prod/server/downloader
+ExecStartPre=/bin/bash /home/fw/terminator_prod/deploy/fetch_secrets.sh
 ExecStart=/home/fw/terminator_prod/.venv/bin/python downloader.py
 Restart=always
 RestartSec=10

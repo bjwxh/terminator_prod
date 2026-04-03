@@ -20,11 +20,11 @@ The system uses **Google Cloud Workflows** and **Cloud Scheduler** to manage the
 *   **Step 2 (Failover):** If the primary fails to start (e.g., due to `RESOURCE_EXHAUSTED`), the workflow automatically starts `production-server-backup`.
 *   **Goal:** Ensure a VM is ready by 08:20 AM for key synchronization.
 
-### 2. Key Synchronization (08:20 AM)
-**Mechanism:** Local Mac LaunchAgent + `deploy/sync_keys.sh`
-*   The script has been updated to be **failover-aware**.
-*   It detects which VM is in the `RUNNING` state and copies the Schwab API keys/tokens to that instance.
-*   Once keys are synced, it restarts the `terminator` and `terminator-downloader` services on the active VM.
+### 2. Key Synchronization (08:15 AM - Boot Time)
+**Mechanism:** GCP Secret Manager + `deploy/fetch_secrets.sh`
+*   The system no longer depends on your local Mac being online for daily key sync.
+*   The `terminator.service` on the VM now automatically fetches the latest API keys and tokens from GCP Secret Manager upon every startup/restart.
+*   **Action for User**: If you manually refresh your tokens on your Mac, run `./deploy/sync_to_secret_manager.sh` to update the cloud.
 
 ### 3. Conflict Monitor (Every 30m, 08:30 AM - 15:30 PM)
 **Mechanism:** GCP Cloud Workflow (`terminator-conflict-monitor`)
@@ -40,6 +40,13 @@ The system uses **Google Cloud Workflows** and **Cloud Scheduler** to manage the
 **Mechanism:** Cloud Scheduler
 *   Sends a hardcoded `STOP` signal to both `production-server` and `production-server-backup`.
 *   This ensures all trading-related compute costs are zeroed out until the next morning.
+
+---
+
+## Secret Manager Management
+*   **Sync from Mac to Cloud**: Run `/Users/fw/Git/terminator_prod/deploy/sync_to_secret_manager.sh`.
+*   **VM Fetch**: Automated via `ExecStartPre` in systemd units.
+*   **IAM Permissions**: Ensure the VM Service Account has the `Secret Manager Secret Accessor` role for the project.
 
 ---
 
