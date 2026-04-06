@@ -39,7 +39,6 @@ GITHUB_TOKEN=$(fetch_secret_to_stdout "github-pat")
 if [ -n "$GITHUB_TOKEN" ] && [ "$GITHUB_TOKEN" != "null" ]; then
     cd "$REPO_DIR"
     # Authenticated pull using temporary URL config
-    # We use the full URL with token to avoid complexity with git configs in headless mode
     REMOTE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/bjwxh/terminator_prod.git"
     git pull "$REMOTE_URL" main
     if [ $? -eq 0 ]; then

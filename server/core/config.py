@@ -46,6 +46,6 @@ CONFIG = {
 
     # === Schwab API ===
     'account_id': '22229895', # SLI account
-    'credentials_file': os.path.expanduser('~/.api_keys/sli_api.json'),
-    'token_file': os.path.expanduser('~/.api_keys/sli_token.json'), # Absolute path for VM
+    'credentials_file': os.path.expanduser('~/.api_keys/schwab/sli_api.json'),
+    'token_file': os.path.expanduser('~/.api_keys/schwab/sli_token.json'), # Absolute path for VM
 }
