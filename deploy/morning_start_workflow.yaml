@@ -1,40 +1,96 @@
 main:
+  params: [args]
   steps:
-    - try_primary:
-        try:
-          call: googleapis.compute.v1.instances.start
-          args:
-            instance: "production-server"
-            project: "terminator-478221"
-            zone: "us-central1-a"
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 3
-        # If start fails (e.g. RESOURCE_EXHAUSTED), jump to backup
-        except:
-          as: e
-          steps:
-            - skip_to_backup:
-                next: try_backup
-    - wait_for_init:
-        call: sys.sleep
+    - init:
+        assign:
+          - project: "terminator-478221"
+          - primary_instance: "production-server"
+          - primary_zone: "us-central1-a"
+          - backup_instance: "production-server-backup"
+          - backup_zone: "us-central1-c"
+          - max_retries: 3
+
+    - start_primary:
+        call: start_vm_with_retries
         args:
-          seconds: 60
-    - check_status:
-        call: googleapis.compute.v1.instances.get
-        args:
-          instance: "production-server"
-          project: "terminator-478221"
-          zone: "us-central1-a"
-        result: primary_res
-    - evaluate:
+          project: ${project}
+          instance: ${primary_instance}
+          zone: ${primary_zone}
+          retries: ${max_retries}
+        result: primary_success
+
+    - check_primary_result:
         switch:
-          - condition: ${primary_res.status == "RUNNING" or primary_res.status == "PROVISIONING" or primary_res.status == "STAGING"}
+          - condition: ${primary_success}
             next: end
-        next: try_backup
-    - try_backup:
-        call: googleapis.compute.v1.instances.start
+
+    - start_backup:
+        call: start_vm_with_retries
         args:
-          instance: "production-server-backup"
-          project: "terminator-478221"
-          zone: "us-central1-c"
+          project: ${project}
+          instance: ${backup_instance}
+          zone: ${backup_zone}
+          retries: ${max_retries}
+        result: backup_success
+
+    - check_backup_result:
+        switch:
+          - condition: ${backup_success}
+            next: end
+
+    - send_failure_alert:
+        call: googleapis.pubsub.v1.projects.topics.publish
+        args:
+          topic: ${"projects/" + project + "/topics/terminator-alerts"}
+          body:
+            messages:
+              - data: '${base64.encode(text.encode("CRITICAL: Both primary and backup VMs failed to start after 3 attempts each."))}'
+    
+    - final_fail:
+        raise: "Both production-server and production-server-backup failed to start after maximum retries."
+
+start_vm_with_retries:
+  params: [project, instance, zone, retries]
+  steps:
+    - init_loop:
+        assign:
+          - attempt: 1
+    - attempt_loop:
+        switch:
+          - condition: ${attempt <= retries}
+            steps:
+              - start_instance:
+                  try:
+                    call: googleapis.compute.v1.instances.start
+                    args:
+                      instance: ${instance}
+                      project: ${project}
+                      zone: ${zone}
+                  except:
+                    as: e
+                    steps:
+                      - log_error:
+                          assign:
+                            - last_error: ${string(e)}
+              - wait_for_boot:
+                  call: sys.sleep
+                  args:
+                    seconds: 60
+              - check_status:
+                  call: googleapis.compute.v1.instances.get
+                  args:
+                    instance: ${instance}
+                    project: ${project}
+                    zone: ${zone}
+                  result: inst_res
+              - evaluate_status:
+                  switch:
+                    - condition: ${inst_res.status == "RUNNING" or inst_res.status == "PROVISIONING" or inst_res.status == "STAGING"}
+                      return: true
+              - next_attempt:
+                  assign:
+                    - attempt: ${attempt + 1}
+                  next: attempt_loop
+    - return_failure:
+        return: false
+

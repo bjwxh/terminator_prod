@@ -16,8 +16,9 @@ The system uses **Google Cloud Workflows** and **Cloud Scheduler** to manage the
 
 ### 1. Morning Start (08:15 AM)
 **Mechanism:** GCP Cloud Workflow (`terminator-morning-start`)
-*   **Step 1:** Attempts to start `production-server`.
-*   **Step 2 (Failover):** If the primary fails to start (e.g., due to `RESOURCE_EXHAUSTED`), the workflow automatically starts `production-server-backup`.
+*   **Step 1:** Attempts to start `production-server` (up to 3 times, with 60s waits).
+*   **Step 2 (Failover):** If the primary fails to start after 3 attempts, the workflow attempts to start `production-server-backup` (up to 3 times, with 60s waits).
+*   **Step 3 (Alert):** If both VMs fail to start after their respective retries, a critical alert is sent via GCP Pub/Sub (`terminator-alerts`).
 *   **Goal:** Ensure a VM is ready by 08:20 AM for key synchronization.
 
 ### 2. Key Synchronization (08:15 AM - Boot Time)
