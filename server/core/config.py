@@ -26,7 +26,7 @@ CONFIG = {
     # === Live Trading Specific ===
     'trading_enabled': False,          # SAFETY FIRST: Disable by default in prod config
     'commission_per_contract': 1.13,
-    'order_offset': 0.1,              # Price offset from mid (configurable)
+    'order_offset': 0.15,              # Price offset from mid (configurable)
     'order_auto_execute_timeout': 20,  # Seconds before auto-execute
     'trade_batching_window_seconds': 0, # Delay before reconciliation sync. 0 = instant.
 
