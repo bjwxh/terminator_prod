@@ -59,6 +59,17 @@ start_vm_with_retries:
         switch:
           - condition: ${attempt <= retries}
             steps:
+              - check_initial_status:
+                  call: googleapis.compute.v1.instances.get
+                  args:
+                    instance: ${instance}
+                    project: ${project}
+                    zone: ${zone}
+                  result: init_inst_res
+              - evaluate_initial_status:
+                  switch:
+                    - condition: ${init_inst_res.status == "RUNNING" or init_inst_res.status == "PROVISIONING" or init_inst_res.status == "STAGING"}
+                      return: true
               - start_instance:
                   try:
                     call: googleapis.compute.v1.instances.start
