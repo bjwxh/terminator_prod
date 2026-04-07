@@ -102,7 +102,7 @@ def get_live_results(target_date: date, session_path: Optional[str] = None):
 def update_history(target_date: date, results: dict):
     """Append results and return cleaned history (no zero trade days)"""
     target_str = target_date.isoformat()
-    cols = ['date', 'sim_trades', 'sim_gross_pnl', 'sim_net_pnl', 'real_trades', 'real_gross_pnl', 'real_net_pnl', 'sim_contracts', 'real_contracts']
+    cols = ['date', 'sim_trades', 'sim_gross_pnl', 'sim_net_pnl', 'real_trades', 'real_gross_pnl', 'real_net_pnl', 'sim_contracts', 'real_contracts', 'notes']
     
     if os.path.exists(HIST_CSV_PATH):
         df = pd.read_csv(HIST_CSV_PATH)
@@ -116,7 +116,7 @@ def update_history(target_date: date, results: dict):
     if results.get('sim_trades', 0) > 0 or results.get('real_trades', 0) > 0:
         new_row = {'date': target_str, **results}
         # Filter keys to match cols
-        row_dict = {k: new_row.get(k, 0.0) for k in cols}
+        row_dict = {k: new_row.get(k, '' if k in ['date', 'notes'] else 0.0) for k in cols}
         df = pd.concat([df, pd.DataFrame([row_dict])], ignore_index=True)
         
     # Clean zero-trade days as requested
