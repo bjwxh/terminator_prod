@@ -1378,13 +1378,33 @@ class LiveTradingMonitor:
                     builder.set_duration(Duration.DAY)
                     builder.add_option_leg(getattr(OptionInstruction, instruction), leg.symbol, abs(leg.quantity) // num_units)
                 
+                elif num_legs == 2 and order_type == "vertical":
+                    # Vertical Spread: Schwab expects leg-level quantity to match top-level total.
+                    builder = OrderBuilder()
+                    builder.set_order_strategy_type(OrderStrategyType.SINGLE)
+                    builder.set_complex_order_strategy_type(ComplexOrderStrategyType.VERTICAL)
+                    builder.set_order_type(OrderType.NET_CREDIT if is_final_credit else OrderType.NET_DEBIT)
+                    builder.set_price(price_str)
+                    builder.set_quantity(num_units)
+                    builder.set_session(Session.NORMAL)
+                    builder.set_duration(Duration.DAY)
+
+                    for leg in rolled_chunk_legs:
+                        l_inst = getattr(leg, 'instruction', None)
+                        if not l_inst:
+                            if leg.quantity > 0: l_inst = "BUY_TO_CLOSE" if trade.purpose == TradePurpose.EXIT else "BUY_TO_OPEN"
+                            else: l_inst = "SELL_TO_CLOSE" if trade.purpose == TradePurpose.EXIT else "SELL_TO_OPEN"
+
+                        # Use ABSOLUTE quantity for Vertical strategy legs
+                        builder.add_option_leg(getattr(OptionInstruction, l_inst), leg.symbol, int(abs(leg.quantity)))
+
                 elif num_legs == 4:
                     # Try to see if it's an Iron Condor
                     sc = next((l for l in rolled_chunk_legs if l.side == 'CALL' and l.quantity < 0), None)
                     lc = next((l for l in rolled_chunk_legs if l.side == 'CALL' and l.quantity > 0), None)
                     sp = next((l for l in rolled_chunk_legs if l.side == 'PUT' and l.quantity < 0), None)
                     lp = next((l for l in rolled_chunk_legs if l.side == 'PUT' and l.quantity > 0), None)
-                    
+
                     if all([sc, lc, sp, lp]):
                         builder = OrderBuilder()
                         builder.set_order_strategy_type(OrderStrategyType.SINGLE)
@@ -1394,14 +1414,14 @@ class LiveTradingMonitor:
                         builder.set_quantity(num_units)
                         builder.set_session(Session.NORMAL)
                         builder.set_duration(Duration.DAY)
-                        
+
                         builder.add_option_leg(OptionInstruction.SELL_TO_OPEN if trade.purpose != TradePurpose.EXIT else OptionInstruction.BUY_TO_CLOSE, sc.symbol, abs(sc.quantity) // num_units)
                         builder.add_option_leg(OptionInstruction.BUY_TO_OPEN if trade.purpose != TradePurpose.EXIT else OptionInstruction.SELL_TO_CLOSE, lc.symbol, abs(lc.quantity) // num_units)
                         builder.add_option_leg(OptionInstruction.SELL_TO_OPEN if trade.purpose != TradePurpose.EXIT else OptionInstruction.BUY_TO_CLOSE, sp.symbol, abs(sp.quantity) // num_units)
                         builder.add_option_leg(OptionInstruction.BUY_TO_OPEN if trade.purpose != TradePurpose.EXIT else OptionInstruction.SELL_TO_CLOSE, lp.symbol, abs(lp.quantity) // num_units)
 
                 if not builder:
-                    # Generic CUSTOM builder for any 2-4 legs
+                    # Generic CUSTOM builder for any 2-4 legs (Untouched for non-verticals)
                     builder = OrderBuilder()
                     builder.set_order_strategy_type(OrderStrategyType.SINGLE)
                     builder.set_complex_order_strategy_type(ComplexOrderStrategyType.CUSTOM)
@@ -2971,12 +2991,15 @@ class LiveTradingMonitor:
             is_credit = bool(legs[0].quantity < 0)
             return ("single", is_credit)
         
-        # 2. Vertical Spread / Risk Reversal
+        # 2. Vertical Spread (same-side) or Risk Reversal (cross-side)
         if n == 2:
             l1, l2 = legs
             # One long, one short, exact equal quantities
             if l1.quantity * l2.quantity < 0 and abs(l1.quantity) == abs(l2.quantity):
-                return ("vertical", None) # mid-price determines Cr/Db
+                if l1.side == l2.side:
+                    return ("vertical", None) # same-side spread, mid-price determines Cr/Db
+                else:
+                    return ("unknown", None)  # risk reversal — route to CUSTOM
         
         # Sort by strike for multi-leg topology checks
         sorted_legs = sorted(legs, key=lambda x: x.strike)
