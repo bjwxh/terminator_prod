@@ -14,6 +14,8 @@ import threading
 import traceback
 import queue
 import random
+import sqlite3
+from contextlib import closing
 from zoneinfo import ZoneInfo
 CHICAGO = ZoneInfo("America/Chicago")
 import smtplib
@@ -141,7 +143,6 @@ class LiveTradingMonitor:
         
         # DB Health Monitor (v1.2)
         self.db_status = {"status": "Healthy", "age_minutes": 0, "should_alert": False}
-        self._last_db_alert_time = 0
         self._greek_cache: Dict[Tuple[str, int, str], Tuple[float, float]] = {} # (symbol, strike, side) -> (delta, theta)
         
         # Resolve DB path relative to project root if it's relative
@@ -3437,19 +3438,21 @@ class LiveTradingMonitor:
                             age_m = int(diff.total_seconds() / 60)
                             
                             if age_m > 2:
-                                self.logger.warning(f"DB LAG DETECTED: Last record is {age_m} minutes old.")
                                 # Update status and trigger alert
                                 was_lagging = (self.db_status["status"] == "Lag")
                                 self.db_status = {"status": "Lag", "age_minutes": age_m, "should_alert": not was_lagging}
                                 
-                                # Send Email Alert if not sent in the last 15 minutes
-                                if not was_lagging or (time.time() - self._last_db_alert_time > 900):
+                                if not was_lagging:
+                                    self.logger.warning(f"DB LAG DETECTED: Last record is {age_m} minutes old.")
                                     self._send_db_alert_email(age_m, last_ts)
-                                    self._last_db_alert_time = time.time()
                             else:
                                 self.db_status = {"status": "Healthy", "age_minutes": age_m, "should_alert": False}
                         else:
-                            self.db_status = {"status": "Lag", "age_minutes": 999, "should_alert": False}
+                            was_lagging = (self.db_status["status"] == "Lag")
+                            self.db_status = {"status": "Lag", "age_minutes": 999, "should_alert": not was_lagging}
+                            if not was_lagging:
+                                self.logger.error("DB LAG DETECTED: Database is EMPTY during market hours.")
+                                self._send_db_alert_email(999, None)
                             
                 await asyncio.sleep(60) # Check every 1 minute
             except asyncio.CancelledError:
@@ -3467,7 +3470,10 @@ class LiveTradingMonitor:
         try:
             with open(config_path, 'r') as f:
                 ec = json.load(f)
-            recipients = self.config.get('email_recipients', ['frankwang.alert@gmail.com'])
+            recipients = self.config.get('email_recipients')
+            if not recipients:
+                recipients = ['frankwang.alert@gmail.com']
+                self.logger.warning("email_recipients not configured, falling back to default address.")
             
             msg = MIMEMultipart()
             msg['From'] = ec.get('from_email', ec.get('sender_email'))
@@ -3476,7 +3482,7 @@ class LiveTradingMonitor:
             
             body = (f"Terminator monitoring system has detected a database data lag.\n\n"
                     f"Current Lag: {age_m} minutes\n"
-                    f"Last DB Entry: {last_record_ts.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+                    f"Last DB Entry: {last_record_ts.strftime('%Y-%m-%d %H:%M:%S %Z') if last_record_ts else 'No records found'}\n"
                     f"Current Time: {datetime.now(CHICAGO).strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
                     f"The downloader service may have failed or lost connection to Schwab.")
             msg.attach(MIMEText(body, 'plain'))

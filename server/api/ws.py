@@ -248,6 +248,11 @@ async def broadcast_state(monitor):
             }
 
             await manager.broadcast({"type": "state_update", "state": state})
+            
+            # Reset one-shot alert flag (v1.2 Bug Fix)
+            if monitor.db_status.get("should_alert"):
+                monitor.db_status = {**monitor.db_status, "should_alert": False}
+
             await asyncio.sleep(0.5) # 500ms cadence
             
         except asyncio.CancelledError:
