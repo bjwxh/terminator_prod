@@ -2996,16 +2996,20 @@ class LiveTradingMonitor:
         if n == 1:
             is_credit = bool(legs[0].quantity < 0)
             return ("single", is_credit)
-        
-        # 2. Vertical Spread (same-side) or Risk Reversal (cross-side)
+           # 2. Vertical Spread (2 legs, same side, opposite direction, same quantity)
         if n == 2:
             l1, l2 = legs
-            # One long, one short, exact equal quantities
-            if l1.quantity * l2.quantity < 0 and abs(l1.quantity) == abs(l2.quantity):
-                if l1.side == l2.side:
-                    return ("vertical", None) # same-side spread, mid-price determines Cr/Db
+            if l1.side == l2.side and l1.quantity * l2.quantity < 0 and abs(l1.quantity) == abs(l2.quantity):
+                long_leg = l1 if l1.quantity > 0 else l2
+                short_leg = l1 if l1.quantity < 0 else l2
+                
+                if l1.side == 'CALL':
+                    # Long Call Vertical (Debit) = Buy Lower
+                    is_credit = bool(short_leg.strike < long_leg.strike)
                 else:
-                    return ("unknown", None)  # risk reversal — route to CUSTOM
+                    # Long Put Vertical (Debit) = Buy Higher
+                    is_credit = bool(short_leg.strike > long_leg.strike)
+                return ("vertical", is_credit)
         
         # Sort by strike for multi-leg topology checks
         sorted_legs = sorted(legs, key=lambda x: x.strike)
@@ -3021,19 +3025,23 @@ class LiveTradingMonitor:
         # 3. Butterfly (3 legs, ratios 1/-2/1) — all same side required
         if n == 3:
             same_side = len(set(l.side for l in sorted_legs)) == 1
-            if same_side and ratios == [1, -2, 1]: return ("butterfly", False) # Long Fly = Debit
-            if same_side and ratios == [-1, 2, -1]: return ("butterfly", True)  # Short Fly = Credit
+            if same_side:
+                if ratios == [1, -2, 1]: return ("butterfly", False) # Long Fly (+1/-2/+1) = Debit
+                if ratios == [-1, 2, -1]: return ("butterfly", True)  # Short Fly (-1/+2/-1) = Credit
 
         # 4. Condors and Iron Structures
         if n == 4:
-            # Same-Type Condor (+1/-1/-1/+1) — must be all same side to avoid matching IC
             same_side = len(set(l.side for l in sorted_legs)) == 1
-            if same_side and ratios == [1, -1, -1, 1]: return ("condor", False) # Long outer = Debit
-            if same_side and ratios == [-1, 1, 1, -1]: return ("condor", True)  # Short outer = Credit
+            if same_side:
+                # Standard Condor (+1/-1/-1/+1)
+                if ratios == [1, -1, -1, 1]: return ("condor", False) # Long outer = Debit
+                if ratios == [-1, 1, 1, -1]: return ("condor", True)  # Short outer = Credit
             
-            # Iron Condor / Iron Butterfly (2 Put + 2 Call)
+            # Iron Condor / Iron Butterfly (2 Put + 2 Call, 1:-1:-1:1)
             p_legs = [l for l in sorted_legs if l.side == 'PUT']
             c_legs = [l for l in sorted_legs if l.side == 'CALL']
+            
+            # Note: Ratios must be 1/-1 for each side
             if len(p_legs) == 2 and len(c_legs) == 2:
                 lp = next((l for l in p_legs if l.quantity > 0), None)
                 sp = next((l for l in p_legs if l.quantity < 0), None)
