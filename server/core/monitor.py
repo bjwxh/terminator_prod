@@ -756,9 +756,13 @@ class LiveTradingMonitor:
                 # AUTO-DISMISSAL: If we have an active modal, check if it's now redundant
                 # Issue 3 Fix: Sync-triggered check is more responsive than timer-based
                 if hasattr(self, 'pending_trade') and self.pending_trade and self._is_trade_redundant(self.pending_trade):
-                    self.logger.info(f"Data-driven redundancy check: Trade {self.pending_trade.strategy_id} is covered. Auto-dismissing.")
+                    trade_to_dismiss = self.pending_trade
+                    # Clear pending_trade BEFORE broadcasting so the next 500ms heartbeat sends
+                    # pending_trade=null instead of a stale $0-credit payload that would re-open the modal.
+                    self.pending_trade = None
+                    self.logger.info(f"Data-driven redundancy check: Trade {trade_to_dismiss.strategy_id} is covered. Auto-dismissing.")
                     from api.ws import manager
-                    asyncio.create_task(manager.broadcast({"type": "trade_action", "action": "close_modal", "strat_id": self.pending_trade.strategy_id}))
+                    asyncio.create_task(manager.broadcast({"type": "trade_action", "action": "close_modal", "strat_id": trade_to_dismiss.strategy_id}))
                     self.confirmation_event.set()
 
         except Exception as e:
