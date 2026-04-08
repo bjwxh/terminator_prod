@@ -25,6 +25,21 @@
 
 ---
 
+## 🎨 Interface Showcase
+
+<table border="0">
+  <tr>
+    <td width="50%"><img src="images/ui/dashboard.png" alt="Dashboard Tab"></td>
+    <td width="50%"><img src="images/ui/substrategies.png" alt="Sub-Strategies Tab"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="images/ui/sessionstats.png" alt="Session Stats Tab"></td>
+    <td width="50%"><img src="images/ui/systemlogs.png" alt="System Logs Tab"></td>
+  </tr>
+</table>
+
+---
+
 ## 📂 Project Structure
 
 ```
