@@ -23,6 +23,7 @@ from email.mime.multipart import MIMEMultipart
 import json
 import os
 import math
+from decimal import Decimal, ROUND_UP, ROUND_DOWN
 from pathlib import Path
 import schwab
 from schwab.auth import easy_client
@@ -1862,6 +1863,100 @@ class LiveTradingMonitor:
                         total_mark += mid * (qty / o.get('quantity', 1))
             
             return round(total_mark, 2)
+
+    async def chase_order(self, order_id: str) -> bool:
+        """Improve a working order's price to the nearest 5c of current mark, less aggressive side."""
+        if not self.client or not self.account_hash: return False
+        
+        # 1. Find the order in working_orders
+        order = next((o for o in self.working_orders if str(o.get('orderId')) == order_id), None)
+        if not order:
+            self.logger.error(f"Cannot chase order {order_id}: Not found in working orders cache.")
+            return False
+        
+        # 2. Get current mark
+        mark = self.get_order_mark(order)
+        if mark is None:
+            self.logger.error(f"Cannot chase order {order_id}: Could not calculate current mark (no market data).")
+            return False
+            
+        # 3. Apply rounding logic (less aggressive side)
+        # Credit (mark < 0): Round UP in absolute value (e.g. 5.27 -> 5.30)
+        # Debit (mark >= 0): Round DOWN in absolute value (e.g. 5.27 -> 5.25)
+        # Use Decimal to avoid float precision issues (e.g. 5.25 / 0.05 can be 104.999...)
+        abs_mark_d = Decimal(str(abs(mark)))
+        is_credit = mark < 0
+        
+        if is_credit:
+            new_abs_price = float(
+                (abs_mark_d / Decimal('0.05')).to_integral_value(rounding=ROUND_UP) * Decimal('0.05')
+            )
+        else:
+            new_abs_price = float(
+                (abs_mark_d / Decimal('0.05')).to_integral_value(rounding=ROUND_DOWN) * Decimal('0.05')
+            )
+            
+        new_price_str = f"{new_abs_price:.2f}"
+        old_price = order.get('price', 0)
+        
+        if abs(float(old_price) - new_abs_price) < 0.01:
+            self.logger.info(f"Order {order_id} price ${old_price} is already at target ${new_price_str}. Skipping.")
+            return True
+            
+        self.logger.info(f"Chasing order {order_id} from ${old_price} to ${new_price_str} (Mark: {mark:.2f})")
+        
+        # 4. Build replacement order spec (Full spec required)
+        try:
+            builder = OrderBuilder()
+            builder.set_order_strategy_type(OrderStrategyType.SINGLE)
+            
+            # Map complex strategy type if applicable
+            complex_type = order.get('complexOrderStrategyType')
+            if complex_type:
+                builder.set_complex_order_strategy_type(getattr(ComplexOrderStrategyType, complex_type))
+            
+            # Use same order type as original
+            orig_type = order.get('orderType')
+            builder.set_order_type(getattr(OrderType, orig_type))
+            builder.set_price(new_price_str)
+            builder.set_quantity(order.get('quantity'))
+            builder.set_session(Session.NORMAL)
+            builder.set_duration(Duration.DAY)
+            
+            for leg in order.get('orderLegCollection', []):
+                instr = leg.get('instrument', {})
+                symbol = instr.get('symbol')
+                qty = leg.get('quantity')
+                instruction = leg.get('instruction')
+                builder.add_option_leg(getattr(OptionInstruction, instruction), symbol, qty)
+            
+            replacement_spec = builder.build()
+            
+            # 5. Execute replacement
+            resp = await self.client.replace_order(self.account_hash, int(order_id), replacement_spec)
+            
+            if resp.status_code in [200, 201, 202]:
+                from schwab import utils as schwab_utils
+                new_id = schwab_utils.Utils(self.client, self.account_hash).extract_order_id(resp)
+                self.logger.info(f"Order {order_id} replacement sent successfully. New Order ID: {new_id or 'Unknown'}")
+                
+                # Update internal tracking
+                if order_id in self.order_to_strategy:
+                    sid = self.order_to_strategy.pop(order_id)
+                    if new_id:
+                        self.order_to_strategy[str(new_id)] = sid
+                    else:
+                        self.order_to_strategy[order_id] = sid # restore until next sync
+                        self.logger.warning(f"No new order ID returned for chase of {order_id}. Mapping retained.")
+                
+                return True
+            else:
+                self.logger.error(f"Failed to replace order {order_id}: {resp.status_code} {resp.text}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error during order chase {order_id}: {e}")
+            return False
 
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a specific order by ID"""

@@ -336,6 +336,8 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
 
 .btn:hover { background: #444c56; }
 .btn-primary { background: var(--primary); border-color: var(--primary); }
+.btn-success { background: var(--accent-green); border-color: var(--accent-green); }
+.btn-success:hover { background: #238636; }
 .btn-danger { background: var(--accent-red); border-color: var(--accent-red); }
 .btn-danger:hover { background: #cf3d35; }
 .btn-small { padding: 0.2rem 0.6rem; font-size: 0.75rem; }

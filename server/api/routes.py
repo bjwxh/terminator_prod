@@ -104,6 +104,13 @@ async def cancel_order(order_id: str, monitor = Depends(get_monitor)):
         raise HTTPException(status_code=500, detail="Cancel failed")
     return {"msg": f"Order {order_id} cancel requested"}
 
+@router.post("/orders/{order_id}/chase")
+async def chase_order(order_id: str, monitor = Depends(get_monitor)):
+    success = await monitor.chase_order(order_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Chase failed")
+    return {"msg": f"Order {order_id} chase/improvement requested"}
+
 @router.post("/orders/cancel_all")
 async def cancel_all_orders(monitor = Depends(get_monitor)):
     result = await monitor.cancel_all_orders()

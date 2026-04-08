@@ -562,7 +562,8 @@ function updateOrdersTable(orders) {
             <td>${o.mark !== null ? (o.mark < 0 ? '$' + Math.abs(o.mark).toFixed(2) + ' Cr' : '$' + o.mark.toFixed(2) + ' Db') : '--'}</td>
             <td class="primary">${o.status}</td>
             <td style="text-align: right;">
-                <button class="btn btn-danger btn-small" onclick="confirmCancelOrder('${o.id}', '${o.symbol}')">Cancel</button>
+                <button class="btn btn-success btn-small" onclick="confirmChaseOrder('${o.id || o.orderId}', '${o.symbol}')" style="margin-right: 5px;">Chase</button>
+                <button class="btn btn-danger btn-small" onclick="confirmCancelOrder('${o.id || o.orderId}', '${o.symbol}')">Cancel</button>
             </td>
         `;
         tbody.appendChild(row);
@@ -1073,6 +1074,26 @@ function confirmCancelOrder(orderId, symbol) {
                 })
                 .catch(err => {
                     alert("Error cancelling order: " + err.message);
+                });
+        }
+    );
+}
+
+function confirmChaseOrder(orderId, symbol) {
+    showConfirmModal(
+        "Chase Working Order",
+        `Are you sure you want to <strong>Chase</strong> order <strong>#${orderId}</strong> (${symbol})?<br><br>Price will be improved to the nearest 5c of current mark on the less aggressive side.`,
+        () => {
+            fetch(`/api/orders/${orderId}/chase`, { method: 'POST' })
+                .then(resp => {
+                    if (!resp.ok) throw new Error("Chase failed");
+                    console.log(`Chase requested for order ${orderId}`);
+                    closeConfirmModal();
+                    // Refetch working orders immediately for snappy UI
+                    fetch(`/api/orders/working`).then(r => r.json()).then(data => updateOrdersTable(data));
+                })
+                .catch(err => {
+                    alert("Error chasing order: " + err.message);
                 });
         }
     );
