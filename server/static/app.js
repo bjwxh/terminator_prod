@@ -198,13 +198,13 @@ function updateUI(state) {
         const dba = state.db_status.age_minutes;
         
         if (dbs === "Sleep") {
-            dbStatusVal.textContent = "Sleep";
+            dbStatusVal.textContent = "SLEEP";
             dbStatusVal.className = "value status-disabled";
         } else if (dbs === "Lag") {
-            dbStatusVal.textContent = `Lag (${dba}m)`;
+            dbStatusVal.textContent = `LAG (${dba}m)`;
             dbStatusVal.className = "value status-disconnected";
         } else {
-            dbStatusVal.textContent = "Healthy";
+            dbStatusVal.textContent = "HEALTHY";
             dbStatusVal.className = "value status-connected";
         }
         
