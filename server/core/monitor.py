@@ -2996,7 +2996,7 @@ class LiveTradingMonitor:
         if n == 1:
             is_credit = bool(legs[0].quantity < 0)
             return ("single", is_credit)
-           # 2. Vertical Spread (2 legs, same side, opposite direction, same quantity)
+        # 2. Vertical Spread (2 legs, same side, opposite direction, same quantity)
         if n == 2:
             l1, l2 = legs
             if l1.side == l2.side and l1.quantity * l2.quantity < 0 and abs(l1.quantity) == abs(l2.quantity):
@@ -3048,7 +3048,7 @@ class LiveTradingMonitor:
                 lc = next((l for l in c_legs if l.quantity > 0), None)
                 sc = next((l for l in c_legs if l.quantity < 0), None)
                 
-                if all([lp, sp, lc, sc]):
+                if all([lp, sp, lc, sc]) and abs(lp.quantity) == abs(sp.quantity) == abs(lc.quantity) == abs(sc.quantity):
                     # Short inner = Credit, Long inner = Debit
                     is_credit = bool(sp.strike > lp.strike and sc.strike < lc.strike)
                     # Iron fly when either the short body or long body shares a strike

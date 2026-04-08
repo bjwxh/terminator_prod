@@ -89,3 +89,23 @@ The script will:
 - **Tailscale Only**: The dashboard is only accessible via the Tailscale VPN.
 - **No Secrets**: Configuration uses `config.py` which is ignored by Git. Always use `config.example.py` as a template.
 - **Health Checks**: A lightweight endpoint on `:8081` provides zero-latency heartbeats for external monitoring tools.
+
+
+---
+<!-- STATS_START -->
+
+## 📈 Performance Statistics
+
+![Performance Curve](eod/assets/performance_curve.png)
+
+| Period | Days | Total PnL | Trades/Day | Fees | Net PnL | Win % | Profit Factor | Sharpe | Max DD |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Past 5D | 5 | $-1,972.50 | 15.6 | $247.47 | **$-2,219.97** | 40.0% | 0.39 | -5.30 | $-710.20 |
+| Past 22D | 22 | $1,607.50 | 20.4 | $789.87 | **$817.63** | 59.1% | 1.17 | 0.81 | $-3,225.81 |
+| YTD | 58 | $3,145.00 | 19.2 | $1,559.40 | **$1,585.60** | 48.3% | 1.21 | 0.87 | $-3,225.81 |
+| All Time | 58 | $3,145.00 | 19.2 | $1,559.40 | **$1,585.60** | 48.3% | 1.21 | 0.87 | $-3,225.81 |
+
+
+*Updated: 2026-04-07 16:22:21*
+
+<!-- STATS_END -->
