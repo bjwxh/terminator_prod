@@ -1462,8 +1462,8 @@ class LiveTradingMonitor:
                 self.awaiting_broker_sync = True # Track in-flight sync
                 self.logger.info("Live trade execution complete; Simulation updated. Awaiting broker sync.")
                 # Trade fill notification
-                msg = f"Trade filled: {trade.strategy_id} {trade.purpose.value} (Net: ${trade.credit/100.0:.2f})"
-                asyncio.create_task(notify_all(self.config, msg, title="Trade Alert"))
+                # self.logger.info(f"Notify: {msg}") # Suppressed redundant email per user request
+                # asyncio.create_task(notify_all(self.config, msg, title="Trade Alert"))
                 self.session_manager.save_session(self)
             else:
                 trade.status = "failed"
