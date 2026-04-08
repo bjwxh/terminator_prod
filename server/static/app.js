@@ -642,95 +642,131 @@ function updateConfigTable(config) {
     });
 }
 
-function updateStrategies(strategies) {
+let strategyDataCache = {}; // Scalability Fix: Persist detailed data between heartbeats
+
+function renderStrategyCard(card, sid, s) {
+    const pnlClass = s.pnl >= 0 ? 'green' : 'red';
+    const historyArr = s.history || [];
+    const posCount = (s.positions && s.positions.length) ? s.positions.length : 0;
+    const isExpanded = strategyFoldStates[sid] || false;
+
+    card.innerHTML = `
+        <div class="strat-header foldable-header ${isExpanded ? 'active' : ''}" onclick="toggleStrategyFold('${sid}')">
+            <div class="strat-title-group">
+                <span class="fold-icon">${isExpanded ? '▼' : '▶'}</span>
+                <span class="strat-id">${sid}</span>
+                <span class="status-dot ${s.traded ? 'active' : ''}"></span>
+            </div>
+            <div class="strat-pnl-group">
+                <span class="strat-pnl ${pnlClass}">${formatUSD(s.pnl)}</span>
+            </div>
+        </div>
+        
+        <div class="strat-details-body ${isExpanded ? 'show' : 'hide'}">
+            <div class="metrics-grid" style="grid-template-columns: repeat(2, 1fr); margin-top: 1rem; margin-bottom: 1rem;">
+                <div class="metric-card">
+                    <span class="label">Positions</span>
+                    <span class="value">${posCount}</span>
+                </div>
+                <div class="metric-card">
+                    <span class="label">Status Today</span>
+                    <span class="value" style="font-size: 0.9rem;">${s.traded ? 'TRADED' : 'WAITING'}</span>
+                </div>
+            </div>
+            
+            <h4 style="margin: 0.8rem 0 0.4rem 0; font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Current Positions</h4>
+            <div class="strat-legs">
+                ${(s.positions || []).map(p => `
+                    <div class="leg-row">
+                        <span class="side ${p.side === 'CALL' ? 'primary' : 'orange'}">${p.side} ${p.strike}</span>
+                        <span>Qty: ${p.qty}</span>
+                        <span class="${p.pnl >= 0 ? 'green' : 'red'}">${formatUSD(p.pnl)}</span>
+                    </div>
+                `).join('')}
+                ${posCount === 0 ? '<div style="color:var(--text-secondary); font-size:0.8rem;">Flat</div>' : ''}
+            </div>
+
+            <h4 style="margin: 1.2rem 0 0.4rem 0; font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Trade History</h4>
+            <div class="table-container" style="background: rgba(0,0,0,0.1); margin-top: 0.5rem; border-color: rgba(255,255,255,0.05);">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="padding: 0.5rem; font-size: 0.75rem;">Time</th>
+                            <th style="padding: 0.5rem; font-size: 0.75rem;">Trade</th>
+                            <th style="padding: 0.5rem; font-size: 0.75rem;">Qty</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${historyArr.map(t => {
+                            const time = new Date(t.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                            const summary = (t.legs || []).map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
+                            const qtySum = (t.legs || []).reduce((acc, l) => acc + Math.abs(l.qty), 0);
+                            return `
+                                <tr>
+                                    <td style="padding: 0.5rem; font-size: 0.8rem;">${time}</td>
+                                    <td style="padding: 0.5rem; font-size: 0.8rem;">${summary}</td>
+                                    <td style="padding: 0.5rem; font-size: 0.8rem;">${qtySum}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                        ${historyArr.length === 0 ? '<tr><td colspan="3" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">No history</td></tr>' : ''}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+}
+
+function updateStrategies(inboundStrategies) {
     const grid = document.getElementById('strategy-grid');
-    for (let sid in strategies) {
-        let s = strategies[sid];
+    
+    for (let sid in inboundStrategies) {
+        const inbound = inboundStrategies[sid];
+        
+        // Merge Logic: Initialize or Update Cache
+        if (!strategyDataCache[sid]) {
+            strategyDataCache[sid] = { pnl: 0, traded: false, positions: [], history: [] };
+        }
+        
+        strategyDataCache[sid].pnl = inbound.pnl;
+        strategyDataCache[sid].traded = inbound.traded;
+        
+        if (inbound.positions !== undefined) strategyDataCache[sid].positions = inbound.positions;
+        if (inbound.history !== undefined) strategyDataCache[sid].history = inbound.history;
+        
+        const s = strategyDataCache[sid];
+        const pnlClass = s.pnl >= 0 ? 'green' : 'red';
         let card = document.getElementById(`strat-card-${sid}`);
 
+        // FAST TIER: Patch in-place if card already exists and no structural data arrived
+        if (card && inbound.positions === undefined && inbound.history === undefined) {
+            const pnlEl = card.querySelector('.strat-pnl');
+            if (pnlEl) { 
+                pnlEl.textContent = formatUSD(s.pnl); 
+                pnlEl.className = `strat-pnl ${pnlClass}`; 
+            }
+            const dot = card.querySelector('.status-dot');
+            if (dot) dot.className = `status-dot ${s.traded ? 'active' : ''}`;
+            continue; // Skip full rebuild
+        }
+
+        // SLOW TIER or first render: Full innerHTML rebuild
         if (!card) {
             card = document.createElement('div');
             card.id = `strat-card-${sid}`;
             card.className = 'strategy-card';
             grid.appendChild(card);
         }
-
-        const pnlClass = s.pnl >= 0 ? 'green' : 'red';
-        const historyArr = s.history || [];
-        const posCount = (s.positions && s.positions.length) ? s.positions.length : 0;
-        const isExpanded = strategyFoldStates[sid] || false;
-
-        card.innerHTML = `
-            <div class="strat-header foldable-header ${isExpanded ? 'active' : ''}" onclick="toggleStrategyFold('${sid}')">
-                <div class="strat-title-group">
-                    <span class="fold-icon">${isExpanded ? '▼' : '▶'}</span>
-                    <span class="strat-id">${sid}</span>
-                    <span class="status-dot ${s.traded ? 'active' : ''}"></span>
-                </div>
-                <div class="strat-pnl-group">
-                    <span class="strat-pnl ${pnlClass}">${formatUSD(s.pnl)}</span>
-                </div>
-            </div>
-            
-            <div class="strat-details-body ${isExpanded ? 'show' : 'hide'}">
-                <div class="metrics-grid" style="grid-template-columns: repeat(2, 1fr); margin-top: 1rem; margin-bottom: 1rem;">
-                    <div class="metric-card">
-                        <span class="label">Positions</span>
-                        <span class="value">${posCount}</span>
-                    </div>
-                    <div class="metric-card">
-                        <span class="label">Status Today</span>
-                        <span class="value" style="font-size: 0.9rem;">${s.traded ? 'TRADED' : 'WAITING'}</span>
-                    </div>
-                </div>
-                
-                <h4 style="margin: 0.8rem 0 0.4rem 0; font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Current Positions</h4>
-                <div class="strat-legs">
-                    ${(s.positions || []).map(p => `
-                        <div class="leg-row">
-                            <span class="side ${p.side === 'CALL' ? 'primary' : 'orange'}">${p.side} ${p.strike}</span>
-                            <span>Qty: ${p.qty}</span>
-                            <span class="${p.pnl >= 0 ? 'green' : 'red'}">${formatUSD(p.pnl)}</span>
-                        </div>
-                    `).join('')}
-                    ${posCount === 0 ? '<div style="color:var(--text-secondary); font-size:0.8rem;">Flat</div>' : ''}
-                </div>
-
-                <h4 style="margin: 1.2rem 0 0.4rem 0; font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Trade History</h4>
-                <div class="table-container" style="background: rgba(0,0,0,0.1); margin-top: 0.5rem; border-color: rgba(255,255,255,0.05);">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th style="padding: 0.5rem; font-size: 0.75rem;">Time</th>
-                                <th style="padding: 0.5rem; font-size: 0.75rem;">Trade</th>
-                                <th style="padding: 0.5rem; font-size: 0.75rem;">Qty</th>
-                                <th style="padding: 0.5rem; font-size: 0.75rem;">Credit</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${historyArr.map(t => {
-            const time = new Date(t.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            const summary = (t.legs || []).map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
-            const qtySum = (t.legs || []).reduce((acc, l) => acc + Math.abs(l.qty), 0);
-            return `
-                                    <tr>
-                                        <td style="padding: 0.5rem; font-size: 0.8rem;">${time}</td>
-                                        <td style="padding: 0.5rem; font-size: 0.8rem;">${summary}</td>
-                                        <td style="padding: 0.5rem; font-size: 0.8rem;">${qtySum}</td>
-                                    </tr>
-                                `;
-        }).join('')}
-                            ${historyArr.length === 0 ? '<tr><td colspan="4" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">No history</td></tr>' : ''}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        `;
+        renderStrategyCard(card, sid, s);
     }
 }
 
 function toggleStrategyFold(sid) {
     strategyFoldStates[sid] = !strategyFoldStates[sid];
+    const card = document.getElementById(`strat-card-${sid}`);
+    if (card && strategyDataCache[sid]) {
+        renderStrategyCard(card, sid, strategyDataCache[sid]);
+    }
 }
 
 function togglePortfolioFold(type) {
