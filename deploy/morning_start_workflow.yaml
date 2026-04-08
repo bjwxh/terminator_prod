@@ -82,7 +82,7 @@ start_vm_with_retries:
                     steps:
                       - log_error:
                           assign:
-                            - last_error: ${string(e)}
+                            - last_error: ${e.message}
               - wait_for_boot:
                   call: sys.sleep
                   args:
