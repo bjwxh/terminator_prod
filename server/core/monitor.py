@@ -138,6 +138,10 @@ class LiveTradingMonitor:
         self.order_queue: Optional[asyncio.Queue] = None  # Re-bound in run_live_monitor (same pattern as Bug 2)
         self.stats = TradeStats() # Enhancement 2: Trading Statistics
         self._last_snap: Optional[pd.DataFrame] = None # Cache for Greeks
+        
+        # DB Health Monitor (v1.2)
+        self.db_status = {"status": "Healthy", "age_minutes": 0, "should_alert": False}
+        self._last_db_alert_time = 0
         self._greek_cache: Dict[Tuple[str, int, str], Tuple[float, float]] = {} # (symbol, strike, side) -> (delta, theta)
         
         # Resolve DB path relative to project root if it's relative
@@ -372,6 +376,9 @@ class LiveTradingMonitor:
 
                 # 6. Order Execution Loop
                 tg.create_task(self._safe_task("OrderExecution", self.run_order_execution_loop))
+
+                # 7. DB Health Monitor (v1.2)
+                tg.create_task(self._safe_task("DBHealth", self._check_db_health_task))
                 
         except Exception as e:
             if not isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):
@@ -3402,3 +3409,84 @@ class LiveTradingMonitor:
                 if abs(sim_dict.get(key, 0.0) - eff_live_dict.get(key, 0.0)) > 0.01:
                     return False
         return True
+
+    async def _check_db_health_task(self):
+        """Background task to monitor DB data freshness EVERY 1 MINUTE (v1.2)"""
+        while self.is_running:
+            try:
+                now = datetime.now(CHICAGO)
+                
+                # Check market hours
+                if not self.is_market_open(now):
+                    self.db_status = {"status": "Sleep", "age_minutes": 0, "should_alert": False}
+                else:
+                    # Query latest record
+                    with closing(sqlite3.connect(self.db_path)) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT datetime FROM stock_options ORDER BY datetime DESC LIMIT 1")
+                        row = cursor.fetchone()
+                        
+                        if row:
+                            # DB Format: "2026-04-08T10:18:59.489128-05:00"
+                            last_ts = datetime.fromisoformat(row[0])
+                            # If timezone info is missing in DB (legacy/mock), assume CHICAGO
+                            if last_ts.tzinfo is None:
+                                last_ts = last_ts.replace(tzinfo=CHICAGO)
+                                
+                            diff = now - last_ts
+                            age_m = int(diff.total_seconds() / 60)
+                            
+                            if age_m > 2:
+                                self.logger.warning(f"DB LAG DETECTED: Last record is {age_m} minutes old.")
+                                # Update status and trigger alert
+                                was_lagging = (self.db_status["status"] == "Lag")
+                                self.db_status = {"status": "Lag", "age_minutes": age_m, "should_alert": not was_lagging}
+                                
+                                # Send Email Alert if not sent in the last 15 minutes
+                                if not was_lagging or (time.time() - self._last_db_alert_time > 900):
+                                    self._send_db_alert_email(age_m, last_ts)
+                                    self._last_db_alert_time = time.time()
+                            else:
+                                self.db_status = {"status": "Healthy", "age_minutes": age_m, "should_alert": False}
+                        else:
+                            self.db_status = {"status": "Lag", "age_minutes": 999, "should_alert": False}
+                            
+                await asyncio.sleep(60) # Check every 1 minute
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error in DB health task: {e}")
+                await asyncio.sleep(10)
+
+    def _send_db_alert_email(self, age_m: int, last_record_ts: datetime):
+        """Send DB Lag warning email to recipients"""
+        if not self.config.get('email_alerts_enabled', True): return
+        config_path = self.config.get('email_config_path')
+        if not config_path or not os.path.exists(config_path): return
+
+        try:
+            with open(config_path, 'r') as f:
+                ec = json.load(f)
+            recipients = self.config.get('email_recipients', ['frankwang.alert@gmail.com'])
+            
+            msg = MIMEMultipart()
+            msg['From'] = ec.get('from_email', ec.get('sender_email'))
+            msg['To'] = ", ".join(recipients)
+            msg['Subject'] = f"CRITICAL: Terminator DB Lag - {age_m} Minutes"
+            
+            body = (f"Terminator monitoring system has detected a database data lag.\n\n"
+                    f"Current Lag: {age_m} minutes\n"
+                    f"Last DB Entry: {last_record_ts.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+                    f"Current Time: {datetime.now(CHICAGO).strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
+                    f"The downloader service may have failed or lost connection to Schwab.")
+            msg.attach(MIMEText(body, 'plain'))
+            
+            pw = ec.get('password', ec.get('sender_password'))
+            # Use GMAIL SMTP with TLS as per existing pattern
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                server.starttls()
+                server.login(msg['From'], pw)
+                server.send_message(msg)
+            self.logger.info(f"DB Lag alert email sent (Lag: {age_m}m)")
+        except Exception as e:
+            self.logger.error(f"Failed to send DB lag email: {e}")

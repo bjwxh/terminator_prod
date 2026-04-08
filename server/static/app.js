@@ -191,6 +191,29 @@ function updateUI(state) {
     document.getElementById('trading-status').className = 'value ' + (state.trading_enabled ? 'status-connected' : 'status-disabled');
     tradingBtn.textContent = state.trading_enabled ? 'Disable trading' : 'Enable trading';
 
+    // DB Status (v1.2)
+    const dbStatusVal = document.getElementById('db-status');
+    if (dbStatusVal && state.db_status) {
+        const dbs = state.db_status.status;
+        const dba = state.db_status.age_minutes;
+        
+        if (dbs === "Sleep") {
+            dbStatusVal.textContent = "Sleep";
+            dbStatusVal.className = "value status-disabled";
+        } else if (dbs === "Lag") {
+            dbStatusVal.textContent = `Lag (${dba}m)`;
+            dbStatusVal.className = "value status-disconnected";
+        } else {
+            dbStatusVal.textContent = "Healthy";
+            dbStatusVal.className = "value status-connected";
+        }
+        
+        // Handle trigger for warning sound on Lag transition
+        if (dbs === "Lag" && state.db_status.should_alert) {
+            playAlertSound("error");
+        }
+    }
+
     // Exchange Clock (Chicago)
     if (state.exchange_ts && state.exchange_ts > 0) {
         const d = new Date(state.exchange_ts);

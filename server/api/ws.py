@@ -236,6 +236,7 @@ async def broadcast_state(monitor):
                 "status": status,
                 "broker_connected": broker_connected,
                 "trading_enabled": trading_enabled,
+                "db_status": monitor.db_status,
                 "heartbeat_failures": heartbeat_failures,
                 "working_orders": working_orders,
                 "sim": sim_data,
