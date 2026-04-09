@@ -772,15 +772,13 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
 }
 
 /* Sticky Columns for Tables */
-#positions-table, #orders-table {
+#positions-table {
     border-collapse: separate; 
     border-spacing: 0;
 }
 
 #positions-table th:nth-child(1),
-#positions-table td:nth-child(1),
-#orders-table th:nth-child(1),
-#orders-table td:nth-child(1) {
+#positions-table td:nth-child(1) {
     position: sticky;
     left: 0;
     z-index: 10;
@@ -790,9 +788,7 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
 }
 
 #positions-table th:nth-child(2),
-#positions-table td:nth-child(2),
-#orders-table th:nth-child(2),
-#orders-table td:nth-child(2) {
+#positions-table td:nth-child(2) {
     position: sticky;
     left: 80px;
     z-index: 10;
@@ -807,14 +803,12 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
     position: sticky;
     top: 0;
     z-index: 12;
+    background-color: #1c2128; /* Solid background for sticky headers */
 }
 
 #positions-table th:nth-child(1),
-#positions-table th:nth-child(2),
-#orders-table th:nth-child(1),
-#orders-table th:nth-child(2) {
-    z-index: 13;
-    background-color: #1c2128;
+#positions-table th:nth-child(2) {
+    z-index: 13; /* Higher z-index for the intersection of sticky col and sticky header */
 }
 
 .table-container {
