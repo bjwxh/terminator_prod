@@ -106,8 +106,8 @@ class OptionsDownloader:
 
     async def initialize_client(self):
         try:
-            creds_path = os.path.expanduser("~/.api_keys/sli_api.json")
-            token_path = os.path.expanduser("~/.api_keys/sli_token.json")
+            creds_path = os.path.expanduser("~/.api_keys/schwab/sli_api.json")
+            token_path = os.path.expanduser("~/.api_keys/schwab/sli_token.json")
             
             with open(creds_path, 'r') as f:
                 creds = json.load(f)

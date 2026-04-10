@@ -16,13 +16,16 @@ def calculate_stats(df, label):
         return {
             "Label": label, "Days": 0, "Total PnL": "$0.00", "Trades/Day": "0.0",
             "Total Fees": "$0.00", "Net PnL": "$0.00", "Win %": "0%",
-            "Profit Factor": "0.00", "Sharpe": "0.00", "Max DD": "$0.00"
+            "Profit Factor": "0.00", "Sharpe": "0.00", "Max DD": "$0.00",
+            "OverTrade": "0.0%", "PnL Diff": "$0.00"
         }
     
     # Core series
     daily_net = df['real_net_pnl']
     daily_gross = df['real_gross_pnl']
     daily_trades = df['real_trades']
+    sim_net = df['sim_net_pnl']
+    sim_trades = df['sim_trades']
     
     days = len(df)
     total_pnl = daily_gross.sum()
@@ -51,6 +54,12 @@ def calculate_stats(df, label):
     drawdown = cum_pnl - running_max
     max_dd = drawdown.min()
     
+    # OverTrade % and PnL Diff
+    sum_real_trades = daily_trades.sum()
+    sum_sim_trades = sim_trades.sum()
+    overtrade_pc = (sum_real_trades / sum_sim_trades - 1) * 100 if sum_sim_trades > 0 else 0
+    pnl_diff = total_net - sim_net.sum()
+    
     return {
         "Label": label,
         "Days": days,
@@ -61,7 +70,9 @@ def calculate_stats(df, label):
         "Win %": f"{win_pc:.1f}%",
         "Profit Factor": f"{profit_factor:.2f}",
         "Sharpe": f"{sharpe:.2f}",
-        "Max DD": f"${max_dd:,.2f}"
+        "Max DD": f"${max_dd:,.2f}",
+        "OverTrade": f"{overtrade_pc:.1f}%",
+        "PnL Diff": f"${pnl_diff:,.2f}"
     }
 
 def main():
@@ -113,10 +124,10 @@ def main():
     stats_list = [last_5, last_22, ytd, all_time]
     
     # Build Markdown Table
-    md_table = "| Period | Days | Total PnL | Trades/Day | Fees | Net PnL | Win % | Profit Factor | Sharpe | Max DD |\n"
-    md_table += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+    md_table = "| Period | Days | Total PnL | Trades/Day | Fees | Net PnL | Win % | Profit Factor | Sharpe | Max DD | Live OverTrade % | Live-Sim Net PnL Diff |\n"
+    md_table += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
     for s in stats_list:
-        md_table += f"| {s['Label']} | {s['Days']} | {s['Total PnL']} | {s['Trades/Day']} | {s['Total Fees']} | **{s['Net PnL']}** | {s['Win %']} | {s['Profit Factor']} | {s['Sharpe']} | {s['Max DD']} |\n"
+        md_table += f"| {s['Label']} | {s['Days']} | {s['Total PnL']} | {s['Trades/Day']} | {s['Total Fees']} | **{s['Net PnL']}** | {s['Win %']} | {s['Profit Factor']} | {s['Sharpe']} | {s['Max DD']} | {s['OverTrade']} | {s['PnL Diff']} |\n"
 
     # Update README
     with open(README_PATH, 'r') as f:

@@ -27,8 +27,8 @@ fetch_secret_to_stdout() {
 
 # 2. Fetch Schwab API keys & token
 echo "Fetching Schwab keys from Secret Manager..."
-fetch_secret_to_stdout "schwab-api-keys" > "$TARGET_DIR/sli_api.json"
-fetch_secret_to_stdout "schwab-token" > "$TARGET_DIR/sli_token.json"
+fetch_secret_to_stdout "schwab-api-keys" > "$TARGET_DIR/sli_api.json.tmp" && mv "$TARGET_DIR/sli_api.json.tmp" "$TARGET_DIR/sli_api.json"
+fetch_secret_to_stdout "schwab-token" > "$TARGET_DIR/sli_token.json.tmp" && mv "$TARGET_DIR/sli_token.json.tmp" "$TARGET_DIR/sli_token.json"
 chmod 600 "$TARGET_DIR/sli_api.json" "$TARGET_DIR/sli_token.json"
 echo "✅ Schwab keys synchronized."
 
