@@ -188,7 +188,9 @@ async def broadcast_state(monitor):
                             "positions": [
                                 {
                                     "symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity, 
-                                    "pnl": round(float(p.current_day_pnl), 2), "delta": round(float(p.delta), 4),
+                                    "pnl": round(float(p.current_day_pnl), 2), 
+                                    "sim_pnl": round((p.mid_price - p.entry_price) * p.quantity * 100, 2),
+                                    "delta": round(float(p.delta), 4),
                                     "bid": round(float(p.bid_price), 2), "ask": round(float(p.ask_price), 2)
                                 }
                                 for p in s.portfolio.positions

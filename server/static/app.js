@@ -686,6 +686,7 @@ function renderStrategyCard(card, sid, s) {
                                 <th>Bid</th>
                                 <th>Ask</th>
                                 <th>Delta</th>
+                                <th>Sim PnL</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -699,9 +700,10 @@ function renderStrategyCard(card, sid, s) {
                                     <td>${(typeof p.bid === 'number') ? p.bid.toFixed(2) : '-'}</td>
                                     <td>${(typeof p.ask === 'number') ? p.ask.toFixed(2) : '-'}</td>
                                     <td>${(typeof p.delta === 'number') ? p.delta.toFixed(2) : '-'}</td>
+                                    <td class="${p.sim_pnl >= 0 ? 'green' : 'red'}" style="font-weight:600;">${formatUSD(p.sim_pnl || 0)}</td>
                                 </tr>
                             `).join('')}
-                            ${posCount === 0 ? '<tr><td colspan="6" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">Flat</td></tr>' : ''}
+                            ${posCount === 0 ? '<tr><td colspan="7" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">Flat</td></tr>' : ''}
                         </tbody>
                     </table>
                 </div>
