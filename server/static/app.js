@@ -676,14 +676,35 @@ function renderStrategyCard(card, sid, s) {
             
             <h4 style="margin: 0.8rem 0 0.4rem 0; font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Current Positions</h4>
             <div class="strat-legs">
-                ${(s.positions || []).map(p => `
-                    <div class="leg-row">
-                        <span class="side ${p.side === 'CALL' ? 'primary' : 'orange'}">${p.side} ${p.strike}</span>
-                        <span>Qty: ${p.qty}</span>
-                        <span class="${p.pnl >= 0 ? 'green' : 'red'}">${formatUSD(p.pnl)}</span>
-                    </div>
-                `).join('')}
-                ${posCount === 0 ? '<div style="color:var(--text-secondary); font-size:0.8rem;">Flat</div>' : ''}
+                <div class="table-container mini-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Side</th>
+                                <th>Strike</th>
+                                <th>Qty</th>
+                                <th>Bid</th>
+                                <th>Ask</th>
+                                <th>Delta</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${(s.positions || [])
+                                .sort((a, b) => a.strike - b.strike)
+                                .map(p => `
+                                <tr>
+                                    <td class="side ${p.side === 'CALL' ? 'primary' : 'orange'}" style="font-weight:600;">${p.side}</td>
+                                    <td>${p.strike}</td>
+                                    <td>${p.qty}</td>
+                                    <td>${(typeof p.bid === 'number') ? p.bid.toFixed(2) : '-'}</td>
+                                    <td>${(typeof p.ask === 'number') ? p.ask.toFixed(2) : '-'}</td>
+                                    <td>${(typeof p.delta === 'number') ? p.delta.toFixed(2) : '-'}</td>
+                                </tr>
+                            `).join('')}
+                            ${posCount === 0 ? '<tr><td colspan="6" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">Flat</td></tr>' : ''}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <h4 style="margin: 1.2rem 0 0.4rem 0; font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase;">Trade History</h4>

@@ -434,19 +434,29 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
 .strat-legs {
     margin-top: 1rem;
     padding-top: 1rem;
-    border-top: 1px solid var(--border-color);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.leg-row {
-    display: grid;
-    grid-template-columns: 1.5fr 1fr 1fr 1fr;
-    font-size: 0.8rem;
-    padding: 0.3rem 0;
-    border-bottom: 1px solid rgba(255,255,255,0.03);
+.mini-table {
+    background: rgba(0, 0, 0, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.03) !important;
 }
 
-.leg-row:last-child { border-bottom: none; }
-.leg-row .side { font-weight: 600; }
+.mini-table table th {
+    padding: 0.6rem 0.8rem;
+    font-size: 0.7rem;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.mini-table table td {
+    padding: 0.6rem 0.8rem;
+    font-size: 0.75rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.mini-table table tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
 
 .foldable {
     cursor: pointer;
