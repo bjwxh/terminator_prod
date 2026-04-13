@@ -718,18 +718,20 @@ function renderStrategyCard(card, sid, s) {
                         </tr>
                     </thead>
                     <tbody>
-                        ${historyArr.map(t => {
-                            const time = new Date(t.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                            const summary = (t.legs || []).map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
-                            const qtySum = (t.legs || []).reduce((acc, l) => acc + Math.abs(l.qty), 0);
-                            return `
-                                <tr>
-                                    <td style="padding: 0.5rem; font-size: 0.8rem;">${time}</td>
-                                    <td style="padding: 0.5rem; font-size: 0.8rem;">${summary}</td>
-                                    <td style="padding: 0.5rem; font-size: 0.8rem;">${qtySum}</td>
-                                </tr>
-                            `;
-                        }).join('')}
+                        ${historyArr
+                            .sort((a, b) => new Date(b.ts) - new Date(a.ts))
+                            .map(t => {
+                                const time = new Date(t.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                                const summary = (t.legs || []).map(l => `${l.qty > 0 ? '+' : ''}${l.qty} ${l.side[0]}${l.strike}`).join(', ');
+                                const qtySum = (t.legs || []).reduce((acc, l) => acc + Math.abs(l.qty), 0);
+                                return `
+                                    <tr>
+                                        <td style="padding: 0.5rem; font-size: 0.8rem;">${time}</td>
+                                        <td style="padding: 0.5rem; font-size: 0.8rem;">${summary}</td>
+                                        <td style="padding: 0.5rem; font-size: 0.8rem;">${qtySum}</td>
+                                    </tr>
+                                `;
+                            }).join('')}
                         ${historyArr.length === 0 ? '<tr><td colspan="3" style="text-align:center; padding: 1rem; color:var(--text-secondary); font-size:0.8rem;">No history</td></tr>' : ''}
                     </tbody>
                 </table>

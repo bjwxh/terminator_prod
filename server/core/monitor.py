@@ -1195,14 +1195,8 @@ class LiveTradingMonitor:
                     if sid in self.active_order_signals:
                         continue
 
-                    for p in s.portfolio.positions:
-                        p_strike_int = int(round(p.strike))
-                        key = (p_strike_int, p.side)
-                        if key in snap_indexed.index:
-                            row = snap_indexed.loc[[key]].iloc[0]
-                            p.delta = row['delta']
-                            p.price = row['mid_price']
-                            p.theta = float(row['theta']) if not pd.isna(row['theta']) else 0.0
+                    # Poke unified pricing helper (Bug 20260413 Fix: Ensure Sub-Strategies get Bid/Ask)
+                    self._update_all_pricing(snap=snap, snap_indexed=snap_indexed)
                     
                     # Check for entry
                     if not s.has_traded_today and t_time < end_time_obj:
@@ -1601,9 +1595,14 @@ class LiveTradingMonitor:
                 await asyncio.sleep(1)
         return {}
 
-    def _update_all_pricing(self, quotes: Dict[str, Dict], snap: Optional[pd.DataFrame] = None, snap_indexed: Optional[pd.DataFrame] = None):
-        """Update both sim and live portfolios with latest quotes using robust matching (P2 Fix)"""
-        for portfolio in [self.combined_portfolio, self.live_combined_portfolio]:
+    def _update_all_pricing(self, quotes: Optional[Dict[str, Dict]] = None, snap: Optional[pd.DataFrame] = None, snap_indexed: Optional[pd.DataFrame] = None):
+        """Update both sim and live portfolios (including sub-strategies) with latest quotes (P2 + Bid/Ask Fix)"""
+        all_portfolios = [self.combined_portfolio, self.live_combined_portfolio]
+        for s in self.sub_strategies.values():
+            if s.portfolio not in all_portfolios:
+                all_portfolios.append(s.portfolio)
+
+        for portfolio in all_portfolios:
             for p in portfolio.positions:
                 found = False
                 
@@ -2667,14 +2666,9 @@ class LiveTradingMonitor:
                 if t_time < s.trade_start_time:
                     continue
                 
-                # Update current position valuation (deltas/prices)
-                for p in s.portfolio.positions:
-                    p_key = (int(round(p.strike)), p.side)
-                    if p_key in snap_indexed.index:
-                        p_row = snap_indexed.loc[[p_key]].iloc[0]
-                        p.delta = p_row['delta']
-                        p.price = p_row['mid_price']
-                        p.theta = float(p_row['theta']) if not pd.isna(p_row['theta']) else 0.0
+                # Update current position valuation (deltas/prices/bid/ask) via unified helper
+                # Note: quotes=None here because historical sim uses snapshot data only
+                self._update_all_pricing(snap=snap, snap_indexed=snap_indexed)
                 
                 # If not yet engaged, try to open the Iron Condor
                 if not s.has_traded_today:
@@ -2721,20 +2715,7 @@ class LiveTradingMonitor:
                         self.combined_portfolio.add_trade(mt)
                 self._reconcile_combined_simulation()
             
-            # Final step: record deltas and history for chart
-            active_ports = [self.combined_portfolio, self.live_combined_portfolio]
-            for s in self.sub_strategies.values():
-                if s.has_traded_today:
-                    active_ports.append(s.portfolio)
-
-            for port in active_ports:
-                for p in port.positions:
-                    p_key = (int(round(p.strike)), p.side)
-                    if p_key in snap_indexed.index:
-                        row = snap_indexed.loc[[p_key]].iloc[0]
-                        p.delta = float(row['delta']) if not pd.isna(row['delta']) else 0.0
-                        p.price = row['mid_price']
-                        p.theta = float(row['theta']) if not pd.isna(row['theta']) else 0.0
+            # Final step: record deltas and history for chart (Already updated via _update_all_pricing above)
 
             if collect_history:
                 sim_d = self.combined_portfolio.get_all_deltas(snap)
