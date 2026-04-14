@@ -90,7 +90,6 @@ terminator_prod/
 | Test suite from terminator | Kept in sandbox; prod has smoke tests only |
 | Session archive files (`session_state_MMDD.json`) | Runtime artifacts, gitignored |
 | Credentials (`sli_api.json`, `sli_token.json`, `fw_trd_key.json`) | Never in git |
-| `v4_eod_history.csv` | Runtime artifact, gitignored; lives on MacBook |
 
 ### 2.4 Secrets Management
 

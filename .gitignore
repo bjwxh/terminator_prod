@@ -10,7 +10,6 @@ __pycache__/
 
 # Session state
 session_state*.json
-v4_eod_history.csv
 
 # Logs
 *.log
