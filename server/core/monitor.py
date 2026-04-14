@@ -144,6 +144,7 @@ class LiveTradingMonitor:
         # DB Health Monitor (v1.2)
         self.db_status = {"status": "Healthy", "age_minutes": 0, "should_alert": False}
         self._greek_cache: Dict[Tuple[str, int, str], Tuple[float, float]] = {} # (symbol, strike, side) -> (delta, theta)
+        self._last_suppression_fingerprint: Optional[FrozenSet[Tuple[int, str, int]]] = None
         
         # Resolve DB path relative to project root if it's relative
         self.db_path = self.config.get('db_path', 'data/spx_0dte.db')
@@ -2333,6 +2334,7 @@ class LiveTradingMonitor:
             self.logger.debug("Reconciliation passed: Sim matches Live")
             with self._data_lock:
                 self.last_reconciliation_trade = None
+            self._last_suppression_fingerprint = None
             return
 
         # Bug 8 Fix: Use tracker set for robust check 
@@ -2423,7 +2425,10 @@ class LiveTradingMonitor:
                 if not in_queue:
                     # Filter out if the plan is actually empty (already sync'd by manual order)
                     if not plan['to_submit'] and not plan['to_cancel']:
-                        self.logger.info("Reconciliation GAP_SYNC generated, but broker already has matching orders. Suppressing pop.")
+                        fingerprint = frozenset(self._get_leg_fingerprint(recon_trade))
+                        if fingerprint != self._last_suppression_fingerprint:
+                            self.logger.info("Reconciliation GAP_SYNC generated, but broker already has matching orders. Suppressing pop.")
+                            self._last_suppression_fingerprint = fingerprint
                         return
 
                     self.logger.info(f"Adding RECON trade to queue for strategy {recon_trade.strategy_id} with {len(recon_trade.legs)} legs")
@@ -3232,7 +3237,11 @@ class LiveTradingMonitor:
                 covered_count += 1
 
         if covered_count > 0:
-            self.logger.info(f"Adjusted execution plan: {covered_count} legs covered by working orders. Remaining: {len(remaining_legs)}")
+            msg = f"Adjusted execution plan: {covered_count} legs covered by working orders. Remaining: {len(remaining_legs)}"
+            if len(remaining_legs) > 0:
+                self.logger.info(msg)
+            else:
+                self.logger.debug(msg)
 
         to_submit = self._get_smart_chunks(remaining_legs)
 
