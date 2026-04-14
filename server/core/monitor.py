@@ -2189,6 +2189,8 @@ class LiveTradingMonitor:
     def _update_live_portfolio(self, broker_positions: List[Dict]):
         """Update live_combined_portfolio with actual broker positions, robustly parsing Schwab JSON. (Bug Fix: Raw Parsing)"""
         self.live_combined_portfolio.positions = []
+        self.live_combined_portfolio._position_dict = {}
+        self.live_combined_portfolio._margin_dirty = True
         for bp in broker_positions:
             instr = bp.get('instrument', {})
             symbol = instr.get('symbol', 'N/A')
@@ -2239,7 +2241,7 @@ class LiveTradingMonitor:
             mkt_val = bp.get('marketValue', 0)
             mid_price = mkt_val / (quantity * 100) if quantity != 0 else 0
             
-            self.live_combined_portfolio.positions.append(OptionLeg(
+            new_leg = OptionLeg(
                 symbol=symbol,
                 strike=strike_val,
                 side=side_val,
@@ -2251,10 +2253,12 @@ class LiveTradingMonitor:
                 current_day_pnl=bp.get('currentDayProfitLoss', 0.0),
                 delta=delta,
                 theta=theta
-            ))
+            )
+            self.live_combined_portfolio.positions.append(new_leg)
+            self.live_combined_portfolio._position_dict[k] = new_leg
             
-        # Trigger margin recalculation
-        self.live_combined_portfolio.max_margin = self.live_combined_portfolio.calculate_standard_margin()
+        # Trigger margin recalculation via the lazy property (sets _cached_margin, max_margin, clears dirty flag)
+        _ = self.live_combined_portfolio.current_margin
         self.logger.debug(f"Updated live portfolio: {len(self.live_combined_portfolio.positions)} active positions. Margin: ${self.live_combined_portfolio.max_margin:,.2f}")
 
     def _get_live_filled_positions(self) -> Dict[Tuple[int, str], float]:
