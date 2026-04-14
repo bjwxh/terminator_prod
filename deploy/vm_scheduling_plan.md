@@ -8,7 +8,7 @@ The system uses **Google Cloud Workflows** and **Cloud Scheduler** to manage the
 | Component | Role | Zone | Machine Type |
 | :--- | :--- | :--- | :--- |
 | `production-server` | **Primary** | `us-central1-a` | n2-standard-2 |
-| `production-server-backup` | **Backup** | `us-central1-c` | n2-standard-2 |
+| `production-server-sc` | **Backup (Failover)** | `us-east1-b` | n2-standard-2 |
 
 ---
 
@@ -17,7 +17,7 @@ The system uses **Google Cloud Workflows** and **Cloud Scheduler** to manage the
 ### 1. Morning Start (08:15 AM)
 **Mechanism:** GCP Cloud Workflow (`terminator-morning-start`)
 *   **Step 1:** Attempts to start `production-server` (up to 3 times, with 60s waits).
-*   **Step 2 (Failover):** If the primary fails to start after 3 attempts, the workflow attempts to start `production-server-backup` (up to 3 times, with 60s waits).
+*   **Step 2 (Failover):** If the primary fails to start after 3 attempts, the workflow attempts to start `production-server-sc` (up to 3 times, with 60s waits).
 *   **Step 3 (Alert):** If both VMs fail to start after their respective retries, a critical alert is sent via GCP Pub/Sub (`terminator-alerts`).
 *   **Goal:** Ensure a VM is ready by 08:20 AM for key synchronization.
 
@@ -30,7 +30,7 @@ The system uses **Google Cloud Workflows** and **Cloud Scheduler** to manage the
 ### 3. Conflict Monitor (Every 30m, 08:30 AM - 15:30 PM)
 **Mechanism:** GCP Cloud Workflow (`terminator-conflict-monitor`)
 *   Periodically checks if **both** VMs are running simultaneously.
-*   If a conflict is detected, it immediately sends a `STOP` signal to `production-server-backup` to prevent duplicate trade execution.
+*   If a conflict is detected, it immediately sends a `STOP` signal to `production-server-sc` to prevent duplicate trade execution.
 
 ### 4. End of Day (15:15 PM)
 **Mechanism:** Local Crontab (on both VMs)
@@ -39,7 +39,7 @@ The system uses **Google Cloud Workflows** and **Cloud Scheduler** to manage the
 
 ### 5. Evening Stop (15:30 PM)
 **Mechanism:** Cloud Scheduler
-*   Sends a hardcoded `STOP` signal to both `production-server` and `production-server-backup`.
+*   Sends a hardcoded `STOP` signal to both `production-server` and `production-server-sc`.
 *   This ensures all trading-related compute costs are zeroed out until the next morning.
 
 ---

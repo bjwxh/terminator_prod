@@ -7,21 +7,21 @@ main:
           project: "terminator-478221"
           zone: "us-central1-a"
         result: primary_res
-    - check_backup:
+    - check_sc:
         call: googleapis.compute.v1.instances.get
         args:
-          instance: "production-server-backup"
+          instance: "production-server-sc"
           project: "terminator-478221"
-          zone: "us-central1-c"
-        result: backup_res
+          zone: "us-east1-b"
+        result: sc_res
     - evaluate_conflict:
         switch:
-          - condition: ${primary_res.status == "RUNNING" and backup_res.status == "RUNNING"}
-            next: stop_backup
+          - condition: ${primary_res.status == "RUNNING" and sc_res.status == "RUNNING"}
+            next: stop_sc
         next: end
-    - stop_backup:
+    - stop_sc:
         call: googleapis.compute.v1.instances.stop
         args:
-          instance: "production-server-backup"
+          instance: "production-server-sc"
           project: "terminator-478221"
-          zone: "us-central1-c"
+          zone: "us-east1-b"

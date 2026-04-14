@@ -10,13 +10,13 @@ main:
         retry:
           predicate: ${http.default_retry_predicate}
           max_retries: 3
-    - stop_backup:
+    - stop_sc:
         try:
           call: googleapis.compute.v1.instances.stop
           args:
-            instance: "production-server-backup"
+            instance: "production-server-sc"
             project: "terminator-478221"
-            zone: "us-central1-c"
+            zone: "us-east1-b"
         retry:
           predicate: ${http.default_retry_predicate}
           max_retries: 3

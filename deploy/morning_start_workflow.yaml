@@ -6,8 +6,8 @@ main:
           - project: "terminator-478221"
           - primary_instance: "production-server"
           - primary_zone: "us-central1-a"
-          - backup_instance: "production-server-backup"
-          - backup_zone: "us-central1-c"
+          - backup_instance: "production-server-sc"
+          - backup_zone: "us-east1-b"
           - max_retries: 3
 
     - start_primary:
@@ -47,7 +47,7 @@ main:
               - data: '${base64.encode(text.encode("CRITICAL: Both primary and backup VMs failed to start after 3 attempts each."))}'
     
     - final_fail:
-        raise: "Both production-server and production-server-backup failed to start after maximum retries."
+        raise: "Both production-server and production-server-sc failed to start after maximum retries."
 
 start_vm_with_retries:
   params: [project, instance, zone, retries]
