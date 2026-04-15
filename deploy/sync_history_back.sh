@@ -5,8 +5,8 @@
 PROJECT="terminator-478221"
 PRIMARY_VM="production-server"
 PRIMARY_ZONE="us-central1-a"
-BACKUP_VM="production-server-backup"
-BACKUP_ZONE="us-central1-c"
+BACKUP_VM="production-server-sc"
+BACKUP_ZONE="us-east1-b"
 
 # Configuration
 GCLOUD="/Users/fw/google-cloud-sdk/bin/gcloud"
