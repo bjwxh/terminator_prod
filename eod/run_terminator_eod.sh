@@ -26,9 +26,9 @@ fi
 # 2. Run local EOD report script
 echo "Step 2: Generating EOD Report..."
 cd "$LOCAL_GIT_DIR"
-source .venv/bin/activate || echo "  Warning: .venv not found, using system python"
 
-python eod/eod_report.py --session "$TEMP_SESSION"
+PYTHON_BIN="/Users/fw/anaconda3/envs/terminator/bin/python"
+$PYTHON_BIN eod/eod_report.py --session "$TEMP_SESSION"
 
 echo "Step 3: Cleanup..."
 # Keep it in /tmp for today, automatic cleanup by OS

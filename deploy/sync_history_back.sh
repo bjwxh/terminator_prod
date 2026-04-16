@@ -55,15 +55,32 @@ if [ -z "$VM_NAME" ]; then
     exit 0
 fi
 
-# 2. Pull history CSV from VM
-echo "Pulling $HISTORY_FILE from $VM_NAME..."
-$GCLOUD compute scp "$VM_NAME:$VM_EOD_DIR/$HISTORY_FILE" "$LOCAL_EOD_DIR/" \
+# 2. Pull history CSV from VM to temporary location
+TEMP_VM_CSV="/tmp/vm_$HISTORY_FILE"
+echo "Pulling $HISTORY_FILE from $VM_NAME to temporary location..."
+$GCLOUD compute scp "$VM_NAME:$VM_EOD_DIR/$HISTORY_FILE" "$TEMP_VM_CSV" \
     --project="$PROJECT" --zone="$ZONE" --quiet
 
 if [ $? -eq 0 ]; then
-    echo "History CSV pulled successfully from $VM_NAME."
-    # Optional: Backup the local file just in case
-    cp "$LOCAL_EOD_DIR/$HISTORY_FILE" "$LOCAL_EOD_DIR/$HISTORY_FILE.bak.$(date +%Y%m%d)"
+    echo "Temporary history CSV pulled successfully. Starting smart merge..."
+    
+    # 3. Perform Smart Merge
+    # Use the conda environment as requested
+    PYTHON_BIN="/Users/fw/anaconda3/envs/terminator/bin/python"
+    $PYTHON_BIN "$LOCAL_EOD_DIR/../deploy/smart_merge_history.py" "$LOCAL_EOD_DIR/$HISTORY_FILE" "$TEMP_VM_CSV"
+    
+    if [ $? -eq 0 ]; then
+        echo "Smart merge complete."
+        # Backup the updated local file
+        cp "$LOCAL_EOD_DIR/$HISTORY_FILE" "$LOCAL_EOD_DIR/$HISTORY_FILE.bak.$(date +%Y%m%d)"
+    else
+        send_alert "FAILED to perform smart merge of $HISTORY_FILE."
+        rm -f "$TEMP_VM_CSV"
+        exit 1
+    fi
+    
+    # Clean up
+    rm -f "$TEMP_VM_CSV"
 else
     send_alert "FAILED to pull $HISTORY_FILE from $VM_NAME ($ZONE) at EOD."
     exit 1
