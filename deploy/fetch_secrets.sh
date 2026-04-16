@@ -51,7 +51,20 @@ if [ -n "$GITHUB_TOKEN" ] && [ "$GITHUB_TOKEN" != "null" ]; then
     if [ $? -eq 0 ]; then
         echo "✅ Code update complete (or already up to date)."
     else
-        echo "⚠️  WARNING: Failed to pull latest code from GitHub."
+        echo "❌ ERROR: Failed to pull latest code from GitHub. Sending alert..."
+        # Call python one-liner to send emergency email alert
+        /home/fw/terminator_prod/.venv/bin/python3 -c "
+import asyncio, os, json, sys
+sys.path.append('server')
+from notifications import notify_all
+config = {
+    'email_alerts_enabled': True,
+    'email_config_path': os.path.expanduser('~/.api_keys/gmail/fw_trd_key.json'),
+    'email_recipients': ['frankwang.alert@gmail.com'],
+    'ntfy_enabled': False
+}
+asyncio.run(notify_all(config, 'CRITICAL: Git pull failed on VM startup. VM is running on STALE code.', title='Terminator Deploy Alert'))
+"
     fi
 else
     echo "⚠️  WARNING: Github PAT not found. Skipping code update."
