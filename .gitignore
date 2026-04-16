@@ -27,4 +27,5 @@ Icon
 data/
 server/market_data.db
 server/spx_0dte.db
+eod/terminator_eod_history.csv
 !data/README.md  # If you want to keep the folder structure
