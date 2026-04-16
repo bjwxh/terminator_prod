@@ -5,7 +5,9 @@
 PROJECT="terminator-478221"
 REPO_DIR="/home/fw/terminator_prod"
 TARGET_DIR="/home/fw/.api_keys/schwab"
+GMAIL_DIR="/home/fw/.api_keys/gmail"
 mkdir -p "$TARGET_DIR"
+mkdir -p "$GMAIL_DIR"
 
 # 1. Get Access Token from Metadata Server
 echo "Fetching access token from Metadata Server..."
@@ -31,6 +33,11 @@ fetch_secret_to_stdout "schwab-api-keys" > "$TARGET_DIR/sli_api.json.tmp" && mv 
 fetch_secret_to_stdout "schwab-token" > "$TARGET_DIR/sli_token.json.tmp" && mv "$TARGET_DIR/sli_token.json.tmp" "$TARGET_DIR/sli_token.json"
 chmod 600 "$TARGET_DIR/sli_api.json" "$TARGET_DIR/sli_token.json"
 echo "✅ Schwab keys synchronized."
+
+# 2.5 Fetch Gmail SMTP keys
+echo "Fetching Gmail keys from Secret Manager..."
+fetch_secret_to_stdout "gmail-smtp-keys" > "$GMAIL_DIR/fw_trd_key.json.tmp" && mv "$GMAIL_DIR/fw_trd_key.json.tmp" "$GMAIL_DIR/fw_trd_key.json"
+chmod 600 "$GMAIL_DIR/fw_trd_key.json"
 
 # 3. Pull latest code from GitHub (Automated Deploy)
 echo "Checking for code updates from GitHub..."
