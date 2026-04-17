@@ -97,15 +97,29 @@ async def broadcast_state(monitor):
                             entered_str = edt.strftime('%H:%M:%S')
                         except: pass
 
-                    # 2. Extract Leg Details
+                    # 2. Extract Quantities (Support Partial Fills)
+                    total_orig = float(o.get('quantity', 0))
+                    filled = float(o.get('filledQuantity', 0))
+                    remaining = float(o.get('remainingQuantity', total_orig - filled))
+                    
+                    # Determine Status label (REFIX: use order_status to avoid shadowing ws.py:84)
+                    order_status = o.get('status', 'WORKING')
+                    if filled > 0 and remaining > 0:
+                        order_status = "PARTIAL FILL"
+                    
+                    # Leg aggregation ratio
+                    ratio = remaining / total_orig if total_orig > 0 else 1.0
+
+                    # 3. Extract Leg Details (showing ONLY remaining quantities for clarity)
                     legs_coll = o.get('orderLegCollection', [])
                     leg_texts = []
-                    total_qty = 0
+                    total_rem_leg_qty = 0
                     for leg in legs_coll:
                         instr = leg.get('instrument', {})
                         sym = instr.get('symbol', 'N/A')
-                        l_qty = int(leg.get('quantity', 0))
-                        total_qty += l_qty
+                        l_orig_qty = int(leg.get('quantity', 0))
+                        l_rem_qty = int(l_orig_qty * ratio)
+                        total_rem_leg_qty += l_rem_qty
                         
                         # Use existing monitor helper to parse strikes/sides
                         parsed = monitor._parse_schwab_symbol(sym)
@@ -114,7 +128,7 @@ async def broadcast_state(monitor):
                             prefix = '-' if 'SELL' in instruction else '+'
                             side_ch = parsed['side'][0] # 'C' or 'P'
                             strike = int(parsed['strike'])
-                            leg_texts.append(f"{prefix}{l_qty}{side_ch}{strike}")
+                            leg_texts.append(f"{prefix}{l_rem_qty}{side_ch}{strike}")
                         else:
                             leg_texts.append(sym)
 
@@ -132,10 +146,10 @@ async def broadcast_state(monitor):
                         "id": o.get('orderId'), 
                         "symbol": ", ".join(leg_texts),
                         "side": side,
-                        "qty": total_qty, 
+                        "qty": total_rem_leg_qty, 
                         "price": o.get('price'), 
                         "mark": monitor.get_order_mark(o),
-                        "status": o.get('status')
+                        "status": order_status
                     })
                 logs = list(monitor.logs)
                 

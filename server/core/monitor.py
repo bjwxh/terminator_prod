@@ -719,30 +719,53 @@ class LiveTradingMonitor:
                 broker_positions = acc_data.get('positions', [])
                 self._update_live_portfolio(broker_positions)
 
-                # 2. Update Trades (FILLED today)
-                # Filter locally for trades filled today after 8:30
-                filled_orders = [o for o in ord_data if o.get('status') == 'FILLED']
-                
-                # Convert filled orders to Trade objects
-                broker_trades = []
-                for o in filled_orders:
-                    trades = self._convert_order_to_trade(o)
-                    broker_trades.extend(trades)
+                # 2. Update Trades (Any order with filled quantity today)
+                # Filter locally for trades with activity after 8:30
+                exec_orders = [o for o in ord_data if o.get('filledQuantity', 0) > 0]
 
-                # Bug 2 Fix: Merge incoming filled trades with existing set instead of replacing
-                # Use order_id as deduplication key to prevent losing history on empty API responses
-                existing_ids = {t.order_id for t in self.live_combined_portfolio.trades if t.order_id}
-                new_trades = [t for t in broker_trades if t.order_id and t.order_id not in existing_ids]
-                
-                if new_trades:
-                    self.live_combined_portfolio.trades.extend(new_trades)
-                    self.logger.info(f"Added {len(new_trades)} new filled trade(s) from broker sync.")
+                for o in exec_orders:
+                    oid = str(o.get('orderId'))
+                    current_filled = float(o.get('filledQuantity', 0))
+
+                    # Find existing trade record for this order
+                    existing_trade = next((t for t in self.live_combined_portfolio.trades if t.order_id == oid), None)
+
+                    # Check how much we've already accounted for
+                    # We use a custom attribute _filled_units on the Trade object for this tracker
+                    processed = getattr(existing_trade, '_filled_units', 0.0) if existing_trade else 0.0
+
+                    if current_filled > processed:
+                        # New execution activity detected!
+                        # Convert the entire order (all current fills) to trades
+                        updated_trades = self._convert_order_to_trade(o)
+                        if updated_trades:
+                            # Mark the fill level for next sync
+                            assert len(updated_trades) <= 1, f"Multi-trade order detected ({len(updated_trades)} trades), assumptions violated."
+                            for t in updated_trades:
+                                setattr(t, '_filled_units', current_filled)
+
+                            if existing_trade:
+                                # REPLACE the existing trade with the updated one
+                                try:
+                                    idx = self.live_combined_portfolio.trades.index(existing_trade)
+                                    self.live_combined_portfolio.trades[idx] = updated_trades[0]
+                                    self.logger.info(f"Updated partial fill for {oid}: {processed} -> {current_filled} units.")
+                                except ValueError:
+                                    self.live_combined_portfolio.trades.append(updated_trades[0])
+                            else:
+                                # First time seeing fills for this order
+                                self.live_combined_portfolio.trades.append(updated_trades[0])
+                                self.logger.info(f"Recorded fill for {oid}: {current_filled} units.")
 
                 # Recalculate live cash from the full combined list
                 self.live_combined_portfolio.cash = sum(t.credit for t in self.live_combined_portfolio.trades)
 
                 # 3. Update Working Orders
-                self.working_orders = [o for o in ord_data if o.get('status') in ['WORKING', 'QUEUED', 'ACCEPTED', 'PENDING_ACTIVATION']]
+                # Include PARTIALLY_FILLED so it doesn't disappear from UI after first fill
+                self.working_orders = [o for o in ord_data if o.get('status') in [
+                    'WORKING', 'QUEUED', 'ACCEPTED', 'PENDING_ACTIVATION', 
+                    'PARTIALLY_FILLED', 'AWAITING_REPLACE', 'PENDING_REPLACE'
+                ]]
                 self.working_strategy_ids = {
                     self.order_to_strategy[str(o['orderId'])] 
                     for o in self.working_orders 
@@ -1732,6 +1755,7 @@ class LiveTradingMonitor:
         
         # Issue 4 Fix: Map each leg to its specific execution fill price
         leg_fill_prices = {}
+        leg_exec_qty = {} # Support for partial fill quantities (Task #20260402)
         activities = order.get('orderActivityCollection', [])
         actual_net_cash = 0.0
         has_execution = False
@@ -1745,8 +1769,9 @@ class LiveTradingMonitor:
                         ep = exec_leg.get('price', 0.0)
                         eq = exec_leg.get('quantity', 0)
                         
-                        # Cache fill price for instrument building
+                        # Cache fill price and aggregate quantities
                         leg_fill_prices[lid] = ep
+                        leg_exec_qty[lid] = leg_exec_qty.get(lid, 0) + eq
                         
                         # Aggregate for net premium
                         instr = leg_id_to_instr.get(lid, '')
@@ -1766,11 +1791,13 @@ class LiveTradingMonitor:
                 parsed = self._parse_schwab_symbol(symbol)
                 if parsed:
                     instruction = oleg.get('instruction', '')
-                    qty = int(oleg.get('quantity', 0))
+                    lid = str(oleg.get('legId'))
+                    
+                    # Use executed quantity if available, otherwise fall back to original (for full fills without activities)
+                    qty = int(leg_exec_qty.get(lid, oleg.get('quantity', 0)))
                     signed_qty = qty if 'BUY' in instruction else -qty
                     
                     # Issue 4: Use leg-specific fill price, fall back to limit price
-                    lid = str(oleg.get('legId'))
                     fill_p = leg_fill_prices.get(lid, order.get('price', 0))
                     
                     legs.append(OptionLeg(
