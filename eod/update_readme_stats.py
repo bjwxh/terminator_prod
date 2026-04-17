@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import subprocess
 from datetime import datetime
 
 # Paths
@@ -149,6 +150,22 @@ def main():
         f.write(updated_content)
     
     print("README stats updated successfully.")
+    
+    # Git Commit and Push
+    try:
+        os.chdir(REPO_ROOT)
+        # Check if there are changes to commit
+        status = subprocess.run(["git", "status", "--porcelain", README_PATH, CHART_OUT], capture_output=True, text=True)
+        if status.stdout.strip():
+            print("Committing and pushing updated stats...")
+            subprocess.run(["git", "add", README_PATH, CHART_OUT], check=True)
+            subprocess.run(["git", "commit", "-m", f"docs: auto-update performance stats {datetime.now().strftime('%Y-%m-%d')}"], check=True)
+            subprocess.run(["git", "push"], check=True)
+            print("Successfully pushed to origin.")
+        else:
+            print("No changes to commit.")
+    except Exception as e:
+        print(f"Git operation failed: {e}")
 
 if __name__ == "__main__":
     main()
