@@ -48,6 +48,8 @@ from .config import CONFIG
 from .models import SubStrategy, Portfolio, OptionLeg, Trade, TradePurpose, TradeStats
 from .utils import calculate_delta_decay
 from .session_manager import SessionManager
+from .news import NewsFetcher
+
 
 try:
     from notifications import notify_all
@@ -166,7 +168,9 @@ class LiveTradingMonitor:
         self._recon_modal_replacing: bool = False
         self._recon_leg_change_first_seen: float = 0.0
         self._recon_last_seen_legs: Set[Tuple[int, str, int]] = set()
+        self.news_fetcher = NewsFetcher(poll_interval=5) # 5s polling for fast updates
         self.logger.info(f"Monitor initialized with DB: {self.db_path}")
+
 
     def set_trading_enabled(self, enabled: bool):
         """Managed toggle for trading to ensure state consistency (Bug 13 Fix)"""
@@ -383,6 +387,10 @@ class LiveTradingMonitor:
 
                 # 7. DB Health Monitor (v1.2)
                 tg.create_task(self._safe_task("DBHealth", self._check_db_health_task))
+                
+                # 8. Real-time News Feed (Sina 7x24)
+                tg.create_task(self._safe_task("NewsFeed", self.news_fetcher.poll_loop))
+
                 
         except Exception as e:
             if not isinstance(e, (asyncio.CancelledError, KeyboardInterrupt)):

@@ -18,6 +18,8 @@ let currentVersion = null; // Track backend version for auto-refresh
 let latencyHistory = []; // Buffer for SMA
 let lastSeenExchangeTs = 0; // Filter sawtooth jitter
 const SMA_WINDOW = 10;    // Number of real data updates to average
+let lastNewsId = 0;
+
 
 // Initialize Mute UI
 function initMuteUI() {
@@ -93,8 +95,10 @@ function connect() {
                 updateUI(data.state);
             } else if (data.type === 'history_init') {
                 populateCharts(data.history);
+                if (data.news) updateNews(data.news);
                 if (data.config) updateConfigTable(data.config);
             } else if (data.type === 'alert') {
+
                 handleAlert(data);
             } else if (data.type === 'trade_signal') {
                 pendingDismissStratId = null;
@@ -334,8 +338,12 @@ function updateUI(state) {
     // 10. Logs
     updateLogs(state.logs);
 
-    // 11. Real-time Chart Update (Incremental)
+    // 11. News Feed
+    updateNews(state.news);
+
+    // 12. Real-time Chart Update (Incremental)
     updateCharts(state);
+
 
     // 12. Trade Modal Reconciliation (Resilience Fix)
     try {
@@ -1120,6 +1128,64 @@ function clearLogs() {
     document.getElementById('log-console').innerHTML = '';
     // We leave lastLogCount/Msg as-is so only NEW messages appear after clear
 }
+
+
+
+function updateNews(newsItems) {
+    if (!newsItems || newsItems.length === 0) return;
+
+    const container = document.getElementById('news-container');
+    if (!container) return;
+
+    // API normally sends newest-at-index-0. We want newest-at-top in UI.
+    const newItems = newsItems.filter(item => item.id > lastNewsId);
+    if (newItems.length === 0) return;
+
+    // Remove placeholder if present
+    const empty = container.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    // Iterate through new items and prepend them. 
+    // To maintain chronological order when prepending multiples, we iterate oldest to newest.
+    [...newItems].reverse().forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'news-card';
+        card.id = `news-${item.id}`;
+
+        const tagsHtml = (item.tags || [])
+            .map(t => `<span class="news-tag">${escapeHTML(t)}</span>`)
+            .join('');
+
+        card.innerHTML = `
+            <div class="news-card-meta">
+                <span class="news-timestamp">${item.time}</span>
+                <div class="news-tag-list">${tagsHtml}</div>
+            </div>
+            <div class="news-card-body"></div>
+        `;
+
+        // Safety: Use textContent for the body to prevent XSS
+        card.querySelector('.news-card-body').textContent = item.content || '';
+        
+        container.prepend(card);
+        lastNewsId = Math.max(lastNewsId, item.id);
+    });
+
+    // Performance: Keep only last 100 items in DOM
+    const cards = container.querySelectorAll('.news-card');
+    if (cards.length > 100) {
+        for (let i = 100; i < cards.length; i++) {
+            cards[i].remove();
+        }
+    }
+}
+
+function escapeHTML(str) {
+    const p = document.createElement('p');
+    p.textContent = str;
+    return p.innerHTML;
+}
+
 
 // Action Buttons
 document.getElementById('toggle-trading-btn').addEventListener('click', () => {

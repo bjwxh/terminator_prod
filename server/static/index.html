@@ -1,15 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Terminator Production Dashboard</title>
     <link rel="stylesheet" href="style.css">
     <link rel="icon" type="image/png" href="favicon.png">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap"
+        rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
+
 <body class="dark-theme">
     <div id="status-bar">
         <div class="status-item">
@@ -49,7 +53,8 @@
             <span id="latency-ms" class="value">0ms</span>
         </div>
         <div class="actions">
-            <button id="mute-toggle-btn" class="btn btn-secondary" title="Mute/Unmute Sounds" style="padding: 0.5rem 0.7rem; font-size: 1.1rem; display: flex; align-items: center; justify-content: center;">
+            <button id="mute-toggle-btn" class="btn btn-secondary" title="Mute/Unmute Sounds"
+                style="padding: 0.5rem 0.7rem; font-size: 1.1rem; display: flex; align-items: center; justify-content: center;">
                 <span id="mute-icon">🔔</span>
             </button>
             <button id="toggle-trading-btn" class="btn btn-secondary">Enable trading</button>
@@ -59,7 +64,9 @@
 
     <nav class="tab-nav">
         <button class="tab-link active" onclick="openTab(event, 'Dashboard')">Dashboard</button>
+        <button class="tab-link" onclick="openTab(event, 'News')">News</button>
         <button class="tab-link" onclick="openTab(event, 'Strategies')">Sub-Strategies</button>
+
         <button class="tab-link" onclick="openTab(event, 'Stats')">Session Stats</button>
         <button class="tab-link" onclick="openTab(event, 'Logs')">System Logs</button>
     </nav>
@@ -205,7 +212,8 @@
                 <div class="data-group">
                     <div class="split-header">
                         <h3>Working Orders (Broker)</h3>
-                        <button id="cancel-all-orders-btn" class="btn btn-danger btn-small" onclick="confirmCancelAll()">Cancel All</button>
+                        <button id="cancel-all-orders-btn" class="btn btn-danger btn-small"
+                            onclick="confirmCancelAll()">Cancel All</button>
                     </div>
                     <div class="table-container">
                         <table id="orders-table">
@@ -265,10 +273,19 @@
                                     <!-- Data injected via JS -->
                                 </tbody>
                             </table>
-                        </div>
-                    </div>
+        </div>
+        
+        <!-- News Tab -->
+        <div id="News" class="tab-content">
+            <div class="news-header-row">
+                <div class="header-left">
+                    <h3>7x24 Sina Finance News</h3>
+                    <span id="news-last-update" class="status-badge">Live</span>
                 </div>
-            </section>
+            </div>
+            <div id="news-container" class="news-feed-container">
+                <div class="empty-state">Connecting to feed...</div>
+            </div>
         </div>
 
         <!-- Sub-Strategies Tab -->
@@ -339,12 +356,12 @@
                     <span class="label">Total Est. Credit</span>
                     <span id="modal-total-credit" class="value highlight">$0.00</span>
                 </div>
-                
+
                 <div class="trade-info-header">
                     <div id="modal-strat-title" class="trade-main-title">Strategy Execution: SPX-DEMO</div>
                     <div class="trade-sub-desc">Multi-order Confirmation Requested</div>
                 </div>
-                
+
                 <div id="modal-order-list" class="order-list-container">
                     <!-- Orders will be injected here as .trade-details-box -->
                 </div>
@@ -353,7 +370,8 @@
                 <button class="btn btn-danger" onclick="disableTradingFromModal()">⚠️ Stop & Disable</button>
                 <button class="btn btn-secondary" onclick="dismissTrade()">Dismiss Trade</button>
                 <button id="modal-pause-btn" class="btn btn-secondary" onclick="toggleTradeTimer()">Pause Timer</button>
-                <button id="modal-confirm-btn" class="btn btn-primary" onclick="confirmLiveTrade()">🚀 Send Order Now</button>
+                <button id="modal-confirm-btn" class="btn btn-primary" onclick="confirmLiveTrade()">🚀 Send Order
+                    Now</button>
             </div>
         </div>
     </div>
@@ -374,4 +392,5 @@
         </div>
     </div>
 </body>
+
 </html>

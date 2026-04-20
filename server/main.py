@@ -59,8 +59,12 @@ async def lifespan(app: FastAPI):
     
     try:
         await asyncio.gather(monitor_task, broadcast_task, return_exceptions=True)
+        # Gracefully stop news fetcher client
+        if hasattr(monitor_instance, 'news_fetcher'):
+            await monitor_instance.news_fetcher.stop()
     except Exception as e:
         logger.error(f"Error during task cancellation: {e}")
+
         
     # Flush session state
     if hasattr(monitor_instance, 'session_manager'):

@@ -242,6 +242,13 @@ async def broadcast_state(monitor):
                 except Exception:
                     pass # Don't let transient serialization race break the heartbeat
 
+            # Optimization: Only include news if last_id has changed
+            current_news_id = monitor.news_fetcher.last_id
+            news_payload = None
+            if not hasattr(manager, 'last_news_id') or current_news_id > manager.last_news_id:
+                news_payload = monitor.news_fetcher.get_latest(50)
+                manager.last_news_id = current_news_id
+
             state = {
                 "ts": datetime.now(CHICAGO).isoformat(),
                 "exchange_ts": spx_ts, # In ms
@@ -259,6 +266,7 @@ async def broadcast_state(monitor):
                 "live": live_data,
                 "strategies": strategies_data,
                 "logs": logs,
+                "news": news_payload,
                 "pending_trade": pending_trade_payload,
                 "version": APP_VERSION
             }
@@ -284,12 +292,15 @@ async def websocket_endpoint(websocket: WebSocket, monitor = Depends(get_monitor
     # Send initial history batch to populate charts on connect/refresh
     with monitor._data_lock:
         history = list(monitor.session_history)
+        news = monitor.news_fetcher.get_latest(50)
     
     await websocket.send_text(json.dumps({
         "type": "history_init",
         "history": history,
+        "news": news,
         "config": CONFIG # P5 Fix: Send config once on connect
     }, cls=MonitorEncoder))
+
     
     # If there's an active trade awaiting confirmation, re-send signal 
     # so the UI can restore the modal after a page refresh (Bug 14 Fix)
