@@ -84,19 +84,22 @@ terminator_prod/
    python3 server/main.py
    ```
 
-### 2. Production Deployment (Both VMs)
-Deployment is now unified across both the Primary and Backup VMs. Use the `full_deploy.sh` script which handles Git commits, multi-VM synchronization, and service restarts:
+### 2. Production Deployment (Failover-Ready)
+The system uses a **GitHub Pull-based** deployment model. Code is automatically synchronized upon VM startup or service restart.
 
-```bash
-# Unified Git Commit, Sync, and Restart
-./deploy/full_deploy.sh "Your commit message here"
-```
+1.  **Push Updates**: Commit and push your local changes to GitHub:
+    ```bash
+    git add .
+    git commit -m "Your update message"
+    git push origin main
+    ```
+2.  **Automated Sync**: The VMs (`production-server` or `production-server-sc`) pull the latest code automatically every morning at startup (08:15 AM Chicago) via the `fetch_secrets.sh` pre-start script.
+3.  **Manual Refresh**: If the VM is already running and you need to deploy an immediate fix:
+    ```bash
+    ./deploy/sync_keys.sh
+    ```
+    *This script syncs your latest Schwab tokens and restarts the service, which triggers an immediate `git pull` on the VM.*
 
-The script will:
-1.  **Commit** any uncommitted local changes to Git.
-2.  **Archive** the project for deployment (excluding logs/DBs).
-3.  **Detect** which VMs are running (`production-server` and `production-server-backup`).
-4.  **Upload** code to all active VMs and **Restart** the services.
 
 ---
 
