@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import socket
 import sqlite3
 import pandas as pd
 import numpy as np
@@ -359,7 +360,8 @@ class LiveTradingMonitor:
         try:
             async with asyncio.TaskGroup() as tg:
                 # 0. Startup notification
-                await notify_all(self.config, "Monitor Started", title="Terminator Live")
+                hostname = socket.gethostname()
+                await notify_all(self.config, f"Monitor Started on {hostname}", title="Terminator Live")
                 
                 # 1. Start Support Tasks with self-restarting loops (Robustness-1 Fix)
                 tg.create_task(self._safe_task("HealthCheck", self._run_health_check_server))
