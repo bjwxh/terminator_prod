@@ -61,12 +61,11 @@ class NewsFetcher:
                         processed_item = {
                             "id": item_id,
                             "time": self._convert_to_chicago(item.get('create_time')),
-                            "content": item.get('content'),
-                            # We keep rich_text but won't use it in UI to avoid XSS
-                            "rich_text": item.get('rich_text'),
+                            "content": item.get('rich_text'),
                             "tags": [t.get('name') for t in item.get('tag', [])],
                             "received_at": datetime.now(CHICAGO).isoformat()
                         }
+
                         new_items.append(processed_item)
                         self.news_feed.appendleft(processed_item)
                 
