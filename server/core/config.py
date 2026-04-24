@@ -20,7 +20,7 @@ CONFIG = {
     'check_interval_minutes': 5 / 60,  # Strategy/Pricing check every 5 seconds (Enhancement)
     'portfolio_start_time': '09:01:00', # First sub-strategy start time
     'portfolio_end_time': '11:01:00',   # Last sub-strategy start time
-    'portfolio_interval_minutes': 30,   # Time between sub-strategies (can be 1-120)
+    'portfolio_interval_minutes': 60,   # Time between sub-strategies (can be 1-120)
     'heartbeat_interval_seconds': 5,     # Broker connection check frequency
 
     # === Live Trading Specific ===
