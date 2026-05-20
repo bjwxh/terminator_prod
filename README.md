@@ -108,6 +108,20 @@ The system uses a **GitHub Pull-based** deployment model. Code is automatically 
 - **No Secrets**: Configuration uses `config.py` which is ignored by Git. Always use `config.example.py` as a template.
 - **Health Checks**: A lightweight endpoint on `:8081` provides zero-latency heartbeats for external monitoring tools.
 
+### 🌐 IAP Tunneling (Port Forwarding)
+To securely access the dashboard or services running on the production VMs from your local machine, you can establish an IAP tunnel with port forwarding:
+
+*   **Connect to `production-server`:**
+    ```bash
+    gcloud compute ssh production-server --project=terminator-478221 --zone=us-central1-a -- -L 8080:localhost:8080
+    ```
+
+*   **Connect to `production-server-sc`:**
+    ```bash
+    gcloud compute ssh production-server-sc --project=terminator-478221 --zone=us-east1-b -- -L 8080:localhost:8080
+    ```
+
+
 
 ---
 <!-- STATS_START -->
