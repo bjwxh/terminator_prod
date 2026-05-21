@@ -423,6 +423,28 @@ class TestOrderFlattening(unittest.TestCase):
         self.assertEqual(flat_nested[0]["orderId"], 2003)
         self.assertEqual(flat_nested[0]["_parent_order_id"], "2001")
 
+    def test_flatten_order_strategy_type_exception(self):
+        dummy = DummyMonitor()
+        
+        # Parent order of type 'FLATTEN' with a child order strategy
+        flatten_orders = [
+            {
+                "orderId": 3001,
+                "orderStrategyType": "FLATTEN",
+                "filledQuantity": 1,
+                "childOrderStrategies": [
+                    {"orderId": 3002, "filledQuantity": 2}
+                ]
+            }
+        ]
+        
+        # When orderStrategyType is 'FLATTEN', we should NOT recurse into childOrderStrategies.
+        # So we keep the parent order and ignore the children.
+        flat = dummy._flatten_orders(flatten_orders)
+        self.assertEqual(len(flat), 1)
+        self.assertEqual(flat[0]["orderId"], 3001)
+        self.assertEqual(flat[0]["orderStrategyType"], "FLATTEN")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

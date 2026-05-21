@@ -1777,16 +1777,23 @@ class LiveTradingMonitor:
         If an order contains childOrderStrategies (and it is not empty), it acts as a strategy
         container. We skip the parent order itself to prevent double-counting of filled quantities
         (since the parent aggregates child fills), and recurse into the child orders.
+        
+        CRITICAL EXCEPTION for FLATTEN Orders:
+        Schwab's API has a bug where child orders under a parent with orderStrategyType == 'FLATTEN'
+        have their quantities and execution quantities doubled. To prevent double-counting, we
+        do not recurse into child orders for 'FLATTEN' type parent orders and instead process the
+        parent order itself (which contains the correct single quantities).
         """
         flattened = []
         for o in orders:
             children = o.get('childOrderStrategies', [])
             current_id = str(o.get('orderId', ''))
+            strat_type = o.get('orderStrategyType', '')
             
             # Keep trace of the top parent order ID.
             top_parent_id = parent_order_id if parent_order_id is not None else current_id
             
-            if children:
+            if children and strat_type != 'FLATTEN':
                 flattened.extend(self._flatten_orders(children, parent_order_id=top_parent_id))
             else:
                 if parent_order_id is not None:
