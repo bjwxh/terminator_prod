@@ -718,6 +718,9 @@ class LiveTradingMonitor:
                 # Raising ensures heartbeat_failures increments and broker_connected is not marked True
                 raise Exception(f"Malformed orders response: expected list, got {type(ord_data).__name__}")
 
+            # Recursively flatten child orders to handle split trades/nested strategies
+            ord_data = self._flatten_orders(ord_data)
+
             # --- Heartbeat Tracking (Only if data parsed correctly) ---
             with self._data_lock:
                 self.broker_connected = True
@@ -776,11 +779,14 @@ class LiveTradingMonitor:
                     'WORKING', 'QUEUED', 'ACCEPTED', 'PENDING_ACTIVATION', 
                     'PARTIALLY_FILLED', 'AWAITING_REPLACE', 'PENDING_REPLACE'
                 ]]
-                self.working_strategy_ids = {
-                    self.order_to_strategy[str(o['orderId'])] 
-                    for o in self.working_orders 
-                    if str(o.get('orderId')) in self.order_to_strategy
-                }
+                self.working_strategy_ids = set()
+                for o in self.working_orders:
+                    oid = str(o.get('orderId', ''))
+                    pid = o.get('_parent_order_id')
+                    if oid in self.order_to_strategy:
+                        self.working_strategy_ids.add(self.order_to_strategy[oid])
+                    elif pid and pid in self.order_to_strategy:
+                        self.working_strategy_ids.add(self.order_to_strategy[pid])
                 
                 # CLEARING FLAG: If we were waiting for sync, clear it now that we have fresh data
                 if self.awaiting_broker_sync:
@@ -1745,6 +1751,10 @@ class LiveTradingMonitor:
                 return None
             
             ord_data = resp.json()
+            if isinstance(ord_data, list):
+                ord_data = self._flatten_orders(ord_data)
+            else:
+                ord_data = []
             filled_orders = [o for o in ord_data if o.get('status') == 'FILLED']
             
             trades = []
@@ -1758,6 +1768,31 @@ class LiveTradingMonitor:
         except Exception as e:
             self.logger.error(f"Error fetching live trades: {e}\n{traceback.format_exc()}")
             return None
+
+    def _flatten_orders(self, orders: List[Dict], parent_order_id: str = None) -> List[Dict]:
+        """
+        Recursively flattens Schwab orders containing nested child strategies in childOrderStrategies.
+        
+        Strict Parent-Skipping Rule:
+        If an order contains childOrderStrategies (and it is not empty), it acts as a strategy
+        container. We skip the parent order itself to prevent double-counting of filled quantities
+        (since the parent aggregates child fills), and recurse into the child orders.
+        """
+        flattened = []
+        for o in orders:
+            children = o.get('childOrderStrategies', [])
+            current_id = str(o.get('orderId', ''))
+            
+            # Keep trace of the top parent order ID.
+            top_parent_id = parent_order_id if parent_order_id is not None else current_id
+            
+            if children:
+                flattened.extend(self._flatten_orders(children, parent_order_id=top_parent_id))
+            else:
+                if parent_order_id is not None:
+                    o['_parent_order_id'] = parent_order_id
+                flattened.append(o)
+        return flattened
 
     def _convert_order_to_trade(self, order: Dict) -> List[Trade]:
         """Helper to convert a single Schwab order JSON to Trade objects (1 Strategy = 1 Trade)"""
@@ -1831,7 +1866,12 @@ class LiveTradingMonitor:
         ts_chi = ts.astimezone(CHICAGO)
 
         order_id_key = str(order.get('orderId', ''))
-        strategy_id = self.order_to_strategy.get(order_id_key, "BROKER")
+        parent_id_key = order.get('_parent_order_id')
+        strategy_id = self.order_to_strategy.get(order_id_key)
+        if strategy_id is None and parent_id_key:
+            strategy_id = self.order_to_strategy.get(str(parent_id_key))
+        if strategy_id is None:
+            strategy_id = "BROKER"
         
         if has_execution:
             credit = actual_net_cash * 100
@@ -1891,6 +1931,8 @@ class LiveTradingMonitor:
             all_orders = resp.json()
             if not isinstance(all_orders, list):
                 return []
+            
+            all_orders = self._flatten_orders(all_orders)
 
             working_statuses = ['WORKING', 'PENDING_ACTIVATION', 'AWAITING_MANUAL_REVIEW', 'QUEUED', 'ACCEPTED']
             working_orders = [o for o in all_orders if o.get('status') in working_statuses]

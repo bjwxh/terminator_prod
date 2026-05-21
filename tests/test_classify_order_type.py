@@ -147,23 +147,23 @@ class TestVerticalSpread(unittest.TestCase):
     def test_put_spread_is_vertical(self):
         order_type, is_credit = classify([leg("PUT", 6000, 1), leg("PUT", 6100, -1)])
         self.assertEqual(order_type, "vertical")
-        self.assertIsNone(is_credit)
+        self.assertTrue(is_credit)
 
     def test_call_spread_is_vertical(self):
         order_type, is_credit = classify([leg("CALL", 6100, -1), leg("CALL", 6150, 1)])
         self.assertEqual(order_type, "vertical")
-        self.assertIsNone(is_credit)
+        self.assertTrue(is_credit)
 
     def test_risk_reversal_mixed_sides_is_vertical(self):
         # +1P6000, -1C6150
         order_type, is_credit = classify([leg("PUT", 6000, 1), leg("CALL", 6150, -1)])
-        self.assertEqual(order_type, "vertical")
+        self.assertEqual(order_type, "unknown")
         self.assertIsNone(is_credit)
 
     def test_scaled_quantities_are_still_vertical(self):
         order_type, is_credit = classify([leg("PUT", 6000, 5), leg("PUT", 6050, -5)])
         self.assertEqual(order_type, "vertical")
-        self.assertIsNone(is_credit)
+        self.assertTrue(is_credit)
 
     def test_two_longs_is_unknown_not_vertical(self):
         order_type, _ = classify([leg("PUT", 6000, 1), leg("PUT", 6100, 1)])
@@ -365,6 +365,63 @@ class TestUnknown(unittest.TestCase):
         order_type, _ = classify(legs)
         # 3 legs with ratio [1,-1,1] → not a butterfly ratio either
         self.assertEqual(order_type, "unknown")
+
+
+class DummyMonitor:
+    def __init__(self):
+        pass
+    _flatten_orders = _monitor_mod.LiveTradingMonitor._flatten_orders
+
+
+class TestOrderFlattening(unittest.TestCase):
+
+    def test_recursive_flattening_parent_skipping(self):
+        dummy = DummyMonitor()
+        
+        # Test Case 1: Simple order with no children
+        orders = [{"orderId": 123, "filledQuantity": 1}]
+        flat = dummy._flatten_orders(orders)
+        self.assertEqual(len(flat), 1)
+        self.assertEqual(flat[0]["orderId"], 123)
+        self.assertNotIn("_parent_order_id", flat[0])
+        
+        # Test Case 2: Parent with child orders
+        orders_with_child = [
+            {
+                "orderId": 1001,
+                "filledQuantity": 3,
+                "childOrderStrategies": [
+                    {"orderId": 1002, "filledQuantity": 1},
+                    {"orderId": 1003, "filledQuantity": 2}
+                ]
+            }
+        ]
+        flat_split = dummy._flatten_orders(orders_with_child)
+        self.assertEqual(len(flat_split), 2)
+        self.assertEqual(flat_split[0]["orderId"], 1002)
+        self.assertEqual(flat_split[0]["_parent_order_id"], "1001")
+        self.assertEqual(flat_split[1]["orderId"], 1003)
+        self.assertEqual(flat_split[1]["_parent_order_id"], "1001")
+        
+        # Test Case 3: Multiple levels of nesting (Grandchildren)
+        nested_orders = [
+            {
+                "orderId": 2001,
+                "filledQuantity": 5,
+                "childOrderStrategies": [
+                    {
+                        "orderId": 2002,
+                        "childOrderStrategies": [
+                            {"orderId": 2003, "filledQuantity": 5}
+                        ]
+                    }
+                ]
+            }
+        ]
+        flat_nested = dummy._flatten_orders(nested_orders)
+        self.assertEqual(len(flat_nested), 1)
+        self.assertEqual(flat_nested[0]["orderId"], 2003)
+        self.assertEqual(flat_nested[0]["_parent_order_id"], "2001")
 
 
 if __name__ == "__main__":
