@@ -1775,10 +1775,10 @@ class LiveTradingMonitor:
         """
         Recursively flattens Schwab orders containing nested child strategies in childOrderStrategies.
         
-        Strict Parent-Skipping Rule:
-        If an order contains childOrderStrategies (and it is not empty), it acts as a strategy
-        container. We skip the parent order itself to prevent double-counting of filled quantities
-        (since the parent aggregates child fills), and recurse into the child orders.
+        Strict Parent-Skipping Rule (Non-FLATTEN only):
+        For non-FLATTEN strategies, if an order contains childOrderStrategies (and it is not empty),
+        it acts as a strategy container. We skip the parent order itself to prevent double-counting of
+        filled quantities (since the parent aggregates child fills), and recurse into the child orders.
         
         CRITICAL EXCEPTION for FLATTEN Orders:
         For parent orders with orderStrategyType == 'FLATTEN', BOTH the parent order and its child
