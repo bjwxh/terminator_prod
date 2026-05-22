@@ -438,12 +438,13 @@ class TestOrderFlattening(unittest.TestCase):
             }
         ]
         
-        # When orderStrategyType is 'FLATTEN', we should NOT recurse into childOrderStrategies.
-        # So we keep the parent order and ignore the children.
+        # When orderStrategyType is 'FLATTEN', we should keep BOTH parent and children
         flat = dummy._flatten_orders(flatten_orders)
-        self.assertEqual(len(flat), 1)
+        self.assertEqual(len(flat), 2)
         self.assertEqual(flat[0]["orderId"], 3001)
         self.assertEqual(flat[0]["orderStrategyType"], "FLATTEN")
+        self.assertEqual(flat[1]["orderId"], 3002)
+        self.assertEqual(flat[1]["_parent_order_id"], "3001")
 
 
 if __name__ == "__main__":

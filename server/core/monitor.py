@@ -1779,10 +1779,10 @@ class LiveTradingMonitor:
         (since the parent aggregates child fills), and recurse into the child orders.
         
         CRITICAL EXCEPTION for FLATTEN Orders:
-        Schwab's API has a bug where child orders under a parent with orderStrategyType == 'FLATTEN'
-        have their quantities and execution quantities doubled. To prevent double-counting, we
-        do not recurse into child orders for 'FLATTEN' type parent orders and instead process the
-        parent order itself (which contains the correct single quantities).
+        For parent orders with orderStrategyType == 'FLATTEN', BOTH the parent order and its child
+        orders under childOrderStrategies represent separate, real execution fills (rather than the
+        parent merely serving as an aggregate container). To prevent under-counting, we must keep
+        both the parent order and recurse into its child orders.
         """
         flattened = []
         for o in orders:
@@ -1793,8 +1793,16 @@ class LiveTradingMonitor:
             # Keep trace of the top parent order ID.
             top_parent_id = parent_order_id if parent_order_id is not None else current_id
             
-            if children and strat_type != 'FLATTEN':
-                flattened.extend(self._flatten_orders(children, parent_order_id=top_parent_id))
+            if children:
+                if strat_type == 'FLATTEN':
+                    # Keep both the parent and recurse into child orders
+                    if parent_order_id is not None:
+                        o['_parent_order_id'] = parent_order_id
+                    flattened.append(o)
+                    flattened.extend(self._flatten_orders(children, parent_order_id=top_parent_id))
+                else:
+                    # Apply parent-skipping rule for other strategies
+                    flattened.extend(self._flatten_orders(children, parent_order_id=top_parent_id))
             else:
                 if parent_order_id is not None:
                     o['_parent_order_id'] = parent_order_id
