@@ -2699,11 +2699,11 @@ class LiveTradingMonitor:
                 query = """
                     SELECT datetime, strike_price, side, bidprice, askprice, delta, theta, symbol 
                     FROM stock_options 
-                    WHERE date(datetime) = ? AND root_symbol = '$SPX' AND dte = 0 
+                    WHERE root_symbol = '$SPX' AND dte = 0 
                     AND datetime BETWEEN ? AND ?
                     ORDER BY datetime
                 """
-                data = pd.read_sql_query(query, conn, params=(sim_date_str, start_dt.isoformat(), effective_end_dt.isoformat()))
+                data = pd.read_sql_query(query, conn, params=(start_dt.isoformat(), effective_end_dt.isoformat()))
         except Exception as e:
             self.logger.error(f"Database error during historical simulation: {e}")
             return []

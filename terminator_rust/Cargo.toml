@@ -1,0 +1,29 @@
+[package]
+name = "terminator_rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+url = "2.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+dashmap = "5.5"
+arc-swap = "1.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error Handling & Configuration
+futures = "0.3"
+anyhow = "1.0"
+thiserror = "1.0"
+dotenvy = "0.15"
+chrono-tz = "0.9"
+
+# TUI (SPX Grid Visualization)
+ratatui = "0.26"
+crossterm = "0.27"
+ordered-float = "4"
