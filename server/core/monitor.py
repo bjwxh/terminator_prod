@@ -606,6 +606,8 @@ class LiveTradingMonitor:
                 try:
                     # Bug 3 Fix: Perform explicit initial broker sync before bootstrap reads broker_trades
                     self.logger.info("Performing initial broker sync before bootstrap...")
+                    if not self.client:
+                        await self.initialize_schwab_client()
                     await self._sync_broker_data() 
                     
                     # Collect TRUE broker trades from restored live portfolio for the Live replay
