@@ -6,6 +6,8 @@ main:
           - project: "terminator-478221"
           - primary_instance: "production-server"
           - primary_zone: "us-central1-a"
+          - secondary_instance: "production-server-n2d"
+          - secondary_zone: "us-central1-b"
           - backup_instance: "production-server-sc"
           - backup_zone: "us-east1-b"
           - max_retries: 3
@@ -22,6 +24,20 @@ main:
     - check_primary_result:
         switch:
           - condition: ${primary_success}
+            next: end
+
+    - start_secondary:
+        call: start_vm_with_retries
+        args:
+          project: ${project}
+          instance: ${secondary_instance}
+          zone: ${secondary_zone}
+          retries: ${max_retries}
+        result: secondary_success
+
+    - check_secondary_result:
+        switch:
+          - condition: ${secondary_success}
             next: end
 
     - start_backup:

@@ -7,6 +7,13 @@ main:
           project: "terminator-478221"
           zone: "us-central1-a"
         result: primary_res
+    - check_secondary:
+        call: googleapis.compute.v1.instances.get
+        args:
+          instance: "production-server-n2d"
+          project: "terminator-478221"
+          zone: "us-central1-b"
+        result: secondary_res
     - check_sc:
         call: googleapis.compute.v1.instances.get
         args:
@@ -14,14 +21,44 @@ main:
           project: "terminator-478221"
           zone: "us-east1-b"
         result: sc_res
-    - evaluate_conflict:
+    - evaluate_primary_running:
         switch:
-          - condition: ${primary_res.status == "RUNNING" and sc_res.status == "RUNNING"}
-            next: stop_sc
-        next: end
-    - stop_sc:
+          - condition: ${primary_res.status == "RUNNING"}
+            steps:
+              - stop_secondary_if_running:
+                  switch:
+                    - condition: ${secondary_res.status == "RUNNING"}
+                      call: stop_instance
+                      args:
+                        instance: "production-server-n2d"
+                        zone: "us-central1-b"
+              - stop_sc_if_running:
+                  switch:
+                    - condition: ${sc_res.status == "RUNNING"}
+                      call: stop_instance
+                      args:
+                        instance: "production-server-sc"
+                        zone: "us-east1-b"
+              - end_primary_running:
+                  next: end
+    - evaluate_secondary_running:
+        switch:
+          - condition: ${secondary_res.status == "RUNNING"}
+            steps:
+              - stop_sc_secondary_case:
+                  switch:
+                    - condition: ${sc_res.status == "RUNNING"}
+                      call: stop_instance
+                      args:
+                        instance: "production-server-sc"
+                        zone: "us-east1-b"
+
+stop_instance:
+  params: [instance, zone]
+  steps:
+    - stop:
         call: googleapis.compute.v1.instances.stop
         args:
-          instance: "production-server-sc"
+          instance: ${instance}
           project: "terminator-478221"
-          zone: "us-east1-b"
+          zone: ${zone}

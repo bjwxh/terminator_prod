@@ -121,6 +121,11 @@ To securely access the dashboard or services running on the production VMs from 
     gcloud compute ssh production-server-sc --project=terminator-478221 --zone=us-east1-b -- -L 8080:localhost:8080
     ```
 
+*   **Connect to `production-server-n2d`:**
+    ```bash
+    gcloud compute ssh production-server-n2d --project=terminator-478221 --zone=us-central1-b --tunnel-through-iap -- -L 8080:localhost:8080
+    ```
+
 
 
 ---
