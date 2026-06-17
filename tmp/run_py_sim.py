@@ -26,7 +26,7 @@ original_check_entry = LiveTradingMonitor._check_entry
 
 def hooked_check_entry(self, s, snap, ts):
     time_str = ts.strftime("%H:%M")
-    if time_str in ["09:01", "09:31", "10:01", "10:31"]:
+    if time_str in ["08:33", "09:03", "09:33", "10:03"]:
         if time_str not in snapshots:
             logging.info(f"Capturing options chain snapshot at {time_str} ({ts})")
             # Select required columns and copy
@@ -39,8 +39,8 @@ def hooked_check_entry(self, s, snap, ts):
 LiveTradingMonitor._check_entry = hooked_check_entry
 
 async def main():
-    target_date = date(2026, 5, 21)
-    db_path = "/Users/fw/data/options/options_20260521.db"
+    target_date = date(2026, 6, 17)
+    db_path = "/Users/fw/data/options/options_20260617.db"
     
     print(f"Running Python simulation for {target_date} using {db_path}...")
     sim_data = await run_simulation(target_date, db_path=db_path)
@@ -55,7 +55,7 @@ async def main():
     print("=======================================================\n")
     
     # Save the snapshots
-    snapshot_path = "tmp/snapshots_20260521.json"
+    snapshot_path = "tmp/snapshots_20260617.json"
     os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
     with open(snapshot_path, "w") as f:
         json.dump(snapshots, f, indent=2)
@@ -64,6 +64,15 @@ async def main():
     # Print sub-strategy entry breakdown
     history = sim_data['history']
     print(f"History records found: {len(history)}")
+    
+    print("\n--- Python Trades Breakdown ---")
+    for r in history:
+        if r['action'] == 'ENTRY':
+            print(f"\nEntry at {r['datetime']} CT:")
+            print(f"  Net Credit: ${r['gross_pnl']:.2f}")
+            print(f"  Commission: ${r.get('commission', 0):.2f}")
+            print(f"  Legs: {r.get('trade_description', '')}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

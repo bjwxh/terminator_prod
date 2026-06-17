@@ -6,6 +6,7 @@ use ordered_float::OrderedFloat;
 use tracing::info;
 
 use crate::options_chain::StrikeAndSide;
+use crate::db::OptionQuoteRow;
 
 #[derive(Debug, Clone)]
 pub struct OptionLegQuote {
@@ -33,6 +34,9 @@ pub struct OptionsGrid {
     pub symbol_lookup: HashMap<String, StrikeAndSide>,
     /// Thread-safe lock-free storage for the latest SPX underlying index price
     pub underlying_price: std::sync::atomic::AtomicU64,
+    pub vix: std::sync::atomic::AtomicU64,
+    pub exchange_ts_ms: std::sync::atomic::AtomicU64,
+    pub subscribed_option_symbols: std::sync::RwLock<std::collections::HashSet<String>>,
 }
 
 impl OptionsGrid {
@@ -49,6 +53,9 @@ impl OptionsGrid {
             quotes: Arc::new(DashMap::new()),
             symbol_lookup,
             underlying_price: std::sync::atomic::AtomicU64::new(0.0f64.to_bits()),
+            vix: std::sync::atomic::AtomicU64::new(0.0f64.to_bits()),
+            exchange_ts_ms: std::sync::atomic::AtomicU64::new(0),
+            subscribed_option_symbols: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -60,6 +67,26 @@ impl OptionsGrid {
     /// Set the latest SPX underlying price thread-safely and lock-free
     pub fn set_underlying_price(&self, price: f64) {
         self.underlying_price.store(price.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn get_spx(&self) -> f64 {
+        self.get_underlying_price()
+    }
+
+    pub fn get_vix(&self) -> f64 {
+        f64::from_bits(self.vix.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn set_vix(&self, price: f64) {
+        self.vix.store(price.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn get_exchange_ts_ms(&self) -> u64 {
+        self.exchange_ts_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_exchange_ts_ms(&self, ts: u64) {
+        self.exchange_ts_ms.store(ts, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Recalculates Greeks for all active options in the grid when the underlying index ($SPX) moves.
@@ -77,15 +104,17 @@ impl OptionsGrid {
 
             if let Some(ref mut call) = quote.call {
                 if call.mid > 0.0 {
+                    // TODO: Document known divergence - Rust computes delta via BS over mid price; Python uses Schwab stream.
                     call.delta = crate::greeks::calculate_delta(call.mid, spx_price, strike, t, r, true);
-                    call.theta = call.mid; // Schwab mid-price convention for 0DTE Theta
+                    call.theta = 0.0; // TODO: Compute actual BS theta or stream it from Schwab instead of using mid
                 }
             }
 
             if let Some(ref mut put) = quote.put {
                 if put.mid > 0.0 {
+                    // TODO: Document known divergence - Rust computes delta via BS over mid price; Python uses Schwab stream.
                     put.delta = crate::greeks::calculate_delta(put.mid, spx_price, strike, t, r, false);
-                    put.theta = put.mid; // Schwab mid-price convention for 0DTE Theta
+                    put.theta = 0.0; // TODO: Compute actual BS theta or stream it from Schwab instead of using mid
                 }
             }
             quote.last_updated = Instant::now();
@@ -146,7 +175,7 @@ impl OptionsGrid {
                 ask: current_ask,
                 mid,
                 delta,
-                theta: mid,
+                theta: 0.0, // TODO: Compute actual BS theta or stream it from Schwab instead of using mid
                 last_update: Instant::now(),
             };
 
@@ -156,6 +185,39 @@ impl OptionsGrid {
                 quote.put = Some(leg);
             }
             quote.last_updated = Instant::now();
+            self.subscribed_option_symbols.write().unwrap().insert(symbol.to_string());
+        }
+    }
+    pub fn inject_snapshot(&self, quotes: &[OptionQuoteRow], spx: f64) {
+        self.set_underlying_price(spx);
+        for q in quotes {
+            let strike = OrderedFloat(q.strike);
+            let is_call = q.side == "CALL";
+            let mid = (q.bid + q.ask) / 2.0;
+
+            let leg = OptionLegQuote {
+                symbol: q.symbol.clone(),
+                bid: q.bid,
+                ask: q.ask,
+                mid,
+                delta: q.delta,
+                theta: q.theta,
+                last_update: Instant::now(),
+            };
+
+            let mut entry = self.quotes.entry(strike).or_insert_with(|| OptionQuote {
+                strike: q.strike,
+                call: None,
+                put: None,
+                last_updated: Instant::now(),
+            });
+
+            if is_call {
+                entry.value_mut().call = Some(leg);
+            } else {
+                entry.value_mut().put = Some(leg);
+            }
+            entry.value_mut().last_updated = Instant::now();
         }
     }
 }

@@ -9,3 +9,9 @@ pub mod manager;
 pub mod tui;
 pub mod execution;
 pub mod strategy;
+pub mod portfolio;
+
+pub mod web;
+pub mod news;
+pub mod logger;
+pub mod db;

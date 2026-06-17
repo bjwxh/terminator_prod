@@ -56,11 +56,15 @@ impl SlidingWindowManager {
                 let strike = key.strike.0;
                 if key.is_call {
                     if strike >= call_min && strike <= call_max {
-                        target_symbols.insert(sym.clone());
+                        if target_symbols.len() < 1 { // ONLY 1 SYMBOL FOR TESTING
+                            target_symbols.insert(sym.clone());
+                        }
                     }
                 } else {
                     if strike >= put_min && strike <= put_max {
-                        target_symbols.insert(sym.clone());
+                        if target_symbols.len() < 1 { // ONLY 1 SYMBOL FOR TESTING
+                            target_symbols.insert(sym.clone());
+                        }
                     }
                 }
             }

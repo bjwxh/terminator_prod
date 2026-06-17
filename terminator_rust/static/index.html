@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminator Production Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/png" href="favicon.png">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+
+<body class="dark-theme">
+    <div id="status-bar">
+        <div class="status-item">
+            <span class="label">System:</span>
+            <span id="system-status" class="value status-connecting">Connecting...</span>
+        </div>
+        <div class="status-item">
+            <span class="label">Broker:</span>
+            <span id="broker-status" class="value status-disconnected">OFFLINE</span>
+        </div>
+        <div class="status-item">
+            <span class="label">Trading:</span>
+            <span id="trading-status" class="value status-disabled">DISABLED</span>
+        </div>
+        <div class="status-item">
+            <span class="label">DB:</span>
+            <span id="db-status" class="value status-connected">Healthy</span>
+        </div>
+        <div class="status-item">
+            <span class="label">Server:</span>
+            <span id="server-name" class="value">---</span>
+        </div>
+        <div class="status-item">
+            <span class="label">SPX:</span>
+            <span id="spx-price" class="value">0,000.00</span>
+        </div>
+        <div class="status-item">
+            <span class="label">VIX:</span>
+            <span id="vix-price" class="value">00.00</span>
+        </div>
+        <div class="status-item">
+            <span class="label">Schwab Time:</span>
+            <span id="exchange-time" class="value">00:00:00</span>
+        </div>
+        <div class="status-item">
+            <span class="label">Latency:</span>
+            <span id="latency-ms" class="value">0ms</span>
+        </div>
+        <div class="actions">
+            <button id="mute-toggle-btn" class="btn btn-secondary" title="Mute/Unmute Sounds"
+                style="padding: 0.5rem 0.7rem; font-size: 1.1rem; display: flex; align-items: center; justify-content: center;">
+                <span id="mute-icon">🔔</span>
+            </button>
+            <button id="toggle-trading-btn" class="btn btn-secondary">Enable trading</button>
+            <button id="reconnect-broker-btn" class="btn btn-secondary">Reconnect Broker</button>
+        </div>
+    </div>
+
+    <nav class="tab-nav">
+        <button class="tab-link active" onclick="openTab(event, 'Dashboard')">Dashboard</button>
+        <button class="tab-link" onclick="openTab(event, 'News')">News</button>
+        <button class="tab-link" onclick="openTab(event, 'Strategies')">Sub-Strategies</button>
+
+        <button class="tab-link" onclick="openTab(event, 'Stats')">Session Stats</button>
+        <button class="tab-link" onclick="openTab(event, 'Logs')">System Logs</button>
+    </nav>
+
+    <main class="container">
+        <!-- Dashboard Tab -->
+        <div id="Dashboard" class="tab-content active">
+            <section class="summary-section">
+                <!-- Side-by-Side Sim/Live View -->
+                <div class="dashboard-summary-container">
+                    <!-- Live Summary (Left) -->
+                    <div id="live-portfolio-card" class="summary-row live-row foldable-card collapsed">
+                        <div class="summary-header" onclick="togglePortfolioFold('live')">
+                            <div class="header-left">
+                                <span class="fold-icon">▼</span>
+                                <span class="row-label">LIVE PORTFOLIO</span>
+                            </div>
+                            <div class="header-right header-summary">
+                                <span id="live-net-pnl-summary" class="value green">$0.00</span>
+                            </div>
+                        </div>
+                        <div id="live-portfolio-body" class="summary-body">
+                            <div class="metrics-grid dynamic-grid">
+                                <div class="metric-card">
+                                    <span class="label">Total Margin</span>
+                                    <span id="live-margin" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">No. Trades</span>
+                                    <span id="live-trades-count" class="value">0</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net PnL</span>
+                                    <span id="live-net-pnl" class="value green">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Delta</span>
+                                    <span id="live-total-delta" class="value">0.000</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Fees</span>
+                                    <span id="live-fees" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Gross PnL</span>
+                                    <span id="live-gross-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Realized PnL</span>
+                                    <span id="live-realized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Unrealized PnL</span>
+                                    <span id="live-unrealized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Theta</span>
+                                    <span id="live-total-theta" class="value">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Sim Summary (Right) -->
+                    <div id="sim-portfolio-card" class="summary-row sim-row foldable-card collapsed">
+                        <div class="summary-header" onclick="togglePortfolioFold('sim')">
+                            <div class="header-left">
+                                <span class="fold-icon">▼</span>
+                                <span class="row-label">SIM (MIDPRICE)</span>
+                            </div>
+                            <div class="header-right header-summary">
+                                <span id="sim-net-pnl-summary" class="value green">$0.00</span>
+                            </div>
+                        </div>
+                        <div id="sim-portfolio-body" class="summary-body">
+                            <div class="metrics-grid dynamic-grid">
+                                <div class="metric-card">
+                                    <span class="label">Total Margin</span>
+                                    <span id="sim-margin" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">No. Trades</span>
+                                    <span id="sim-trades-count" class="value">0</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Pnl</span>
+                                    <span id="sim-net-pnl" class="value green">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Delta</span>
+                                    <span id="sim-total-delta" class="value">0.000</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Fees</span>
+                                    <span id="sim-fees" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Gross PnL</span>
+                                    <span id="sim-gross-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Realized PnL</span>
+                                    <span id="sim-realized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Unrealized PnL</span>
+                                    <span id="sim-unrealized-pnl" class="value">$0.00</span>
+                                </div>
+                                <div class="metric-card">
+                                    <span class="label">Net Theta</span>
+                                    <span id="sim-total-theta" class="value">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="data-section">
+                <div class="data-group">
+                    <h3>Aggregated Positions</h3>
+                    <div class="table-container">
+                        <table id="positions-table">
+                            <thead>
+                                <tr>
+                                    <th>Strike</th>
+                                    <th>Side</th>
+                                    <th>Sim Qty</th>
+                                    <th>Live Qty</th>
+                                    <th>Diff</th>
+                                    <th>Delta</th>
+                                    <th>Bid</th>
+                                    <th>Ask</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-tbody">
+                                <!-- Data injected via JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="data-group">
+                    <div class="split-header">
+                        <h3>Working Orders (Broker)</h3>
+                        <button id="cancel-all-orders-btn" class="btn btn-danger btn-small"
+                            onclick="confirmCancelAll()">Cancel All</button>
+                    </div>
+                    <div class="table-container">
+                        <table id="orders-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Symbol</th>
+                                    <th>Side</th>
+                                    <th>Qty</th>
+                                    <th>Price</th>
+                                    <th>Mark</th>
+                                    <th>Status</th>
+                                    <th style="text-align: right;">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="orders-tbody">
+                                <!-- Data injected via JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Recent Trades -->
+                <div class="data-group">
+                    <div class="split-header">
+                        <h3>Recent Trades</h3>
+                    </div>
+                    <div class="trades-grid">
+                        <div class="table-container">
+                            <div class="table-label live">Live Trades</div>
+                            <table id="live-trades-table">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Symbol</th>
+                                        <th>Qty</th>
+                                        <th>Price</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="live-trades-tbody">
+                                    <!-- Data injected via JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="table-container">
+                            <div class="table-label sim">Sim Trades</div>
+                            <table id="sim-trades-table">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Symbol</th>
+                                        <th>Qty</th>
+                                        <th>Price</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sim-trades-tbody">
+                                    <!-- Data injected via JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+        
+        <!-- News Tab -->
+
+        <div id="News" class="tab-content">
+            <div class="news-header-row">
+                <div class="header-left">
+                    <h3>7x24 Sina Finance News</h3>
+                    <span id="news-last-update" class="status-badge">Live</span>
+                </div>
+            </div>
+            <div id="news-container" class="news-feed-container">
+                <div class="empty-state">Connecting to feed...</div>
+            </div>
+        </div>
+
+        <!-- Sub-Strategies Tab -->
+        <div id="Strategies" class="tab-content">
+            <h3>Active Sub-Strategies</h3>
+            <div id="strategy-grid" class="strategy-grid">
+                <!-- Cards injected via JS -->
+            </div>
+        </div>
+
+        <div id="Stats" class="tab-content">
+            <div class="charts-container">
+                <div class="chart-box">
+                    <h3>SPX Price (Underlying)</h3>
+                    <div class="canvas-wrapper">
+                        <canvas id="spx-chart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-box">
+                    <h3>Net PnLs (Live vs Sim)</h3>
+                    <div class="canvas-wrapper">
+                        <canvas id="pnl-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Option Book Section -->
+            <div class="data-group" style="margin-top: 2rem;">
+                <div class="split-header">
+                    <h3>Option Book</h3>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="font-size: 0.8rem; color: var(--text-secondary);">Rows:</span>
+                        <select id="option-book-rows-select" style="background: var(--secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.8rem; cursor: pointer; outline: none;">
+                            <option value="20" selected>20</option>
+                            <option value="40">40</option>
+                            <option value="all">ALL</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table id="option-book-table">
+                        <colgroup>
+                            <col style="width: 14%;">
+                            <col style="width: 14%;">
+                            <col style="width: 14%;">
+                            <col style="width: 16%;">
+                            <col style="width: 14%;">
+                            <col style="width: 14%;">
+                            <col style="width: 14%;">
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th colspan="3" style="text-align: center; border-bottom: 2px solid var(--border-color); color: var(--accent-green);">CALLS</th>
+                                <th style="border-bottom: 2px solid var(--border-color); background-color: #1c2128;">&nbsp;</th>
+                                <th colspan="3" style="text-align: center; border-bottom: 2px solid var(--border-color); color: var(--accent-red);">PUTS</th>
+                            </tr>
+                            <tr>
+                                <th>Bid</th>
+                                <th>Ask</th>
+                                <th>Delta</th>
+                                <th style="text-align: center; font-weight: bold; color: var(--primary);">Strike</th>
+                                <th>Delta</th>
+                                <th>Bid</th>
+                                <th>Ask</th>
+                            </tr>
+                        </thead>
+                        <tbody id="option-book-tbody">
+                            <!-- Injected dynamically via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Configuration Window -->
+            <div class="data-group" style="margin-top: 2rem;">
+                <h3>Active Configuration</h3>
+                <div class="table-container">
+                    <table id="config-table">
+                        <thead>
+                            <tr>
+                                <th>Setting</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody id="config-tbody">
+                            <!-- Data injected via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs Tab -->
+        <div id="Logs" class="tab-content">
+            <div class="log-header">
+                <h3>System Logs</h3>
+                <button onclick="clearLogs()" class="btn btn-small">Clear View</button>
+            </div>
+            <div id="log-console" class="log-console">
+                <!-- Logs injected via JS -->
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+    <div id="trade-modal" class="modal-backdrop">
+        <div class="modal-content">
+            <div id="modal-timer-bar" class="timer-progress"></div>
+            <div class="modal-header">
+                <h3>⚠️ Confirm Live Trade</h3>
+                <span id="modal-timer-stat" class="timer-stat">Auto-sending in 10s</span>
+            </div>
+            <div class="modal-body">
+                <div id="modal-total-section" class="total-summary-box" style="margin-top: 0; margin-bottom: 1.5rem;">
+                    <span class="label">Total Est. Credit</span>
+                    <span id="modal-total-credit" class="value highlight">$0.00</span>
+                </div>
+
+                <div class="trade-info-header">
+                    <div id="modal-strat-title" class="trade-main-title">Strategy Execution: SPX-DEMO</div>
+                    <div class="trade-sub-desc">Multi-order Confirmation Requested</div>
+                </div>
+
+                <div id="modal-order-list" class="order-list-container">
+                    <!-- Orders will be injected here as .trade-details-box -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-danger" onclick="disableTradingFromModal()">⚠️ Stop & Disable</button>
+                <button class="btn btn-secondary" onclick="dismissTrade()">Dismiss Trade</button>
+                <button id="modal-pause-btn" class="btn btn-secondary" onclick="toggleTradeTimer()">Pause Timer</button>
+                <button id="modal-confirm-btn" class="btn btn-primary" onclick="confirmLiveTrade()">🚀 Send Order
+                    Now</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Generic Confirmation Modal -->
+    <div id="confirm-modal" class="modal-backdrop">
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3 id="confirm-modal-title">Confirm Action</h3>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-modal-message" style="margin: 0; font-size: 0.95rem; line-height: 1.6;"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeConfirmModal()">Cancel</button>
+                <button id="confirm-modal-btn" class="btn btn-primary">Confirm</button>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

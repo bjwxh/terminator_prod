@@ -18,11 +18,15 @@ use terminator_rust::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize logging & tracing output
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into())
-        )
+    let ring_logger = terminator_rust::logger::RingLogger::new();
+    let ring_layer = ring_logger.clone();
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
+        .with(tracing_subscriber::fmt::layer())
+        .with(ring_layer)
         .init();
 
     info!("🦀 Terminator Rust Engine: Starting Phase 2 & 3 Dynamic TUI Pricing Engine...");
@@ -87,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // 8. Register index subscription ($SPX) in dynamic registry
-    ws_client.subscribe(vec!["$SPX".to_string()], "LEVELONE_EQUITIES").await?;
+    ws_client.subscribe(vec!["$SPX".to_string(), "$VIX".to_string()], "LEVELONE_EQUITIES").await?;
 
     // 9. Start Schwab WS Stream Supervisor loop in background
     let ws_supervisor_client = Arc::clone(&ws_client);
@@ -105,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(msg) = message_rx.recv().await {
             // Process streaming market data (Level 1 equities and options)
+            if msg.to_uppercase().contains("RESPONSE") {
+                tracing::info!("Raw Schwab Response: {}", msg);
+            }
             if let Some(new_spx) = parser::parse_streaming_message(&msg, &grid_parser) {
                 if let Err(e) = manager_parser.handle_index_update(new_spx).await {
                     error!("Error during sliding-window subscription updates: {:?}", e);
@@ -143,6 +150,28 @@ async fn main() -> anyhow::Result<()> {
     let supervisor_loop_clone = Arc::clone(&supervisor);
     tokio::spawn(async move {
         supervisor_loop_clone.run_supervisor_loop().await;
+    });
+
+    // 14.5 Web UI setup
+    let news_fetcher = terminator_rust::news::NewsFetcher::new();
+    let news_fetcher_clone = Arc::clone(&news_fetcher);
+    tokio::spawn(async move {
+        news_fetcher_clone.run().await;
+    });
+
+    let (ws_tx, _) = tokio::sync::broadcast::channel(100);
+
+    let app_state = terminator_rust::web::AppState {
+        grid: Arc::clone(&grid),
+        supervisor: Arc::clone(&supervisor),
+        news: news_fetcher,
+        logger: ring_logger,
+        ws_tx: ws_tx.clone(),
+    };
+
+    let web_port = app_config.web_port;
+    tokio::spawn(async move {
+        terminator_rust::web::start_server(app_state, web_port).await;
     });
 
     info!("Terminator Rust Engine fully initialized! Booting TUI Dashboard...");

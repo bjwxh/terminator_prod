@@ -105,7 +105,7 @@ impl WebsocketClient {
         
         info!("Fetching streamer credentials from User Preferences API...");
         let response = client
-            .get("https://api.schwabapi.com/v1/userPreference")
+            .get("https://api.schwabapi.com/trader/v1/userPreference")
             .bearer_auth(access_token)
             .send()
             .await
@@ -153,23 +153,25 @@ impl WebsocketClient {
 
         if !new_symbols.is_empty() {
             if let Some(tx) = self.active_cmd_tx.lock().await.as_ref() {
-                let req_id = self.next_request_id().await;
                 if let Some(streamer) = self.active_streamer_info.lock().await.as_ref() {
-                    let sub_req = WsRequest {
-                        service: service.to_string(),
-                        requestid: req_id,
-                        command: "SUBS".to_string(),
-                        customer_id: streamer.schwab_client_customer_id.clone(),
-                        correl_id: streamer.schwab_client_correl_id.clone(),
-                        parameters: serde_json::json!({
-                            "keys": new_symbols.join(","),
-                            "fields": if service == "LEVELONE_OPTIONS" { "0,2,3" } else { "0,1,2,3,34,35" }
-                        }),
-                    };
-                    let payload = WsRequestContainer { requests: vec![sub_req] };
-                    let msg_str = serde_json::to_string(&payload)?;
-                    let _ = tx.send(Message::Text(msg_str.into()));
-                    info!("Dynamically sent subscription request for: {:?}", new_symbols);
+                    for chunk in new_symbols.chunks(40) {
+                        let req_id = self.next_request_id().await;
+                        let sub_req = WsRequest {
+                            service: service.to_string(),
+                            requestid: req_id,
+                            command: "SUBS".to_string(),
+                            customer_id: streamer.schwab_client_customer_id.clone(),
+                            correl_id: streamer.schwab_client_correl_id.clone(),
+                            parameters: serde_json::json!({
+                                "keys": chunk.join(","),
+                                "fields": if service == "LEVELONE_OPTIONS" { "0,1,2,3,4,8,9,41" } else { "0,1,2,3,34,35" }
+                            }),
+                        };
+                        let payload = WsRequestContainer { requests: vec![sub_req] };
+                        let msg_str = serde_json::to_string(&payload)?;
+                        let _ = tx.send(Message::Text(msg_str.into()));
+                    }
+                    info!("Dynamically sent subscription request for {} symbols", new_symbols.len());
                 }
             }
         }
@@ -193,22 +195,24 @@ impl WebsocketClient {
 
         if !removed_symbols.is_empty() {
             if let Some(tx) = self.active_cmd_tx.lock().await.as_ref() {
-                let req_id = self.next_request_id().await;
                 if let Some(streamer) = self.active_streamer_info.lock().await.as_ref() {
-                    let sub_req = WsRequest {
-                        service: service.to_string(),
-                        requestid: req_id,
-                        command: "UNSUBS".to_string(),
-                        customer_id: streamer.schwab_client_customer_id.clone(),
-                        correl_id: streamer.schwab_client_correl_id.clone(),
-                        parameters: serde_json::json!({
-                            "keys": removed_symbols.join(","),
-                        }),
-                    };
-                    let payload = WsRequestContainer { requests: vec![sub_req] };
-                    let msg_str = serde_json::to_string(&payload)?;
-                    let _ = tx.send(Message::Text(msg_str.into()));
-                    info!("Dynamically sent unsubscription request for: {:?}", removed_symbols);
+                    for chunk in removed_symbols.chunks(40) {
+                        let req_id = self.next_request_id().await;
+                        let sub_req = WsRequest {
+                            service: service.to_string(),
+                            requestid: req_id,
+                            command: "UNSUBS".to_string(),
+                            customer_id: streamer.schwab_client_customer_id.clone(),
+                            correl_id: streamer.schwab_client_correl_id.clone(),
+                            parameters: serde_json::json!({
+                                "keys": chunk.join(","),
+                            }),
+                        };
+                        let payload = WsRequestContainer { requests: vec![sub_req] };
+                        let msg_str = serde_json::to_string(&payload)?;
+                        let _ = tx.send(Message::Text(msg_str.into()));
+                    }
+                    info!("Dynamically sent unsubscription request for {} symbols", removed_symbols.len());
                 }
             }
         }
@@ -305,22 +309,22 @@ impl WebsocketClient {
 
         info!("Streamer login successful! Sending initial subscriptions...");
 
-        // Subscribe to real-time ACCT_ACTIVITY feed using dynamic correlation ID
-        let acct_req_id = self.next_request_id().await;
-        let acct_req = WsRequest {
-            service: "ACCT_ACTIVITY".to_string(),
-            requestid: acct_req_id,
-            command: "SUBS".to_string(),
-            customer_id: streamer.schwab_client_customer_id.clone(),
-            correl_id: streamer.schwab_client_correl_id.clone(),
-            parameters: serde_json::json!({
-                "keys": streamer.schwab_client_correl_id.clone(),
-                "fields": "0,1,2,3"
-            }),
-        };
-        let acct_payload = WsRequestContainer { requests: vec![acct_req] };
-        write_half.send(Message::Text(serde_json::to_string(&acct_payload)?.into())).await?;
-        info!("Subscribed to real-time ACCT_ACTIVITY feed for account correl ID: {}", streamer.schwab_client_correl_id);
+        // Subscribe to Account Activity (Order Fills, etc.)
+        // let req_id = self.next_request_id().await;
+        // let acct_req = WsRequest {
+        //     service: "ACCT_ACTIVITY".to_string(),
+        //     requestid: req_id,
+        //     command: "SUBS".to_string(),
+        //     customer_id: streamer.schwab_client_customer_id.clone(),
+        //     correl_id: streamer.schwab_client_correl_id.clone(),
+        //     parameters: serde_json::json!({
+        //         "keys": streamer.schwab_client_correl_id.clone(),
+        //         "fields": "0,1,2,3"
+        //     }),
+        // };
+        // let acct_payload = WsRequestContainer { requests: vec![acct_req] };
+        // write_half.send(Message::Text(serde_json::to_string(&acct_payload)?.into())).await?;
+        // info!("Subscribed to real-time ACCT_ACTIVITY feed for account correl ID: {}", streamer.schwab_client_correl_id);
 
         // 4. Send dynamic subscriptions registered in our dynamic registry
         let active_subs = {
@@ -343,39 +347,43 @@ impl WebsocketClient {
 
             // Subscribe to Level 1 Equities ($SPX, $VIX)
             if !equities.is_empty() {
-                let req_id = self.next_request_id().await;
-                let sub_req = WsRequest {
-                    service: "LEVELONE_EQUITIES".to_string(),
-                    requestid: req_id,
-                    command: "SUBS".to_string(),
-                    customer_id: streamer.schwab_client_customer_id.clone(),
-                    correl_id: streamer.schwab_client_correl_id.clone(),
-                    parameters: serde_json::json!({
-                        "keys": equities.join(","),
-                        "fields": "0,1,2,3,34,35" // SYMBOL, BID, ASK, LAST, QUOTE_TIME, TRADE_TIME
-                    }),
-                };
-                let payload = WsRequestContainer { requests: vec![sub_req] };
-                write_half.send(Message::Text(serde_json::to_string(&payload)?.into())).await?;
+                for chunk in equities.chunks(40) {
+                    let req_id = self.next_request_id().await;
+                    let sub_req = WsRequest {
+                        service: "LEVELONE_EQUITIES".to_string(),
+                        requestid: req_id,
+                        command: "SUBS".to_string(),
+                        customer_id: streamer.schwab_client_customer_id.clone(),
+                        correl_id: streamer.schwab_client_correl_id.clone(),
+                        parameters: serde_json::json!({
+                            "keys": chunk.join(","),
+                            "fields": "0,1,2,3,34,35" // SYMBOL, BID, ASK, LAST, QUOTE_TIME, TRADE_TIME
+                        }),
+                    };
+                    let payload = WsRequestContainer { requests: vec![sub_req] };
+                    write_half.send(Message::Text(serde_json::to_string(&payload)?.into())).await?;
+                }
                 info!("Subscribed to real-time index feeds: {:?}", equities);
             }
 
             // Subscribe to Level 1 Options (SPXW Strikes)
             if !options.is_empty() {
-                let req_id = self.next_request_id().await;
-                let sub_req = WsRequest {
-                    service: "LEVELONE_OPTIONS".to_string(),
-                    requestid: req_id,
-                    command: "SUBS".to_string(),
-                    customer_id: streamer.schwab_client_customer_id.clone(),
-                    correl_id: streamer.schwab_client_correl_id.clone(),
-                    parameters: serde_json::json!({
-                        "keys": options.join(","),
-                        "fields": "0,2,3" // SYMBOL, BID_PRICE, ASK_PRICE
-                    }),
-                };
-                let payload = WsRequestContainer { requests: vec![sub_req] };
-                write_half.send(Message::Text(serde_json::to_string(&payload)?.into())).await?;
+                for chunk in options.chunks(40) {
+                    let req_id = self.next_request_id().await;
+                    let sub_req = WsRequest {
+                        service: "LEVELONE_OPTIONS".to_string(),
+                        requestid: req_id,
+                        command: "SUBS".to_string(),
+                        customer_id: streamer.schwab_client_customer_id.clone(),
+                        correl_id: streamer.schwab_client_correl_id.clone(),
+                        parameters: serde_json::json!({
+                            "keys": chunk.join(","),
+                            "fields": "0,1,2,3,4,8,9,41" // SYMBOL, BID, ASK, LAST, VOL, IMPVOL, DELTA
+                        }),
+                    };
+                    let payload = WsRequestContainer { requests: vec![sub_req] };
+                    write_half.send(Message::Text(serde_json::to_string(&payload)?.into())).await?;
+                }
                 info!("Subscribed to {} real-time options strikes.", options.len());
             }
         }
@@ -397,11 +405,20 @@ impl WebsocketClient {
                 Some(msg_res) = read_half.next() => {
                     let msg = msg_res?;
                     match msg {
-                        Message::Text(txt) => {
-                            let _ = self.message_tx.send(txt.to_string());
+                        Message::Text(text) => {
+                            info!("Received WebSocket message: {}", text);
+                            // Let the parser handle all text messages or check case-insensitively
+                            let text_upper = text.to_uppercase();
+                            if text_upper.contains("RESPONSE") || text_upper.contains("DATA") {
+                                // Send to parsing thread
+                                let _ = self.message_tx.send(text.clone());
+                            } else {
+                                debug!("Received unhandled Stream message: {}", text);
+                            }
                         }
                         Message::Binary(bin) => {
                             if let Ok(txt) = String::from_utf8(bin) {
+                                info!("Received binary WebSocket message: {}", txt);
                                 let _ = self.message_tx.send(txt);
                             }
                         }

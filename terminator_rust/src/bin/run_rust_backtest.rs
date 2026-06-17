@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     println!(" 🤖  Rust Backtest Simulation: Ingesting Python JSON Snapshots");
     println!("===============================================================================\n");
 
-    let snapshot_file = "tmp/snapshots_20260521.json";
+    let snapshot_file = "../tmp/snapshots_20260617.json";
     println!("📖 Loading offline options chain snapshots from {}...", snapshot_file);
     let file_content = std::fs::read_to_string(snapshot_file)
         .context(format!("Failed to read snapshot file: {}", snapshot_file))?;
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     let snapshots: HashMap<String, Vec<SnapshotQuote>> = serde_json::from_str(&file_content)
         .context("Failed to parse JSON snapshot data")?;
 
-    let entry_times = vec!["09:01", "09:31", "10:01", "10:31"];
+    let entry_times = vec!["08:33", "09:03", "09:33", "10:03"];
 
     for time_str in entry_times {
         let quotes = match snapshots.get(time_str) {
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
         let time_obj = chrono::NaiveTime::from_hms_opt(hour, min, 0).unwrap();
 
         // Build timezone-aware timestamp
-        let now_ct = Chicago.with_ymd_and_hms(2026, 5, 21, hour, min, 0).unwrap();
+        let now_ct = Chicago.with_ymd_and_hms(2026, 6, 17, hour, min, 0).unwrap();
 
         // Create the SubStrategy
         let sid = format!("strat_{}", time_str.replace(":", ""));
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         println!("Checking Entry for {} at {} CT (Chicago)...", sid, time_str);
         println!("-------------------------------------------------------------------------------");
 
-        if let Some(trade) = check_entry(&grid, &s, now_ct, 50.0) {
+        if let Some(trade) = check_entry(&grid, &s, now_ct, 50.0, 1.13) {
             println!("🎯 Rust Trade triggered successfully!");
             println!("  Net Entry Credit: ${:.2}", trade.credit);
             println!("  Commission: ${:.2}", trade.commission);

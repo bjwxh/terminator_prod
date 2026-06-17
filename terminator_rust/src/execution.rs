@@ -8,6 +8,8 @@ use tracing::{info, error, warn, debug};
 
 use crate::token::TokenManager;
 use crate::parser::parse_occ_symbol;
+use crate::strategy::{Trade, OptionLeg};
+use chrono::{Utc, TimeZone};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrokerPosition {
@@ -51,7 +53,7 @@ impl ExecutionClient {
         debug!("Resolving account hash for account ID: {}...", account_id);
 
         let response = self.client
-            .get("https://api.schwabapi.com/v1/accounts/accountNumbers")
+            .get("https://api.schwabapi.com/trader/v1/accounts/accountNumbers")
             .bearer_auth(access_token)
             .send()
             .await
@@ -81,7 +83,7 @@ impl ExecutionClient {
     /// Fetch SPX options positions currently open on the broker.
     pub async fn get_live_positions(&self, account_hash: &str) -> Result<Vec<BrokerPosition>> {
         let access_token = self.token_manager.get_access_token();
-        let url = format!("https://api.schwabapi.com/v1/accounts/{}", account_hash);
+        let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}", account_hash);
 
         let response = self.client
             .get(&url)
@@ -143,7 +145,7 @@ impl ExecutionClient {
     /// Place a REST order to the Schwab margin account.
     pub async fn place_order(&self, account_hash: &str, order_body: Value) -> Result<Option<String>> {
         let access_token = self.token_manager.get_access_token();
-        let url = format!("https://api.schwabapi.com/v1/accounts/{}/orders", account_hash);
+        let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}/orders", account_hash);
 
         info!("Transmitting REST Order Placement: {}", serde_json::to_string(&order_body)?);
 
@@ -178,7 +180,7 @@ impl ExecutionClient {
     /// Cancel a working REST order.
     pub async fn cancel_order(&self, account_hash: &str, order_id: &str) -> Result<bool> {
         let access_token = self.token_manager.get_access_token();
-        let url = format!("https://api.schwabapi.com/v1/accounts/{}/orders/{}", account_hash, order_id);
+        let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}/orders/{}", account_hash, order_id);
 
         info!("Sending Cancel request for Order ID: {}...", order_id);
 
@@ -197,5 +199,111 @@ impl ExecutionClient {
             warn!("Cancellation request rejected for ID {}: {}", order_id, body);
             Ok(false)
         }
+    }
+
+    pub async fn chase_order(&self, account_hash: &str, order_id: &str) -> Result<bool> {
+        info!("Sending Chase request for Order ID: {} (currently just cancels)", order_id);
+        self.cancel_order(account_hash, order_id).await
+    }
+
+    pub async fn cancel_all_orders(&self, _account_hash: &str) -> Result<Vec<String>> {
+        warn!("cancel_all_orders is a stub that currently does nothing");
+        Ok(Vec::new())
+    }
+
+    /// Fetch today's filled orders and parse them into Trades for Soft Bootstrap
+    pub async fn get_today_filled_orders(&self, account_hash: &str) -> Result<Vec<Trade>> {
+        let access_token = self.token_manager.get_access_token();
+        
+        let now_utc = Utc::now();
+        // Today 00:00:00 CT -> represented in UTC
+        // This is a naive approximation for the Schwab API which accepts UTC ISO8601 strings
+        let tz: chrono_tz::Tz = "America/Chicago".parse().unwrap();
+        let now_ct = now_utc.with_timezone(&tz);
+        let start_of_day_ct = now_ct.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(tz).unwrap();
+        let from_time = start_of_day_ct.with_timezone(&Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let to_time = now_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}/orders", account_hash);
+        let response = self.client
+            .get(&url)
+            .query(&[
+                ("fromEnteredTime", from_time.as_str()),
+                ("toEnteredTime", to_time.as_str()),
+                ("status", "FILLED"),
+            ])
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .context("Failed HTTP request to get orders")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Get orders API returned error {}: {}", status, body);
+        }
+
+        let orders: Vec<Value> = response.json().await?;
+        let mut filled_trades = Vec::new();
+
+        for order in orders {
+            let status = order.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if status != "FILLED" { continue; }
+
+            // Check if it's an Iron Condor (4 legs)
+            let legs = order.get("orderLegCollection").and_then(|v| v.as_array());
+            if let Some(leg_array) = legs {
+                if leg_array.len() == 4 {
+                    let mut option_legs = Vec::new();
+                    for leg in leg_array {
+                        let instr = leg.get("instrument").cloned().unwrap_or(Value::Null);
+                        let symbol = instr.get("symbol").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let instruction = leg.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+                        let quantity = leg.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
+                        
+                        let signed_qty = match instruction {
+                            "BUY_TO_OPEN" | "BUY_TO_CLOSE" => quantity,
+                            "SELL_TO_OPEN" | "SELL_TO_CLOSE" => -quantity,
+                            _ => quantity,
+                        };
+
+                        if let Some(parsed) = parse_occ_symbol(&symbol) {
+                            option_legs.push(OptionLeg {
+                                symbol,
+                                strike: parsed.strike,
+                                side: parsed.side,
+                                quantity: signed_qty,
+                                delta: 0.0, // Historical DB provides delta later
+                                theta: 0.0,
+                                price: 0.0, // Filled price per leg isn't easily mapped without execution chunks
+                            });
+                        }
+                    }
+
+                    if option_legs.len() == 4 {
+                        let credit = order.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0) * 100.0;
+                        let timestamp = order.get("closeTime").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let order_id = order.get("orderId").and_then(|v| {
+                            if v.is_number() {
+                                Some(v.to_string())
+                            } else {
+                                v.as_str().map(|s| s.to_string())
+                            }
+                        }).unwrap_or_default();
+                        
+                        filled_trades.push(Trade {
+                            timestamp,
+                            legs: option_legs,
+                            credit,
+                            commission: 0.0,
+                            purpose: "IRON_CONDOR".to_string(),
+                            strategy_id: order_id, // temporarily store order_id in strategy_id to map later
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(filled_trades)
     }
 }

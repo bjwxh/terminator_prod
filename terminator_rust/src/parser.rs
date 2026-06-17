@@ -277,6 +277,22 @@ pub fn parse_streaming_message(
                                 new_spx = Some(price);
                             }
                         }
+                        
+                        let time_val = entry.get("52")
+                            .or_else(|| entry.get("QUOTE_TIME_IN_LONG"));
+                        if let Some(t_val) = time_val {
+                            if let Some(ts_ms) = t_val.as_u64() {
+                                grid.set_exchange_ts_ms(ts_ms);
+                            }
+                        }
+                    } else if key == "$VIX.X" {
+                        let price_val = entry.get("3")
+                            .or_else(|| entry.get("LAST_PRICE"));
+                        if let Some(p_val) = price_val {
+                            if let Some(price) = p_val.as_f64() {
+                                grid.set_vix(price);
+                            }
+                        }
                     }
                 }
             } else if service == "LEVELONE_OPTIONS" {
