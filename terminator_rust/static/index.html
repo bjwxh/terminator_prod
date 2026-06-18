@@ -57,7 +57,7 @@
                 style="padding: 0.5rem 0.7rem; font-size: 1.1rem; display: flex; align-items: center; justify-content: center;">
                 <span id="mute-icon">🔔</span>
             </button>
-            <button id="toggle-trading-btn" class="btn btn-secondary">Enable trading</button>
+            <button id="toggle-trading-btn" class="btn btn-secondary">Enable Trading</button>
             <button id="reconnect-broker-btn" class="btn btn-secondary">Reconnect Broker</button>
         </div>
     </div>
@@ -330,24 +330,27 @@
                         </select>
                     </div>
                 </div>
-                <div class="table-container">
+                <div class="table-container" id="option-book-table-container">
                     <table id="option-book-table">
                         <colgroup>
-                            <col style="width: 14%;">
-                            <col style="width: 14%;">
-                            <col style="width: 14%;">
-                            <col style="width: 16%;">
-                            <col style="width: 14%;">
-                            <col style="width: 14%;">
-                            <col style="width: 14%;">
+                            <col style="width: 7%;">
+                            <col style="width: 11%;">
+                            <col style="width: 11%;">
+                            <col style="width: 10%;">
+                            <col style="width: 12%;">
+                            <col style="width: 10%;">
+                            <col style="width: 11%;">
+                            <col style="width: 11%;">
+                            <col style="width: 7%;">
                         </colgroup>
                         <thead>
                             <tr>
-                                <th colspan="3" style="text-align: center; border-bottom: 2px solid var(--border-color); color: var(--accent-green);">CALLS</th>
+                                <th colspan="4" style="text-align: center; border-bottom: 2px solid var(--border-color); color: var(--accent-green);">CALLS</th>
                                 <th style="border-bottom: 2px solid var(--border-color); background-color: #1c2128;">&nbsp;</th>
-                                <th colspan="3" style="text-align: center; border-bottom: 2px solid var(--border-color); color: var(--accent-red);">PUTS</th>
+                                <th colspan="4" style="text-align: center; border-bottom: 2px solid var(--border-color); color: var(--accent-red);">PUTS</th>
                             </tr>
                             <tr>
+                                <th style="color: var(--text-secondary); font-size: 0.75rem;">Updated</th>
                                 <th>Bid</th>
                                 <th>Ask</th>
                                 <th>Delta</th>
@@ -355,6 +358,7 @@
                                 <th>Delta</th>
                                 <th>Bid</th>
                                 <th>Ask</th>
+                                <th style="color: var(--text-secondary); font-size: 0.75rem;">Updated</th>
                             </tr>
                         </thead>
                         <tbody id="option-book-tbody">

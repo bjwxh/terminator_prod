@@ -276,6 +276,7 @@ impl ExecutionClient {
                                 delta: 0.0, // Historical DB provides delta later
                                 theta: 0.0,
                                 price: 0.0, // Filled price per leg isn't easily mapped without execution chunks
+                                instruction: Some(instruction.to_string()),
                             });
                         }
                     }

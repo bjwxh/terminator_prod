@@ -154,12 +154,14 @@ impl WebsocketClient {
         if !new_symbols.is_empty() {
             if let Some(tx) = self.active_cmd_tx.lock().await.as_ref() {
                 if let Some(streamer) = self.active_streamer_info.lock().await.as_ref() {
+                    // Use ADD (not SUBS) — SUBS replaces the entire subscription list for the
+                    // service, so chunking with SUBS would cancel all prior chunks. ADD appends.
                     for chunk in new_symbols.chunks(40) {
                         let req_id = self.next_request_id().await;
                         let sub_req = WsRequest {
                             service: service.to_string(),
                             requestid: req_id,
-                            command: "SUBS".to_string(),
+                            command: "ADD".to_string(),
                             customer_id: streamer.schwab_client_customer_id.clone(),
                             correl_id: streamer.schwab_client_correl_id.clone(),
                             parameters: serde_json::json!({
@@ -171,7 +173,7 @@ impl WebsocketClient {
                         let msg_str = serde_json::to_string(&payload)?;
                         let _ = tx.send(Message::Text(msg_str.into()));
                     }
-                    info!("Dynamically sent subscription request for {} symbols", new_symbols.len());
+                    info!("Dynamically sent ADD subscription request for {} symbols", new_symbols.len());
                 }
             }
         }
@@ -346,13 +348,15 @@ impl WebsocketClient {
             }
 
             // Subscribe to Level 1 Equities ($SPX, $VIX)
+            // First chunk: SUBS (establishes fresh baseline on reconnect).
+            // Subsequent chunks (if any): ADD (appends without replacing the first chunk).
             if !equities.is_empty() {
-                for chunk in equities.chunks(40) {
+                for (i, chunk) in equities.chunks(40).enumerate() {
                     let req_id = self.next_request_id().await;
                     let sub_req = WsRequest {
                         service: "LEVELONE_EQUITIES".to_string(),
                         requestid: req_id,
-                        command: "SUBS".to_string(),
+                        command: if i == 0 { "SUBS" } else { "ADD" }.to_string(),
                         customer_id: streamer.schwab_client_customer_id.clone(),
                         correl_id: streamer.schwab_client_correl_id.clone(),
                         parameters: serde_json::json!({
@@ -367,13 +371,15 @@ impl WebsocketClient {
             }
 
             // Subscribe to Level 1 Options (SPXW Strikes)
+            // First chunk: SUBS (establishes fresh baseline on reconnect).
+            // Subsequent chunks: ADD (appends without replacing prior chunks).
             if !options.is_empty() {
-                for chunk in options.chunks(40) {
+                for (i, chunk) in options.chunks(40).enumerate() {
                     let req_id = self.next_request_id().await;
                     let sub_req = WsRequest {
                         service: "LEVELONE_OPTIONS".to_string(),
                         requestid: req_id,
-                        command: "SUBS".to_string(),
+                        command: if i == 0 { "SUBS" } else { "ADD" }.to_string(),
                         customer_id: streamer.schwab_client_customer_id.clone(),
                         correl_id: streamer.schwab_client_correl_id.clone(),
                         parameters: serde_json::json!({
@@ -400,44 +406,56 @@ impl WebsocketClient {
         info!("Entering main streaming select loop...");
 
         // 5. Main concurrent select loop
+        // Heartbeat timeout: if no frame arrives within 30s the TCP connection is stale
+        // (half-open) and we bail so the supervisor loop can reconnect.
+        let heartbeat_timeout = Duration::from_secs(30);
         loop {
             tokio::select! {
-                Some(msg_res) = read_half.next() => {
-                    let msg = msg_res?;
-                    match msg {
-                        Message::Text(text) => {
-                            info!("Received WebSocket message: {}", text);
-                            // Let the parser handle all text messages or check case-insensitively
-                            let text_upper = text.to_uppercase();
-                            if text_upper.contains("RESPONSE") || text_upper.contains("DATA") {
-                                // Send to parsing thread
-                                let _ = self.message_tx.send(text.clone());
-                            } else {
-                                debug!("Received unhandled Stream message: {}", text);
-                            }
-                        }
-                        Message::Binary(bin) => {
-                            if let Ok(txt) = String::from_utf8(bin) {
-                                info!("Received binary WebSocket message: {}", txt);
-                                let _ = self.message_tx.send(txt);
-                            }
-                        }
-                        Message::Ping(_) => {
-                            debug!("Ping received, Pong sent.");
-                        }
-                        Message::Close(_) => {
-                            warn!("Streamer sent WebSocket close frame. Reconnecting...");
+                msg_result = tokio::time::timeout(heartbeat_timeout, read_half.next()) => {
+                    match msg_result {
+                        Err(_) => {
+                            warn!("No WebSocket frame received for {}s — connection appears stale. Reconnecting...", heartbeat_timeout.as_secs());
                             break;
                         }
-                        _ => {}
+                        Ok(None) => {
+                            warn!("WebSocket stream ended (read_half returned None). Reconnecting...");
+                            break;
+                        }
+                        Ok(Some(Err(e))) => {
+                            return Err(e.into());
+                        }
+                        Ok(Some(Ok(msg))) => {
+                            match msg {
+                                Message::Text(text) => {
+                                    info!("Received WebSocket message: {}", text);
+                                    let text_upper = text.to_uppercase();
+                                    if text_upper.contains("RESPONSE") || text_upper.contains("DATA") {
+                                        let _ = self.message_tx.send(text.clone());
+                                    } else {
+                                        debug!("Received unhandled Stream message: {}", text);
+                                    }
+                                }
+                                Message::Binary(bin) => {
+                                    if let Ok(txt) = String::from_utf8(bin) {
+                                        info!("Received binary WebSocket message: {}", txt);
+                                        let _ = self.message_tx.send(txt);
+                                    }
+                                }
+                                Message::Ping(_) => {
+                                    debug!("Ping received, Pong sent.");
+                                }
+                                Message::Close(_) => {
+                                    warn!("Streamer sent WebSocket close frame. Reconnecting...");
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 Some(cmd) = session_rx.recv() => {
                     write_half.send(cmd).await
                         .context("Failed to forward outgoing command to WebSocket")?;
-                }
-                else => {
-                    break;
                 }
             }
         }

@@ -1025,7 +1025,7 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
     letter-spacing: 0.05em;
     text-transform: uppercase;
 }
-#option-book-table td:nth-child(4) {
+#option-book-table td:nth-child(5) {
     background: rgba(88, 166, 255, 0.05);
     border-left: 1px solid var(--border-color);
     border-right: 1px solid var(--border-color);
@@ -1057,5 +1057,9 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
     height: 38px;
     line-height: 38px;
     padding: 0 !important;
+}
+
+#option-book-table-container {
+    max-height: 1000px;
 }
 

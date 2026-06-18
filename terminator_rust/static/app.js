@@ -198,7 +198,7 @@ function updateUI(state) {
     const tradingBtn = document.getElementById('toggle-trading-btn');
     document.getElementById('trading-status').textContent = state.trading_enabled ? 'ENABLED' : 'DISABLED';
     document.getElementById('trading-status').className = 'value ' + (state.trading_enabled ? 'status-connected' : 'status-disabled');
-    tradingBtn.textContent = state.trading_enabled ? 'Disable trading' : 'Enable trading';
+    tradingBtn.textContent = state.trading_enabled ? 'Disable Trading' : 'Enable Trading';
 
     // DB Status (v1.2)
     const dbStatusVal = document.getElementById('db-status');
@@ -754,12 +754,24 @@ function updateOptionBook(optionBook, spx) {
     
     displayBook.forEach(row => {
         const tr = document.createElement('tr');
-        
+
         const fmtPrice = (val) => (val === null || val === undefined) ? '' : val.toFixed(2);
         const fmtDelta = (val) => (val === null || val === undefined) ? '' : val.toFixed(3);
         const fmtStrike = (val) => (val === null || val === undefined) ? '' : val.toFixed(1);
+        const fmtUpdated = (secs) => {
+            if (secs === null || secs === undefined) return '';
+            if (secs < 60) return secs + 's';
+            return Math.floor(secs / 60) + 'm' + (secs % 60) + 's';
+        };
+        const updatedColor = (secs) => {
+            if (secs === null || secs === undefined) return '';
+            if (secs <= 3) return 'color: var(--accent-green);';
+            if (secs <= 15) return 'color: var(--accent-yellow, #e3b341);';
+            return 'color: var(--accent-red);';
+        };
 
         tr.innerHTML = `
+            <td style="font-size: 0.72rem; ${updatedColor(row.call_updated_secs)}">${fmtUpdated(row.call_updated_secs)}</td>
             <td style="color: var(--text-secondary);">${fmtPrice(row.call_bid)}</td>
             <td style="color: var(--text-secondary);">${fmtPrice(row.call_ask)}</td>
             <td style="color: var(--accent-green);">${fmtDelta(row.call_delta)}</td>
@@ -767,6 +779,7 @@ function updateOptionBook(optionBook, spx) {
             <td style="color: var(--accent-red);">${fmtDelta(row.put_delta)}</td>
             <td style="color: var(--text-secondary);">${fmtPrice(row.put_bid)}</td>
             <td style="color: var(--text-secondary);">${fmtPrice(row.put_ask)}</td>
+            <td style="font-size: 0.72rem; ${updatedColor(row.put_updated_secs)}">${fmtUpdated(row.put_updated_secs)}</td>
         `;
         tbody.appendChild(tr);
     });
@@ -952,7 +965,21 @@ function showTradeModal(tradeData) {
         }
         orderListEl.innerHTML = '';
 
-        const orders = tradeData.orders || [];
+        let orders = (tradeData.trade && tradeData.trade.orders) || [];
+        if (orders.length === 0 && tradeData.trade && tradeData.trade.legs) {
+            orders = tradeData.trade.legs.map((l, idx) => {
+                const sideStr = l.quantity > 0 ? "BUY" : "SELL";
+                return {
+                    idx: idx,
+                    type: `${sideStr} TO OPEN`,
+                    qty: Math.abs(l.quantity),
+                    desc: `${l.side} ${l.strike} (${l.symbol})`,
+                    price_ea: l.price,
+                    is_credit: l.quantity < 0,
+                    lock_floor: true
+                };
+            });
+        }
         currentTradeOrders = JSON.parse(JSON.stringify(orders));
 
         currentTradeOrders.forEach((order, idx) => {
@@ -985,7 +1012,14 @@ function showTradeModal(tradeData) {
         });
 
         const creditEl = document.getElementById('modal-total-credit');
-        if (creditEl) creditEl.textContent = tradeData.total_credit || '$0.00';
+        if (creditEl) {
+            let totalCredit = tradeData.total_credit;
+            if (tradeData.trade && tradeData.trade.credit !== undefined) {
+                const creditVal = tradeData.trade.credit;
+                totalCredit = `${formatUSD(Math.abs(creditVal / 100))} ${creditVal >= 0 ? 'Credit' : 'Debit'}`;
+            }
+            creditEl.textContent = totalCredit || '$0.00';
+        }
 
         window.currentTradeMaxTime = tradeData.timeout || TRADE_TIMEOUT_SEC;
         tradeTimeLeft = window.currentTradeMaxTime;

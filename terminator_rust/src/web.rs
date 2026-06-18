@@ -18,9 +18,61 @@ use serde_json::json;
 use tracing::{info, error};
 
 use crate::grid::OptionsGrid;
-use crate::strategy::{StrategySupervisor, LegOverride};
+use crate::strategy::{StrategySupervisor, LegOverride, OptionLeg};
 use crate::news::NewsFetcher;
 use crate::logger::RingLogger;
+
+fn build_orders_val(legs: &[OptionLeg], order_offset: f64) -> Vec<serde_json::Value> {
+    let chunks = crate::strategy::get_smart_chunks(legs);
+    let mut orders_val = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let total_chunk_credit = chunk.iter().map(|l| -(l.quantity as f64) * l.price).sum::<f64>() * 100.0;
+        let mut num_units = chunk[0].quantity.abs();
+        for leg in chunk.iter().skip(1) {
+            num_units = crate::strategy::gcd(num_units, leg.quantity.abs());
+        }
+        if num_units == 0 { num_units = 1; }
+        let signed_mid = total_chunk_credit / (100.0 * num_units as f64);
+        let (struct_type, is_credit_structural) = crate::strategy::classify_order_type(chunk);
+        let lock_floor = struct_type != "unknown";
+        let target = signed_mid + order_offset;
+        let (is_credit, price) = if lock_floor {
+            let is_cred = is_credit_structural.unwrap_or(true);
+            let raw_price = if is_cred { target } else { -target };
+            (is_cred, raw_price.max(0.0))
+        } else {
+            let is_cred = target >= 0.0;
+            (is_cred, target.abs())
+        };
+        let price_ticked = (price / 0.05).round() * 0.05;
+        let price_ea = if is_credit { price_ticked } else { -price_ticked };
+        let legs_val: Vec<serde_json::Value> = chunk.iter().map(|l| {
+            json!({ "symbol": l.symbol, "strike": l.strike, "side": l.side,
+                    "quantity": l.quantity, "price": l.price, "delta": l.delta })
+        }).collect();
+
+        // Format desc string like "[IRON_CONDOR] SHORT CALL 7540 x1 | LONG CALL 7545 x1 ..."
+        let mut leg_texts = Vec::new();
+        for l in chunk {
+            let side_str = if l.quantity < 0 { "SHORT" } else { "LONG" };
+            leg_texts.push(format!("{} {} {} x{}", side_str, l.side, l.strike as i32, l.quantity.abs() / num_units));
+        }
+        let desc = format!("[{}] {}", struct_type.to_uppercase(), leg_texts.join(" | "));
+
+        orders_val.push(json!({
+            "idx": i,
+            "legs": legs_val,
+            "type": if is_credit { "SELL TO OPEN" } else { "BUY TO OPEN" },
+            "qty": num_units,
+            "desc": desc,
+            "price_ea": price_ea,
+            "is_credit": is_credit,
+            "order_type": struct_type,
+            "lock_floor": lock_floor
+        }));
+    }
+    orders_val
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -115,59 +167,77 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
     // Serialized portfolio snapshots
     let live_snap = state.supervisor.live_portfolio.lock().await.snapshot();
 
-    // Sourced option book — only rows/sides with active live subscriptions
+    // Option book — OTM window only, matching the SlidingWindowManager subscription range.
+    // Calls: [spx, spx + otm_offset], Puts: [spx - otm_offset, spx].
+    // Slides automatically as SPX moves; no hard dependency on subscription status.
     let option_book: Vec<serde_json::Value> = {
-        let subscribed = state.grid.subscribed_option_symbols.read().unwrap();
+        let otm_offset = state.supervisor.config.otm_offset;
+        let put_min = spx - otm_offset;
+        let call_max = spx + otm_offset;
 
-        let mut sorted_quotes: Vec<crate::grid::OptionQuote> = state.grid.quotes.iter().map(|entry| entry.value().clone()).collect();
+        let mut sorted_quotes: Vec<crate::grid::OptionQuote> = state.grid.quotes.iter()
+            .filter(|entry| {
+                let strike = entry.value().strike;
+                strike >= put_min && strike <= call_max
+            })
+            .map(|entry| entry.value().clone())
+            .collect();
         sorted_quotes.sort_by(|a, b| a.strike.partial_cmp(&b.strike).unwrap_or(std::cmp::Ordering::Equal));
 
         sorted_quotes.iter().filter_map(|q| {
-            let (c_bid, c_ask, c_delta) = match &q.call {
-                Some(call) if subscribed.contains(&call.symbol) =>
-                    (json!(call.bid), json!(call.ask), json!(call.delta)),
-                _ => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
+            // Use the same constant as manager.rs so overlap stays in sync.
+            let in_call_range = q.strike >= spx - crate::manager::ATM_OVERLAP_PTS;
+            let in_put_range = q.strike <= spx + crate::manager::ATM_OVERLAP_PTS;
+
+            // elapsed().as_secs() is the freshness signal:
+            // low (green) = live WS tick, high (red) = bootstrap/stale data
+            let (c_bid, c_ask, c_delta, c_updated) = if in_call_range {
+                match &q.call {
+                    Some(call) => (
+                        json!(call.bid), json!(call.ask), json!(call.delta),
+                        json!(call.last_update.elapsed().as_secs()),
+                    ),
+                    None => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
+                }
+            } else {
+                (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null)
             };
 
-            let (p_delta, p_bid, p_ask) = match &q.put {
-                Some(put) if subscribed.contains(&put.symbol) =>
-                    (json!(put.delta), json!(put.bid), json!(put.ask)),
-                _ => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
+            let (p_delta, p_bid, p_ask, p_updated) = if in_put_range {
+                match &q.put {
+                    Some(put) => (
+                        json!(put.delta), json!(put.bid), json!(put.ask),
+                        json!(put.last_update.elapsed().as_secs()),
+                    ),
+                    None => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
+                }
+            } else {
+                (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null)
             };
 
-            // Skip strike rows where neither side is currently subscribed
             if c_bid.is_null() && p_bid.is_null() {
                 return None;
             }
 
             Some(json!({
                 "strike": q.strike,
+                "call_updated_secs": c_updated,
                 "call_bid": c_bid,
                 "call_ask": c_ask,
                 "call_delta": c_delta,
                 "put_delta": p_delta,
                 "put_bid": p_bid,
-                "put_ask": p_ask
+                "put_ask": p_ask,
+                "put_updated_secs": p_updated,
             }))
         }).collect()
     };
     
-    // If dry_run is true, we output live_snap into sim, and zero out live
-    let dry_run = state.supervisor.config.dry_run;
-    
-    let (sim_payload, live_payload) = if dry_run {
-        (json!(live_snap), json!({
-            "pnl": 0.0, "fees": 0.0, "net_pnl": 0.0, "realized": 0.0,
-            "unrealized": 0.0, "margin": 0.0, "trades": 0, "delta": 0.0, "theta": 0.0,
-            "positions": [], "recent_trades": []
-        }))
-    } else {
-        (json!({
-            "pnl": 0.0, "fees": 0.0, "net_pnl": 0.0, "realized": 0.0,
-            "unrealized": 0.0, "margin": 0.0, "trades": 0, "delta": 0.0, "theta": 0.0,
-            "positions": [], "recent_trades": []
-        }), json!(live_snap))
-    };
+    // live_portfolio = sim (strategy trades, used by reconciliation as ground truth).
+    // broker_portfolio = live (only trades physically sent to the exchange).
+    let broker_snap = state.supervisor.broker_portfolio.lock().await.snapshot();
+    let sim_payload = json!(live_snap);
+    let live_payload = json!(broker_snap);
 
     // Sub-strategies
     let mut strategies_data = serde_json::Map::new();
@@ -184,7 +254,7 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
             })
         }).collect();
         
-        let history: Vec<serde_json::Value> = s_port.trades.iter().rev().take(5).map(|t| {
+        let history: Vec<serde_json::Value> = s_port.trades.iter().rev().take(50).map(|t| {
             json!({
                 "ts": t.timestamp, "purpose": t.purpose, "credit": t.credit,
                 "legs": t.legs.iter().map(|l| json!({"symbol": l.symbol, "qty": l.quantity, "strike": l.strike, "side": l.side})).collect::<Vec<_>>()
@@ -207,6 +277,8 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
     // Pending confirmation trade
     let pending_trade_val = match &*state.supervisor.pending_trade.lock().await {
         Some(t) => {
+            let orders_val = build_orders_val(&t.trade.legs, state.supervisor.config.order_offset);
+
             let legs_val: Vec<serde_json::Value> = t.trade.legs.iter().map(|l| {
                 json!({
                     "symbol": l.symbol, "strike": l.strike, "side": l.side, "quantity": l.quantity,
@@ -221,7 +293,8 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
                     "credit": t.trade.credit,
                     "commission": t.trade.commission,
                     "purpose": t.trade.purpose,
-                    "legs": legs_val
+                    "legs": legs_val,
+                    "orders": orders_val
                 }
             })
         }
@@ -334,6 +407,10 @@ async fn handle_ws_socket(socket: WebSocket, state: AppState) {
             })
         }).collect();
 
+        // Build chunked orders — same logic as build_state_snapshot so the reconnect modal
+        // renders grouped multi-leg cards instead of individual legs.
+        let orders_val = build_orders_val(&t.trade.legs, state.supervisor.config.order_offset);
+
         let reconnect_payload = json!({
             "type": "trade_signal",
             "strat_id": t.strat_id,
@@ -342,7 +419,8 @@ async fn handle_ws_socket(socket: WebSocket, state: AppState) {
                 "credit": t.trade.credit,
                 "commission": t.trade.commission,
                 "purpose": t.trade.purpose,
-                "legs": legs_val
+                "legs": legs_val,
+                "orders": orders_val
             },
             "is_reconnect": true
         });

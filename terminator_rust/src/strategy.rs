@@ -1,6 +1,7 @@
 use std::time::Duration;
 use std::sync::Arc;
 use std::collections::HashMap;
+use ordered_float::OrderedFloat;
 use tokio::sync::Mutex;
 use anyhow::Result;
 use chrono::{TimeZone, NaiveTime};
@@ -38,6 +39,8 @@ pub struct OptionLeg {
     pub delta: f64,
     pub theta: f64,
     pub price: f64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub instruction: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,8 +122,10 @@ pub fn find_closest_option(
         let strike = entry.key().0;
         let quote = entry.value();
 
-        // Safety stale quote check (Stale Quote Guard: 500ms limit)
-        if quote.last_updated.elapsed() > Duration::from_millis(500) {
+        // Stale quote guard: skip strikes that haven't received a WS tick in 5s.
+        // 500ms was too aggressive — WS ticks arrive at ~1Hz so half the time a
+        // strike would be falsely excluded.
+        if quote.last_updated.elapsed() > Duration::from_millis(5000) {
             continue;
         }
 
@@ -145,7 +150,7 @@ pub fn find_closest_option(
 
         let leg_quote_opt = if is_call { &quote.call } else { &quote.put };
         if let Some(leg) = leg_quote_opt {
-            if leg.mid <= 0.0 || leg.last_update.elapsed() > Duration::from_millis(500) {
+            if leg.mid <= 0.0 || leg.last_update.elapsed() > Duration::from_millis(5000) {
                 continue;
             }
             let abs_delta = leg.delta.abs();
@@ -211,6 +216,7 @@ pub fn check_entry(
             delta: sc.delta,
             theta: sc.theta,
             price: sc.mid,
+            instruction: None,
         },
         OptionLeg {
             symbol: lc.symbol.clone(),
@@ -220,6 +226,7 @@ pub fn check_entry(
             delta: lc.delta,
             theta: lc.theta,
             price: lc.mid,
+            instruction: None,
         },
         OptionLeg {
             symbol: sp.symbol.clone(),
@@ -229,6 +236,7 @@ pub fn check_entry(
             delta: sp.delta,
             theta: sp.theta,
             price: sp.mid,
+            instruction: None,
         },
         OptionLeg {
             symbol: lp.symbol.clone(),
@@ -238,6 +246,7 @@ pub fn check_entry(
             delta: lp.delta,
             theta: lp.theta,
             price: lp.mid,
+            instruction: None,
         },
     ];
 
@@ -309,6 +318,7 @@ fn create_new_spread_trade(
             delta: opt_s.delta,
             theta: opt_s.theta,
             price: opt_s.mid,
+            instruction: None,
         },
         OptionLeg {
             symbol: opt_l.symbol.clone(),
@@ -318,6 +328,7 @@ fn create_new_spread_trade(
             delta: opt_l.delta,
             theta: opt_l.theta,
             price: opt_l.mid,
+            instruction: None,
         },
     ];
 
@@ -359,6 +370,7 @@ fn create_rebalance_short(
             delta: old_short.delta,
             theta: old_short.theta,
             price: old_short.price,
+            instruction: None,
         },
         OptionLeg {
             symbol: new_short.symbol.clone(),
@@ -368,6 +380,7 @@ fn create_rebalance_short(
             delta: new_short.delta,
             theta: new_short.theta,
             price: new_short.mid,
+            instruction: None,
         },
     ];
 
@@ -387,6 +400,7 @@ fn create_rebalance_short(
                 delta: ol.delta,
                 theta: ol.theta,
                 price: ol.price,
+                instruction: None,
             });
             legs.push(OptionLeg {
                 symbol: new_long.symbol.clone(),
@@ -396,6 +410,7 @@ fn create_rebalance_short(
                 delta: new_long.delta,
                 theta: new_long.theta,
                 price: new_long.mid,
+                instruction: None,
             });
         }
     }
@@ -445,6 +460,7 @@ fn create_rebalance_long(
             delta: old_long.delta,
             theta: old_long.theta,
             price: old_long.price,
+            instruction: None,
         },
         OptionLeg {
             symbol: new_long.symbol.clone(),
@@ -454,6 +470,7 @@ fn create_rebalance_long(
             delta: new_long.delta,
             theta: new_long.theta,
             price: new_long.mid,
+            instruction: None,
         },
     ];
 
@@ -566,6 +583,7 @@ pub fn check_exit(
             delta: p.delta,
             theta: p.theta,
             price: exit_price,
+            instruction: None,
         });
     }
 
@@ -583,6 +601,279 @@ pub fn check_exit(
     })
 }
 
+pub fn gcd(a: i32, b: i32) -> i32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+pub fn unroll_legs(legs: &[OptionLeg]) -> Vec<OptionLeg> {
+    let mut sorted_input = legs.to_vec();
+    sorted_input.sort_by(|a, b| {
+        let side_a = if a.side == "PUT" { 0 } else { 1 };
+        let side_b = if b.side == "PUT" { 0 } else { 1 };
+        side_a.cmp(&side_b).then_with(|| a.strike.partial_cmp(&b.strike).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut unrolled = Vec::new();
+    for leg in sorted_input {
+        let qty = leg.quantity.abs();
+        let direction = if leg.quantity > 0 { 1 } else { -1 };
+        for _ in 0..qty {
+            let mut unit_leg = leg.clone();
+            unit_leg.quantity = direction;
+            unrolled.push(unit_leg);
+        }
+    }
+    unrolled
+}
+
+pub fn roll_legs(legs: &[OptionLeg]) -> Vec<OptionLeg> {
+    let mut agg: std::collections::HashMap<String, OptionLeg> = std::collections::HashMap::new();
+    for l in legs {
+        if let Some(existing) = agg.get_mut(&l.symbol) {
+            existing.quantity += l.quantity;
+        } else {
+            agg.insert(l.symbol.clone(), l.clone());
+        }
+    }
+    let mut rolled: Vec<OptionLeg> = agg.into_values().filter(|l| l.quantity != 0).collect();
+    rolled.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    rolled
+}
+
+pub fn classify_order_type(legs: &[OptionLeg]) -> (&'static str, Option<bool>) {
+    let n = legs.len();
+    if n == 0 {
+        return ("unknown", None);
+    }
+    if n == 1 {
+        let is_credit = legs[0].quantity < 0;
+        return ("single", Some(is_credit));
+    }
+    if n == 2 {
+        let l1 = &legs[0];
+        let l2 = &legs[1];
+        if l1.side == l2.side && l1.quantity * l2.quantity < 0 && l1.quantity.abs() == l2.quantity.abs() {
+            let (long_leg, short_leg) = if l1.quantity > 0 { (l1, l2) } else { (l2, l1) };
+            let is_credit = if l1.side == "CALL" {
+                short_leg.strike < long_leg.strike
+            } else {
+                short_leg.strike > long_leg.strike
+            };
+            return ("vertical", Some(is_credit));
+        }
+    }
+
+    let mut sorted_legs = legs.to_vec();
+    sorted_legs.sort_by(|a, b| a.strike.partial_cmp(&b.strike).unwrap_or(std::cmp::Ordering::Equal));
+    let quantities: Vec<i32> = sorted_legs.iter().map(|l| l.quantity).collect();
+
+    let mut unit = quantities[0].abs();
+    for q in quantities.iter().skip(1) {
+        unit = gcd(unit, q.abs());
+    }
+
+    let ratios: Vec<i32> = if unit > 0 {
+        quantities.iter().map(|q| q / unit).collect()
+    } else {
+        Vec::new()
+    };
+
+    if n == 3 {
+        let all_same_side = sorted_legs.iter().all(|l| l.side == sorted_legs[0].side);
+        if all_same_side {
+            if ratios == vec![1, -2, 1] {
+                return ("butterfly", Some(false));
+            }
+            if ratios == vec![-1, 2, -1] {
+                return ("butterfly", Some(true));
+            }
+        }
+    }
+
+    if n == 4 {
+        let all_same_side = sorted_legs.iter().all(|l| l.side == sorted_legs[0].side);
+        if all_same_side {
+            if ratios == vec![1, -1, -1, 1] {
+                return ("condor", Some(false));
+            }
+            if ratios == vec![-1, 1, 1, -1] {
+                return ("condor", Some(true));
+            }
+        }
+
+        let p_legs: Vec<&OptionLeg> = sorted_legs.iter().filter(|l| l.side == "PUT").collect();
+        let c_legs: Vec<&OptionLeg> = sorted_legs.iter().filter(|l| l.side == "CALL").collect();
+        if p_legs.len() == 2 && c_legs.len() == 2 {
+            let lp = p_legs.iter().find(|l| l.quantity > 0);
+            let sp = p_legs.iter().find(|l| l.quantity < 0);
+            let lc = c_legs.iter().find(|l| l.quantity > 0);
+            let sc = c_legs.iter().find(|l| l.quantity < 0);
+
+            if let (Some(lp), Some(sp), Some(lc), Some(sc)) = (lp, sp, lc, sc) {
+                if lp.quantity.abs() == sp.quantity.abs()
+                    && sp.quantity.abs() == lc.quantity.abs()
+                    && lc.quantity.abs() == sc.quantity.abs()
+                {
+                    let is_credit = sp.strike > lp.strike && sc.strike < lc.strike;
+                    let t_str = if sp.strike == sc.strike || lp.strike == lc.strike {
+                        "iron_fly"
+                    } else {
+                        "iron_condor"
+                    };
+                    return (t_str, Some(is_credit));
+                }
+            }
+        }
+    }
+
+    ("unknown", None)
+}
+
+fn extract_chunk<F>(remaining: &mut Vec<OptionLeg>, num_legs: usize, constraint_func: F) -> Option<Vec<OptionLeg>>
+where
+    F: Fn(&[OptionLeg]) -> bool,
+{
+    let len = remaining.len();
+    if len < num_legs {
+        return None;
+    }
+
+    if num_legs == 4 {
+        for i in 0..len {
+            for j in (i + 1)..len {
+                for k in (j + 1)..len {
+                    for l in (k + 1)..len {
+                        let combo = vec![
+                            remaining[i].clone(),
+                            remaining[j].clone(),
+                            remaining[k].clone(),
+                            remaining[l].clone(),
+                        ];
+                        let mut unique = true;
+                        for x in 0..4 {
+                            for y in (x + 1)..4 {
+                                if combo[x].side == combo[y].side && (combo[x].strike - combo[y].strike).abs() < 1e-5 {
+                                    unique = false;
+                                    break;
+                                }
+                            }
+                            if !unique { break; }
+                        }
+                        if !unique { continue; }
+
+                        if constraint_func(&combo) {
+                            remaining.remove(l);
+                            remaining.remove(k);
+                            remaining.remove(j);
+                            remaining.remove(i);
+                            return Some(combo);
+                        }
+                    }
+                }
+            }
+        }
+    } else if num_legs == 2 {
+        for i in 0..len {
+            for j in (i + 1)..len {
+                let combo = vec![
+                    remaining[i].clone(),
+                    remaining[j].clone(),
+                ];
+                if combo[0].side == combo[1].side && (combo[0].strike - combo[1].strike).abs() < 1e-5 {
+                    continue;
+                }
+
+                if constraint_func(&combo) {
+                    remaining.remove(j);
+                    remaining.remove(i);
+                    return Some(combo);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn get_smart_chunks(legs: &[OptionLeg]) -> Vec<Vec<OptionLeg>> {
+    let mut remaining = unroll_legs(legs);
+    if remaining.is_empty() {
+        return Vec::new();
+    }
+
+    let mut found_combos = Vec::new();
+
+    // Priority 1: Iron Condors (4 legs: 1xLC, 1xSC, 1xLP, 1xSP)
+    while remaining.len() >= 4 {
+        let ic = extract_chunk(&mut remaining, 4, |c| {
+            c.iter().filter(|l| l.side == "CALL" && l.quantity > 0).count() == 1 &&
+            c.iter().filter(|l| l.side == "CALL" && l.quantity < 0).count() == 1 &&
+            c.iter().filter(|l| l.side == "PUT" && l.quantity > 0).count() == 1 &&
+            c.iter().filter(|l| l.side == "PUT" && l.quantity < 0).count() == 1
+        });
+        match ic {
+            Some(combo) => found_combos.push(combo),
+            None => break,
+        }
+    }
+
+    // Priority 2: Side-Specific Condors / Rolls (4 legs: 2L, 2S on same side)
+    while remaining.len() >= 4 {
+        let roll = extract_chunk(&mut remaining, 4, |c| {
+            c.iter().all(|l| l.side == c[0].side) &&
+            c.iter().filter(|l| l.quantity > 0).count() == 2 &&
+            c.iter().filter(|l| l.quantity < 0).count() == 2
+        });
+        match roll {
+            Some(combo) => found_combos.push(combo),
+            None => break,
+        }
+    }
+
+    // Priority 3: Vertical Spreads (2 legs: 1L, 1S on same side)
+    while remaining.len() >= 2 {
+        let vs = extract_chunk(&mut remaining, 2, |c| {
+            c.iter().all(|l| l.side == c[0].side) &&
+            c.iter().filter(|l| l.quantity > 0).count() == 1 &&
+            c.iter().filter(|l| l.quantity < 0).count() == 1
+        });
+        match vs {
+            Some(combo) => found_combos.push(combo),
+            None => break,
+        }
+    }
+
+    // Residuals: Aggregate whatever is left
+    let leftover_rolled = roll_legs(&remaining);
+
+    // Group identical combo units (consolidation)
+    let mut grouped: std::collections::HashMap<Vec<(String, Option<String>)>, Vec<Vec<OptionLeg>>> = std::collections::HashMap::new();
+    for combo in found_combos {
+        let mut sig: Vec<(String, Option<String>)> = combo.iter().map(|l| (l.symbol.clone(), l.instruction.clone())).collect();
+        sig.sort();
+        grouped.entry(sig).or_default().push(combo);
+    }
+
+    let mut final_chunks = Vec::new();
+    let mut entries: Vec<(Vec<(String, Option<String>)>, Vec<Vec<OptionLeg>>)> = grouped.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (_, combos) in entries {
+        let mut all_unit_legs = Vec::new();
+        for combo in combos {
+            all_unit_legs.extend(combo);
+        }
+        final_chunks.push(roll_legs(&all_unit_legs));
+    }
+
+    if !leftover_rolled.is_empty() {
+        for chunk in leftover_rolled.chunks(4) {
+            final_chunks.push(chunk.to_vec());
+        }
+    }
+
+    final_chunks
+}
+
 /// Place the generated trade to Schwab API
 pub async fn execute_trade(
     client: &ExecutionClient,
@@ -590,62 +881,114 @@ pub async fn execute_trade(
     trade: &Trade,
     dry_run: bool,
     order_offset: f64,
-    portfolio: &crate::portfolio::Portfolio,
-) -> Result<Option<String>> {
-    if dry_run {
-        info!("[DRY RUN] Bypassing REST endpoint. Strategy {} would trade {} (credit: ${:.2})", trade.strategy_id, trade.purpose, trade.credit);
-        return Ok(None);
-    }
+    positions: &[crate::portfolio::PositionLeg],
+    overrides: &[LegOverride],
+) -> Result<Vec<Option<String>>, (Vec<Option<String>>, anyhow::Error)> {
+    let chunks = get_smart_chunks(&trade.legs);
+    let mut order_ids = Vec::new();
 
-    let mut legs_collection = Vec::new();
-    for leg in &trade.legs {
-        // Check if this leg closes an existing position
-        let is_closing = portfolio.positions.iter().any(|p| p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum());
+    for (i, chunk) in chunks.iter().enumerate() {
+        let total_chunk_credit = chunk.iter().map(|l| -(l.quantity as f64) * l.price).sum::<f64>() * 100.0;
 
-        let inst = match (leg.quantity > 0, is_closing) {
-            (true,  true)  => "BUY_TO_CLOSE",
-            (true,  false) => "BUY_TO_OPEN",
-            (false, true)  => "SELL_TO_CLOSE",
-            (false, false) => "SELL_TO_OPEN",
+        let mut num_units = chunk[0].quantity.abs();
+        for leg in chunk.iter().skip(1) {
+            num_units = gcd(num_units, leg.quantity.abs());
+        }
+        if num_units == 0 {
+            num_units = 1;
+        }
+
+        let signed_mid = total_chunk_credit / (100.0 * num_units as f64);
+
+        let target = if let Some(over) = overrides.iter().find(|o| o.idx == i) {
+            over.price_ea
+        } else {
+            signed_mid + order_offset
         };
 
-        legs_collection.push(json!({
-            "instruction": inst,
-            "quantity": leg.quantity.abs(),
-            "instrument": {
-                "symbol": leg.symbol,
-                "assetType": "OPTION"
+        let (struct_type, is_credit_structural) = classify_order_type(chunk);
+        let lock_floor = struct_type != "unknown";
+
+        let (is_final_credit, price) = if lock_floor {
+            let is_credit = is_credit_structural.unwrap_or(true);
+            let raw_price = if is_credit { target } else { -target };
+            (is_credit, raw_price.max(0.0))
+        } else {
+            let is_credit = target >= 0.0;
+            (is_credit, target.abs())
+        };
+
+        let price_ticked = (price / 0.05).round() * 0.05;
+        let price_str = format!("{:.2}", price_ticked);
+        let order_type_str = if is_final_credit { "NET_CREDIT" } else { "NET_DEBIT" };
+
+        let complex_type = match (struct_type, chunk.len()) {
+            ("iron_condor" | "iron_fly", _) => "IRON_CONDOR",
+            ("vertical", _) => "VERTICAL",
+            (_, 4) => "IRON_CONDOR",
+            _ => "CUSTOM",
+        };
+
+        if dry_run {
+            info!(
+                "[DRY RUN] Bypassing REST endpoint. Chunk {} ({}) would trade (qty: {}, type: {}, price: {})",
+                i, struct_type, num_units, order_type_str, price_str
+            );
+            order_ids.push(None);
+            continue;
+        }
+
+        let mut legs_collection = Vec::new();
+        for leg in chunk {
+            let is_closing = positions.iter().any(|p| {
+                p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
+            });
+
+            let inst = if let Some(ref inst_str) = leg.instruction {
+                inst_str.as_str()
+            } else {
+                match (leg.quantity > 0, is_closing) {
+                    (true,  true)  => "BUY_TO_CLOSE",
+                    (true,  false) => "BUY_TO_OPEN",
+                    (false, true)  => "SELL_TO_CLOSE",
+                    (false, false) => "SELL_TO_OPEN",
+                }
+            };
+
+            legs_collection.push(json!({
+                "instruction": inst,
+                "quantity": leg.quantity.abs() / num_units,
+                "instrument": {
+                    "symbol": leg.symbol,
+                    "assetType": "OPTION"
+                }
+            }));
+        }
+
+        let order_body = json!({
+            "orderType": order_type_str,
+            "session": "NORMAL",
+            "duration": "DAY",
+            "price": price_str,
+            "orderStrategyType": "SINGLE",
+            "complexOrderStrategyType": complex_type,
+            "quantity": num_units,
+            "orderLegCollection": legs_collection
+        });
+
+        match client.place_order(account_hash, order_body).await {
+            Ok(order_id) => {
+                info!("Chunk {} placed successfully. Order ID: {:?}", i, order_id);
+                order_ids.push(order_id);
             }
-        }));
+            Err(e) => {
+                error!("Failed to place order for chunk {}: {:?}", i, e);
+                return Err((order_ids, e));
+            }
+        }
     }
 
-    // Credit per unit with offset, rounded to $0.05 tick
-    let unit_qty = trade.legs[0].quantity.abs() as f64;
-    let raw_mid = (trade.credit / (unit_qty * 100.0)).abs();
-    let with_offset = raw_mid + order_offset;
-    let ticked = (with_offset / 0.05).round() * 0.05;
-    let price_str = format!("{:.2}", ticked);
-
-    let order_type = if trade.credit >= 0.0 { "NET_CREDIT" } else { "NET_DEBIT" };
-
-    let complex_type = match (trade.purpose.as_str(), legs_collection.len()) {
-        ("IRON_CONDOR", _) => "IRON_CONDOR",
-        ("EXIT", 4)        => "IRON_CONDOR",
-        _                  => "VERTICAL",
-    };
-
-    let order_body = json!({
-        "orderType": order_type,
-        "session": "NORMAL",
-        "duration": "DAY",
-        "price": price_str,
-        "orderStrategyType": "SINGLE",
-        "complexOrderStrategyType": complex_type,
-        "quantity": trade.legs[0].quantity.abs(),
-        "orderLegCollection": legs_collection
-    });
-
-    client.place_order(account_hash, order_body).await
+    Ok(order_ids)
 }
 
 
@@ -660,6 +1003,9 @@ pub struct StrategySupervisor {
     pub sub_strategies: Mutex<HashMap<String, SubStrategy>>,
     pub account_hash: Mutex<Option<String>>,
     pub live_portfolio: Arc<Mutex<crate::portfolio::Portfolio>>,
+    /// Tracks only trades that were physically sent to the broker (dry_run=false).
+    /// Used to populate the Live panel in the UI.
+    pub broker_portfolio: Arc<Mutex<crate::portfolio::Portfolio>>,
     pub working_orders: tokio::sync::Mutex<Vec<serde_json::Value>>,
     pub pending_trade: tokio::sync::Mutex<Option<PendingTrade>>,
     pub server_name: String,
@@ -697,12 +1043,13 @@ impl StrategySupervisor {
             sub_strategies: Mutex::new(sub_strategies),
             account_hash: Mutex::new(None),
             live_portfolio: Arc::new(Mutex::new(crate::portfolio::Portfolio::new())),
+            broker_portfolio: Arc::new(Mutex::new(crate::portfolio::Portfolio::new())),
             working_orders: Mutex::new(Vec::new()),
             pending_trade: Mutex::new(None),
             server_name: config.server_name.clone(),
             status: Mutex::new("Initializing".to_string()),
             broker_connected: std::sync::atomic::AtomicBool::new(false),
-            trading_enabled: std::sync::atomic::AtomicBool::new(true),
+            trading_enabled: std::sync::atomic::AtomicBool::new(false),
             heartbeat_failures: std::sync::atomic::AtomicUsize::new(0),
             timer_paused: std::sync::atomic::AtomicBool::new(false),
             session_history: Mutex::new(std::collections::VecDeque::new()),
@@ -778,6 +1125,10 @@ impl StrategySupervisor {
         let now_ct = now_utc.with_timezone(&tz);
         let start_time = now_ct.date_naive().and_hms_opt(8, 30, 0).unwrap().and_local_timezone(tz).unwrap();
 
+        // Expand {date} placeholder in db_path to today's date (YYYYMMDD in CT)
+        let date_str = now_ct.format("%Y%m%d").to_string();
+        let resolved_db_path = self.config.db_path.replace("{date}", &date_str);
+
         if now_ct < start_time {
             info!("Skipping bootstrap (before 8:30 AM)");
             return;
@@ -848,9 +1199,11 @@ impl StrategySupervisor {
         let start_str = start_time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let end_str = now_ct.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-        match crate::db::load_historical_snapshots(&self.config.db_path, &start_str, &end_str) {
+        info!("Bootstrap DB path: {}", resolved_db_path);
+        match crate::db::load_historical_snapshots(&resolved_db_path, &start_str, &end_str) {
             Ok(snapshots) => {
                 info!("Loaded {} historical snapshots for replay", snapshots.len());
+                let mut last_history_ts: Option<i64> = None;
                 for snap in snapshots {
                     if let Ok(snap_ts) = chrono::DateTime::parse_from_rfc3339(&snap.datetime) {
                         let snap_ct = snap_ts.with_timezone(&tz);
@@ -911,8 +1264,18 @@ impl StrategySupervisor {
                             }
                         }
 
-                        // Add to session history
-                        if snap_ct.timestamp() % 30 == 0 {
+                        // Add to session history every ~30s using elapsed-time check.
+                        // Cannot use timestamp() % 30 == 0 because DB timestamps drift
+                        // (e.g., 08:34:36, 08:35:37) and almost never land on 30s boundaries.
+                        let snap_ts_secs = snap_ct.timestamp();
+                        let should_add_hist = match last_history_ts {
+                            None => true,
+                            Some(last) => snap_ts_secs - last >= 30,
+                        };
+                        if should_add_hist {
+                            last_history_ts = Some(snap_ts_secs);
+                            // Reprice live_portfolio so its net_pnl reflects current market prices.
+                            self.live_portfolio.lock().await.update_pricing(&self.grid);
                             let sim_pnl = {
                                 let mut total = 0.0;
                                 for s in strats.values() {
@@ -921,9 +1284,11 @@ impl StrategySupervisor {
                                 }
                                 total
                             };
-                            let live_pnl = {
-                                let port = self.live_portfolio.lock().await;
-                                port.net_pnl()
+                            // Mirror the live-tick dry_run guard: live PnL is always 0 in sim mode.
+                            let live_pnl = if self.config.dry_run {
+                                0.0
+                            } else {
+                                self.live_portfolio.lock().await.net_pnl()
                             };
 
                             let mut hist = self.session_history.lock().await;
@@ -964,6 +1329,138 @@ impl StrategySupervisor {
         } else {
             info!("No open positions found at startup. Supervisor starting fresh.");
         }
+    }
+
+    /// Compare simulated combined portfolio with live broker reality and suggest syncing trades
+    pub async fn check_reconciliation(&self, account_hash: &str) -> Result<()> {
+        let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        if !enabled {
+            return Ok(());
+        }
+
+        // Only run if there is no pending trade currently
+        if self.pending_trade.lock().await.is_some() {
+            return Ok(());
+        }
+
+        // Don't run while a GAP_RECON order is still working at the broker.
+        // The order may not have filled yet, so live positions won't match
+        // live_portfolio until the fill is confirmed.
+        {
+            let working = self.working_orders.lock().await;
+            if working.iter().any(|o| o.get("strategy_id").and_then(|v| v.as_str()) == Some("GAP_RECON")) {
+                return Ok(());
+            }
+        }
+
+        let live_positions = match self.execution_client.get_live_positions(account_hash).await {
+            Ok(pos) => pos,
+            Err(e) => {
+                warn!("Reconciliation: Failed to fetch live positions from Schwab: {:?}", e);
+                return Ok(());
+            }
+        };
+
+        let sim_positions = {
+            let port = self.live_portfolio.lock().await;
+            port.positions.clone()
+        };
+
+        // Create mapping of strike/side to quantity for sim and live
+        use std::collections::{HashMap, HashSet};
+        let mut sim_map: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+        for p in &sim_positions {
+            sim_map.insert((OrderedFloat(p.strike), p.side.clone()), p.quantity);
+        }
+
+        let mut live_map: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+        for p in &live_positions {
+            live_map.insert((OrderedFloat(p.strike), p.side.clone()), p.quantity);
+        }
+
+        let mut all_keys: HashSet<(OrderedFloat<f64>, String)> = HashSet::new();
+        for k in sim_map.keys() { all_keys.insert((*k).clone()); }
+        for k in live_map.keys() { all_keys.insert((*k).clone()); }
+
+        let mut needed_adjustments: Vec<(f64, String, i32)> = Vec::new();
+        for (strike, side) in all_keys {
+            let key = (strike, side.clone());
+            let sq = *sim_map.get(&key).unwrap_or(&0);
+            let lq = *live_map.get(&key).unwrap_or(&0);
+            let diff = sq - lq;
+            if diff != 0 {
+                // NO FLIP RULE: If crossing zero, split into two separate legs
+                if (lq < 0 && sq > 0) || (lq > 0 && sq < 0) {
+                    // 1. Exit portion: gets us back to 0
+                    needed_adjustments.push((strike.into_inner(), side.clone(), -lq));
+                    // 2. Entry portion: target size from 0
+                    needed_adjustments.push((strike.into_inner(), side.clone(), sq));
+                } else {
+                    needed_adjustments.push((strike.into_inner(), side.clone(), diff));
+                }
+            }
+        }
+
+        if needed_adjustments.is_empty() {
+            return Ok(());
+        }
+
+        info!("⚠️ Reconciliation Discrepancy: Found {} legs mismatch. Generating Gap Sync Trade.", needed_adjustments.len());
+
+        let mut legs = Vec::new();
+        let mut total_credit = 0.0;
+
+        for (strike, side, qty) in needed_adjustments {
+            // Find option in grid
+            if let Some(quote) = self.grid.quotes.get(&OrderedFloat(strike)) {
+                let leg_quote_opt = if side == "CALL" {
+                    quote.call.as_ref()
+                } else {
+                    quote.put.as_ref()
+                };
+
+                if let Some(leg_quote) = leg_quote_opt {
+                    legs.push(OptionLeg {
+                        symbol: leg_quote.symbol.clone(),
+                        strike,
+                        side: side.clone(),
+                        quantity: qty,
+                        delta: leg_quote.delta,
+                        theta: leg_quote.theta,
+                        price: leg_quote.mid,
+                        instruction: None,
+                    });
+                    total_credit += -(qty as f64) * leg_quote.mid * 100.0;
+                } else {
+                    error!("Reconciliation: Strike {} {} has no quote in grid", strike, side);
+                }
+            } else {
+                error!("Reconciliation: Strike {} not found in grid", strike);
+            }
+        }
+
+        if !legs.is_empty() {
+            let commission = legs.len() as f64 * self.config.commission_per_contract;
+            let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
+            let timestamp = now_ct.to_rfc3339();
+
+            let trade = Trade {
+                timestamp,
+                legs,
+                credit: total_credit,
+                commission,
+                purpose: "RECONCILIATION".to_string(),
+                strategy_id: "GAP_RECON".to_string(),
+            };
+
+            info!("Routing reconciliation trade to pending_trade for confirmation: {:?}", trade);
+            *self.pending_trade.lock().await = Some(PendingTrade {
+                strat_id: "GAP_RECON".to_string(),
+                trade,
+            });
+        }
+
+        Ok(())
     }
 
     /// Execute a single strategy check tick.
@@ -1012,6 +1509,10 @@ impl StrategySupervisor {
             return Ok(());
         }
 
+        if let Err(e) = self.check_reconciliation(&account_hash).await {
+            error!("Failed to check reconciliation: {:?}", e);
+        }
+
         let mut strats = self.sub_strategies.lock().await;
         for (sid, s) in strats.iter_mut() {
             if s.state == StrategyState::Idle && current_time >= s.trade_start_time {
@@ -1029,35 +1530,17 @@ impl StrategySupervisor {
                     info!("🎯 Entry signal triggered for {}! Net credit: ${:.2}. Executing...", sid, trade.credit);
 
                     let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-                    let paused = self.timer_paused.load(std::sync::atomic::Ordering::Relaxed);
-                    if !enabled || paused {
-                        info!("Trading disabled or paused. Routing to pending_trade for user confirmation.");
-                        *self.pending_trade.lock().await = Some(PendingTrade {
-                            strat_id: sid.clone(),
-                            trade: trade.clone(),
-                        });
+                    if !enabled {
+                        info!("Trading is disabled. Skipping entry trade.");
                         continue;
                     }
 
-                    s.state = StrategyState::EnteringSpread;
-                    let mut port = s.portfolio.lock().await;
-                    match execute_trade(&self.execution_client, &account_hash, &trade, self.config.dry_run, self.config.order_offset, &*port).await {
-                        Ok(order_id) => {
-                            info!("✅ Order placed successfully for strategy {}. Order ID: {:?}", sid, order_id);
-                            s.state = StrategyState::Working;
-                            s.has_traded_today = true;
-                            s.active_order_id = order_id.clone();
-                            if let Some(ref oid) = order_id {
-                                self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": sid.clone()}));
-                            }
-                            port.add_trade(&trade, None);
-                            self.live_portfolio.lock().await.add_trade(&trade, None);
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to place order for strategy {}: {:?}", sid, e);
-                            s.state = StrategyState::Idle; // Revert to retry
-                        }
-                    }
+                    info!("Trading is enabled. Routing to pending_trade for user confirmation.");
+                    *self.pending_trade.lock().await = Some(PendingTrade {
+                        strat_id: sid.clone(),
+                        trade: trade.clone(),
+                    });
+                    continue;
                 }
             } else if s.state == StrategyState::Working {
                 let mut s_port = s.portfolio.lock().await;
@@ -1070,25 +1553,17 @@ impl StrategySupervisor {
 
                         if let Some(exit_trade) = check_exit(&self.grid, &*s_port, now_ct, &s.sid, self.config.commission_per_contract, spx) {
                             let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-                            let paused = self.timer_paused.load(std::sync::atomic::Ordering::Relaxed);
-                            if !enabled || paused {
-                                info!("Trading disabled or paused. Routing to pending_trade for user confirmation.");
-                                *self.pending_trade.lock().await = Some(PendingTrade {
-                                    strat_id: sid.clone(),
-                                    trade: exit_trade.clone(),
-                                });
+                            if !enabled {
+                                info!("Trading is disabled. Skipping exit trade.");
                                 continue;
                             }
-                            s.state = StrategyState::Exiting;
-                            if let Ok(order_id) = execute_trade(&self.execution_client, &account_hash, &exit_trade, self.config.dry_run, self.config.order_offset, &*s_port).await {
-                                if let Some(ref oid) = order_id {
-                                    self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": sid.clone()}));
-                                }
-                                s_port.add_trade(&exit_trade, None);
-                                self.live_portfolio.lock().await.add_trade(&exit_trade, None);
-                            } else {
-                                s.state = StrategyState::Working; // Retry next tick
-                            }
+
+                            info!("Trading is enabled. Routing to pending_trade for user confirmation.");
+                            *self.pending_trade.lock().await = Some(PendingTrade {
+                                strat_id: sid.clone(),
+                                trade: exit_trade.clone(),
+                            });
+                            continue;
                         }
                     }
                 } else {
@@ -1097,26 +1572,26 @@ impl StrategySupervisor {
 
                     for trade in rebal_trades {
                         let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-                        let paused = self.timer_paused.load(std::sync::atomic::Ordering::Relaxed);
-                        if !enabled || paused {
-                            info!("Trading disabled or paused. Routing to pending_trade for user confirmation.");
-                            *self.pending_trade.lock().await = Some(PendingTrade {
-                                strat_id: sid.clone(),
-                                trade: trade.clone(),
-                            });
+                        if !enabled {
+                            info!("Trading is disabled. Skipping rebalance trade.");
                             continue;
                         }
-                        if let Ok(order_id) = execute_trade(&self.execution_client, &account_hash, &trade, self.config.dry_run, self.config.order_offset, &*s_port).await {
-                            if let Some(ref oid) = order_id {
-                                self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": sid.clone()}));
-                            }
-                            s_port.add_trade(&trade, None);
-                            self.live_portfolio.lock().await.add_trade(&trade, None);
-                        }
+
+                        info!("Trading is enabled. Routing to pending_trade for user confirmation.");
+                        *self.pending_trade.lock().await = Some(PendingTrade {
+                            strat_id: sid.clone(),
+                            trade: trade.clone(),
+                        });
+                        continue;
                     }
                 }
             }
         }
+
+        // Keep live_portfolio position prices in sync with sub-strategy portfolios.
+        // Sub-strategies call update_pricing() above; without this, live_portfolio.gross_pnl()
+        // would use stale entry prices, making the Sim Total PnL card wrong.
+        self.live_portfolio.lock().await.update_pricing(&self.grid);
 
         Ok(())
     }
@@ -1150,40 +1625,79 @@ impl StrategySupervisor {
 
     pub async fn confirm_trade(&self, strat_id: &str, overrides: Vec<LegOverride>) -> Result<()> {
         let pending = { self.pending_trade.lock().await.take() };
-        if let Some(mut t) = pending {
-            let fill_prices: Vec<f64> = t.trade.legs.iter().enumerate()
-                .map(|(i, leg)| {
-                    overrides.iter()
-                        .find(|o| o.idx == i)
-                        .map(|o| o.price_ea)
-                        .unwrap_or(leg.price)
-                })
-                .collect();
-
-            // Apply overrides to leg prices and recalculate credit
-            for (i, leg) in t.trade.legs.iter_mut().enumerate() {
-                leg.price = fill_prices[i];
-            }
-            t.trade.credit = t.trade.legs.iter().map(|l| -(l.quantity as f64) * l.price).sum::<f64>() * 100.0;
-
+        if let Some(t) = pending {
             let account_hash = self.account_hash.lock().await.clone().unwrap_or_default();
 
-            let mut strats = self.sub_strategies.lock().await;
-            if let Some(s) = strats.get_mut(strat_id) {
-                let mut s_port = s.portfolio.lock().await;
-                if let Ok(order_id) = execute_trade(
+            if strat_id == "GAP_RECON" || t.trade.purpose == "RECONCILIATION" {
+                let positions = {
+                    let live_port = self.live_portfolio.lock().await;
+                    live_port.positions.clone()
+                };
+                let execute_res = execute_trade(
                     &self.execution_client, &account_hash, &t.trade,
-                    self.config.dry_run, self.config.order_offset, &*s_port
-                ).await {
-                    if let Some(ref oid) = order_id {
-                        self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": t.strat_id}));
+                    self.config.dry_run, self.config.order_offset, &positions,
+                    &overrides
+                ).await;
+                match execute_res {
+                    Ok(order_ids) => {
+                        for oid in order_ids.iter().flatten() {
+                            self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": "GAP_RECON"}));
+                        }
+                        // Do NOT call live_portfolio.add_trade here. live_portfolio is the
+                        // "sim" side in check_reconciliation — it already reflects the target
+                        // state. Adding the recon legs again would double the positions and
+                        // inflate live PnL. The broker will match live_portfolio once the
+                        // working order fills.
                     }
-                    s_port.add_trade(&t.trade, None);
-                    self.live_portfolio.lock().await.add_trade(&t.trade, None);
+                    Err((order_ids, e)) => {
+                        for oid in order_ids.iter().flatten() {
+                            self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": "GAP_RECON"}));
+                        }
+                        return Err(e);
+                    }
+                }
+            } else {
+                // Snapshot positions then drop `strats` so the tick loop isn't blocked
+                // during the Schwab REST call.
+                let positions = {
+                    let strats = self.sub_strategies.lock().await;
+                    match strats.get(strat_id) {
+                        Some(s) => s.portfolio.lock().await.positions.clone(),
+                        None => return Ok(()),
+                    }
+                };
 
-                    s.state = StrategyState::Working;
-                    s.has_traded_today = true;
-                    s.active_order_id = order_id;
+                let execute_res = execute_trade(
+                    &self.execution_client, &account_hash, &t.trade,
+                    self.config.dry_run, self.config.order_offset, &positions,
+                    &overrides
+                ).await;
+
+                // Re-acquire strats after the await to update strategy state.
+                let mut strats = self.sub_strategies.lock().await;
+                if let Some(s) = strats.get_mut(strat_id) {
+                    match execute_res {
+                        Ok(order_ids) => {
+                            let any_live = order_ids.iter().any(|id| id.is_some());
+                            for oid in order_ids.iter().flatten() {
+                                self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": t.strat_id.clone()}));
+                            }
+                            s.portfolio.lock().await.add_trade(&t.trade, None);
+                            self.live_portfolio.lock().await.add_trade(&t.trade, None);
+                            if any_live {
+                                self.broker_portfolio.lock().await.add_trade(&t.trade, None);
+                            }
+                            s.state = StrategyState::Working;
+                            s.has_traded_today = true;
+                            s.active_order_id = order_ids.iter().flatten().next().cloned();
+                        }
+                        Err((order_ids, e)) => {
+                            for oid in order_ids.iter().flatten() {
+                                self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": t.strat_id.clone()}));
+                            }
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }

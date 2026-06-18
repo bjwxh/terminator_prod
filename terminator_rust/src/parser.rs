@@ -279,13 +279,16 @@ pub fn parse_streaming_message(
                         }
                         
                         let time_val = entry.get("52")
-                            .or_else(|| entry.get("QUOTE_TIME_IN_LONG"));
+                            .or_else(|| entry.get("35"))
+                            .or_else(|| entry.get("34"))
+                            .or_else(|| entry.get("QUOTE_TIME_IN_LONG"))
+                            .or_else(|| msg.get("timestamp"));
                         if let Some(t_val) = time_val {
                             if let Some(ts_ms) = t_val.as_u64() {
                                 grid.set_exchange_ts_ms(ts_ms);
                             }
                         }
-                    } else if key == "$VIX.X" {
+                    } else if key == "$VIX" {
                         let price_val = entry.get("3")
                             .or_else(|| entry.get("LAST_PRICE"));
                         if let Some(p_val) = price_val {

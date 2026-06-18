@@ -6,6 +6,10 @@ use tracing::info;
 use crate::options_chain::StrikeAndSide;
 use crate::websocket::WebsocketClient;
 
+/// Half a strike interval (5-pt spacing / 2). Guarantees exactly one ATM strike is
+/// subscribed for both calls and puts regardless of where SPX sits in the interval.
+pub const ATM_OVERLAP_PTS: f64 = 2.5;
+
 pub struct SlidingWindowManager {
     otm_offset: f64,
     buffer_zone: f64,
@@ -42,12 +46,12 @@ impl SlidingWindowManager {
         if should_update {
             info!("SPX price moved to {} (previous center: {:?}). Updating options window subscriptions...", spx_price, *last_center);
             
-            // 1. Calculate target strike bounds
-            // Puts: [spx_price - offset, spx_price]
-            // Calls: [spx_price, spx_price + offset]
+            // 1. Calculate target strike bounds.
+            // buffer_zone controls the stickiness trigger (above); ATM_OVERLAP_PTS
+            // (half a strike interval) ensures exactly one ATM strike is in both ranges.
             let put_min = spx_price - self.otm_offset;
-            let put_max = spx_price;
-            let call_min = spx_price;
+            let put_max = spx_price + ATM_OVERLAP_PTS;
+            let call_min = spx_price - ATM_OVERLAP_PTS;
             let call_max = spx_price + self.otm_offset;
 
             // 2. Identify symbols within the target ranges
@@ -56,15 +60,11 @@ impl SlidingWindowManager {
                 let strike = key.strike.0;
                 if key.is_call {
                     if strike >= call_min && strike <= call_max {
-                        if target_symbols.len() < 1 { // ONLY 1 SYMBOL FOR TESTING
-                            target_symbols.insert(sym.clone());
-                        }
+                        target_symbols.insert(sym.clone());
                     }
                 } else {
                     if strike >= put_min && strike <= put_max {
-                        if target_symbols.len() < 1 { // ONLY 1 SYMBOL FOR TESTING
-                            target_symbols.insert(sym.clone());
-                        }
+                        target_symbols.insert(sym.clone());
                     }
                 }
             }

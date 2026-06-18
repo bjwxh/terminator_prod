@@ -241,7 +241,7 @@ impl Portfolio {
         let recent_trades = self.trades
             .iter()
             .rev()
-            .take(5)
+            .take(50)
             .map(|t| CompletedTrade {
                 ts: t.timestamp.clone(),
                 purpose: t.purpose.clone(),
