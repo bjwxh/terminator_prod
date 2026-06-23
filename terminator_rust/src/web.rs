@@ -15,7 +15,7 @@ use tower_http::{
 };
 use tokio::sync::broadcast;
 use serde_json::json;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 
 use crate::grid::OptionsGrid;
 use crate::strategy::{StrategySupervisor, LegOverride, OptionLeg};
@@ -62,7 +62,7 @@ fn build_orders_val(legs: &[OptionLeg], order_offset: f64) -> Vec<serde_json::Va
         orders_val.push(json!({
             "idx": i,
             "legs": legs_val,
-            "type": if is_credit { "SELL TO OPEN" } else { "BUY TO OPEN" },
+            "type": "TRADE",
             "qty": num_units,
             "desc": desc,
             "price_ea": price_ea,
@@ -158,7 +158,9 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
     let logs = state.logger.get_logs();
     
     // DB status mirrors WS stream health
-    let db_status = if spx_ts > 0 && (now_ms - spx_ts as i64) > 120_000 {
+    let db_status = if spx_ts == 0 {
+        json!({ "status": "NoFeed", "age_minutes": 0, "should_alert": true })
+    } else if (now_ms - spx_ts as i64) > 120_000 {
         json!({ "status": "Lag", "age_minutes": (now_ms - spx_ts as i64) / 60_000, "should_alert": true })
     } else {
         json!({ "status": "Healthy", "age_minutes": 0, "should_alert": false })
@@ -272,7 +274,82 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
     }
 
     // Working orders
-    let working_orders = state.supervisor.working_orders.lock().await.clone();
+    let raw_working_orders = state.supervisor.working_orders.lock().await.clone();
+    let working_orders: Vec<serde_json::Value> = raw_working_orders.into_iter().map(|o| {
+        let mut entered_str = "--:--:--".to_string();
+        if let Some(et) = o.get("enteredTime").and_then(|v| v.as_str()) {
+            if let Ok(edt) = chrono::DateTime::parse_from_str(et, "%Y-%m-%dT%H:%M:%S%z") {
+                let chicago: chrono_tz::Tz = "America/Chicago".parse().unwrap();
+                let local = edt.with_timezone(&chicago);
+                entered_str = local.format("%H:%M:%S").to_string();
+            } else if let Ok(edt) = chrono::DateTime::parse_from_rfc3339(&et.replace("Z", "+00:00")) {
+                let chicago: chrono_tz::Tz = "America/Chicago".parse().unwrap();
+                let local = edt.with_timezone(&chicago);
+                entered_str = local.format("%H:%M:%S").to_string();
+            }
+        }
+
+        let total_orig = o.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let filled = o.get("filledQuantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let remaining = o.get("remainingQuantity").and_then(|v| v.as_f64()).unwrap_or(total_orig - filled);
+
+        let mut order_status = o.get("status").and_then(|v| v.as_str()).unwrap_or("WORKING").to_string();
+        if filled > 0.0 && remaining > 0.0 {
+            order_status = "PARTIAL FILL".to_string();
+        }
+
+        let ratio = if total_orig > 0.0 { remaining / total_orig } else { 1.0 };
+
+        let mut leg_texts = Vec::new();
+        let mut total_rem_leg_qty = 0.0;
+        let mut first_instruction = "".to_string();
+
+        if let Some(legs_coll) = o.get("orderLegCollection").and_then(|v| v.as_array()) {
+            for leg in legs_coll {
+                let sym = leg.pointer("/instrument/symbol").and_then(|v| v.as_str()).unwrap_or("N/A");
+                let l_orig_qty = leg.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let l_rem_qty = (l_orig_qty * ratio).round();
+                total_rem_leg_qty += l_rem_qty;
+
+                let instruction = leg.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+                if first_instruction.is_empty() {
+                    first_instruction = instruction.to_string();
+                }
+                let prefix = if instruction.contains("SELL") { "-" } else { "+" };
+
+                if let Some(parsed) = crate::parser::parse_occ_symbol(sym) {
+                    let side_ch = if parsed.side == "CALL" { "C" } else { "P" };
+                    let strike = parsed.strike as i32;
+                    leg_texts.push(format!("{}{}{}{}", prefix, l_rem_qty as i32, side_ch, strike));
+                } else {
+                    leg_texts.push(sym.to_string());
+                }
+            }
+        }
+
+        let order_type = o.get("orderType").and_then(|v| v.as_str()).unwrap_or("");
+        let mut side = "---".to_string();
+        if order_type.contains("CREDIT") {
+            side = "credit".to_string();
+        } else if order_type.contains("DEBIT") {
+            side = "debit".to_string();
+        } else if !first_instruction.is_empty() {
+            side = if first_instruction.contains("BUY") { "debit".to_string() } else { "credit".to_string() };
+        }
+
+        let order_id = o.get("orderId").or_else(|| o.get("id"));
+
+        json!({
+            "time": entered_str,
+            "id": order_id,
+            "symbol": leg_texts.join(", "),
+            "side": side,
+            "qty": total_rem_leg_qty as i32,
+            "price": o.get("price"),
+            "mark": serde_json::Value::Null,
+            "status": order_status
+        })
+    }).collect();
 
     // Pending confirmation trade
     let pending_trade_val = match &*state.supervisor.pending_trade.lock().await {
@@ -458,8 +535,36 @@ async fn handle_ws_socket(socket: WebSocket, state: AppState) {
                                     }
                                 }
 
+                                // 3. Prevent duplicate sending!
+                                {
+                                    let mut working = state_clone.supervisor.working_orders.lock().await;
+                                    let has_duplicate = working.iter().any(|o| {
+                                        o.get("strategy_id").and_then(|s| s.as_str()) == Some(strat_id)
+                                    });
+                                    if has_duplicate {
+                                        warn!("Duplicate trade confirmation intercepted: working order already exists for strategy {}.", strat_id);
+                                        // Broadcast close_modal just in case
+                                        let close_msg = json!({
+                                            "type": "trade_action",
+                                            "action": "close_modal",
+                                            "strat_id": strat_id
+                                        });
+                                        if let Ok(c_str) = serde_json::to_string(&close_msg) {
+                                            let _ = state_clone.ws_tx.send(c_str);
+                                        }
+                                        continue;
+                                    }
+                                    working.push(json!({"orderId": 0, "strategy_id": strat_id, "status": "PENDING"}));
+                                }
+
                                 info!("Manual trade confirmation received via WS for strategy {}", strat_id);
                                 let _ = state_clone.supervisor.confirm_trade(strat_id, leg_overrides).await;
+
+                                // Remove the placeholder
+                                {
+                                    let mut working = state_clone.supervisor.working_orders.lock().await;
+                                    working.retain(|o| o.get("status").and_then(|s| s.as_str()) != Some("PENDING"));
+                                }
 
                                 // Broadcast close_modal to all clients
                                 let close_msg = json!({
@@ -590,7 +695,7 @@ async fn api_chase_order(
             axum::Json(json!({ "detail": "Account hash not yet resolved, retry in a moment" })),
         );
     }
-    match state.supervisor.execution_client.chase_order(&hash, &order_id).await {
+    match state.supervisor.execution_client.chase_order(&hash, &order_id, &state.supervisor.grid).await {
         Ok(success) => {
             if success {
                 (StatusCode::OK, axum::Json(json!({ "msg": format!("Order {} chase/improvement requested", order_id) })))

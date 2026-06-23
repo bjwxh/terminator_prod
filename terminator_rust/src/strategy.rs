@@ -550,7 +550,7 @@ pub fn check_exit(
     now: chrono::DateTime<Tz>,
     strategy_id: &str,
     commission_per_contract: f64,
-    spx_price: f64,
+    _spx_price: f64,
 ) -> Option<Trade> {
     if portfolio.positions.is_empty() {
         return None;
@@ -558,20 +558,11 @@ pub fn check_exit(
 
     let mut legs = Vec::new();
     for p in &portfolio.positions {
-        let is_itm = (p.side == "CALL" && spx_price > p.strike)
-                  || (p.side == "PUT"  && spx_price < p.strike);
-
-        let mut exit_price = 0.0;
-        if is_itm {
-            if let Some(quote) = grid.quotes.get(&ordered_float::OrderedFloat(p.strike)) {
-                let lq = if p.side == "CALL" { &quote.call } else { &quote.put };
-                if let Some(leg_quote) = lq {
-                    exit_price = leg_quote.mid;
-                } else {
-                    exit_price = p.price;
-                }
-            } else {
-                exit_price = p.price;
+        let mut exit_price = 0.05;
+        if let Some(quote) = grid.quotes.get(&ordered_float::OrderedFloat(p.strike)) {
+            let lq = if p.side == "CALL" { &quote.call } else { &quote.put };
+            if let Some(leg_quote) = lq {
+                exit_price = leg_quote.mid.max(0.05);
             }
         }
 
@@ -588,8 +579,8 @@ pub fn check_exit(
     }
 
     let credit = legs.iter().map(|l| -(l.quantity as f64) * l.price).sum::<f64>() * 100.0;
-    let base_unit = portfolio.positions.first().map(|p| p.quantity.abs()).unwrap_or(1) as f64;
-    let commission = commission_per_contract * legs.len() as f64 * base_unit;
+    let total_contracts: i32 = portfolio.positions.iter().map(|p| p.quantity.abs()).sum();
+    let commission = commission_per_contract * total_contracts as f64;
 
     Some(Trade {
         timestamp: now.to_rfc3339(),
@@ -965,6 +956,10 @@ pub async fn execute_trade(
             }));
         }
 
+        if legs_collection.iter().any(|l| l["quantity"].as_i64().unwrap_or(0) == 0) {
+            return Err((order_ids, anyhow::anyhow!("zero-quantity leg detected — order aborted")));
+        }
+
         let order_body = json!({
             "orderType": order_type_str,
             "session": "NORMAL",
@@ -1015,6 +1010,7 @@ pub struct StrategySupervisor {
     pub heartbeat_failures: std::sync::atomic::AtomicUsize,
     pub timer_paused: std::sync::atomic::AtomicBool,
     pub session_history: tokio::sync::Mutex<std::collections::VecDeque<HistoryPoint>>,
+    pub last_history_ct: tokio::sync::Mutex<Option<chrono::DateTime<chrono_tz::Tz>>>,
 }
 
 impl StrategySupervisor {
@@ -1033,7 +1029,11 @@ impl StrategySupervisor {
             let s = SubStrategy::new(sid.clone(), t, init_s, init_l, config.default_unit_size);
             sub_strategies.insert(sid, s);
 
-            t += chrono::Duration::minutes(config.portfolio_interval_minutes as i64);
+            let (next_t, overflow_days) = t.overflowing_add_signed(chrono::Duration::minutes(config.portfolio_interval_minutes as i64));
+            if overflow_days > 0 {
+                break;
+            }
+            t = next_t;
         }
 
         Self {
@@ -1053,6 +1053,7 @@ impl StrategySupervisor {
             heartbeat_failures: std::sync::atomic::AtomicUsize::new(0),
             timer_paused: std::sync::atomic::AtomicBool::new(false),
             session_history: Mutex::new(std::collections::VecDeque::new()),
+            last_history_ct: Mutex::new(None),
         }
     }
 
@@ -1135,15 +1136,24 @@ impl StrategySupervisor {
         }
 
         let mut live_trades = Vec::new();
-        if mode == "soft" {
-            match self.execution_client.get_today_filled_orders(account_hash).await {
-                Ok(trades) => {
-                    live_trades = trades;
-                    info!("Fetched {} live filled trades for soft bootstrap matching", live_trades.len());
-                }
-                Err(e) => {
-                    warn!("Failed to fetch live trades for soft bootstrap: {:?}", e);
-                }
+        match self.execution_client.get_today_filled_orders(account_hash, self.config.commission_per_contract).await {
+            Ok(trades) => {
+                live_trades = trades;
+                info!("Fetched {} live filled trades for today", live_trades.len());
+            }
+            Err(e) => {
+                warn!("Failed to fetch live trades for today: {:?}", e);
+            }
+        }
+
+        match self.execution_client.get_working_orders(account_hash).await {
+            Ok(orders) => {
+                let mut wo = self.working_orders.lock().await;
+                *wo = orders;
+                info!("Fetched {} working orders", wo.len());
+            }
+            Err(e) => {
+                warn!("Failed to fetch working orders: {:?}", e);
             }
         }
 
@@ -1157,7 +1167,15 @@ impl StrategySupervisor {
             }
             *self.live_portfolio.lock().await = crate::portfolio::Portfolio::new();
             *self.session_history.lock().await = std::collections::VecDeque::new();
+            
+            // Populate broker_portfolio trades with all filled live trades we just fetched
+            let mut broker_port = self.broker_portfolio.lock().await;
+            for trade in &live_trades {
+                broker_port.add_trade(trade, None);
+            }
         }
+
+        let mut historical_broker_port = crate::portfolio::Portfolio::new();
 
         // Mutual Clarity Matching (Soft Mode)
         let mut assigned_live_entry = std::collections::HashMap::new();
@@ -1227,9 +1245,9 @@ impl StrategySupervisor {
                                                 self.live_portfolio.lock().await.add_trade(&sync_trade, None);
                                                 s.has_traded_today = true;
                                                 s.state = StrategyState::Working;
+                                                continue;
                                             }
                                         }
-                                        continue;
                                     }
                                 }
 
@@ -1284,11 +1302,36 @@ impl StrategySupervisor {
                                 }
                                 total
                             };
+                            // Evaluate historical_broker_port for actual live PnL replay
+                            historical_broker_port.update_pricing(&self.grid);
+                            
+                            // Inject trades that happened BEFORE this snapshot into historical_broker_port
+                            for t in &live_trades {
+                                if let Ok(t_ts) = chrono::DateTime::parse_from_rfc3339(&t.timestamp) {
+                                    if t_ts.with_timezone(&tz) <= snap_ct {
+                                        // Ensure we don't add the same trade twice (by checking strategy_id/order_id or just relying on a robust check).
+                                        // Wait, the easiest way is to re-evaluate what trades were filled before `snap_ct` and build the portfolio from scratch.
+                                    }
+                                }
+                            }
+                            // Actually, simpler to just rebuild historical_broker_port positions at each snapshot
+                            historical_broker_port.positions.clear();
+                            historical_broker_port.cash = 0.0;
+                            historical_broker_port.trades.clear();
+                            for t in &live_trades {
+                                if let Ok(t_ts) = chrono::DateTime::parse_from_rfc3339(&t.timestamp) {
+                                    if t_ts.with_timezone(&tz) <= snap_ct {
+                                        historical_broker_port.add_trade(t, None);
+                                    }
+                                }
+                            }
+                            historical_broker_port.update_pricing(&self.grid);
+
                             // Mirror the live-tick dry_run guard: live PnL is always 0 in sim mode.
                             let live_pnl = if self.config.dry_run {
                                 0.0
                             } else {
-                                self.live_portfolio.lock().await.net_pnl()
+                                historical_broker_port.net_pnl()
                             };
 
                             let mut hist = self.session_history.lock().await;
@@ -1331,26 +1374,125 @@ impl StrategySupervisor {
         }
     }
 
-    /// Compare simulated combined portfolio with live broker reality and suggest syncing trades
-    pub async fn check_reconciliation(&self, account_hash: &str) -> Result<()> {
-        let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-        if !enabled {
-            return Ok(());
+    pub async fn create_execution_plan(&self, trade: &Trade) -> (Vec<String>, Vec<OptionLeg>) {
+        let mut to_cancel = Vec::new();
+        let mut protected_ids = std::collections::HashSet::new();
+        let mut working_qtys: std::collections::HashMap<(i64, String), f64> = std::collections::HashMap::new();
+
+
+        let working = self.working_orders.lock().await;
+        for wo in working.iter() {
+            let wid = wo.get("orderId")
+                .and_then(|v| {
+                    if v.is_number() { Some(v.to_string()) } else { v.as_str().map(|s| s.to_string()) }
+                })
+                .unwrap_or_default();
+            if wid.is_empty() { continue; }
+
+            // Check if order is SPX
+            let mut is_spx = false;
+            if let Some(leg_array) = wo.get("orderLegCollection").and_then(|v| v.as_array()) {
+                for leg in leg_array {
+                    if let Some(instr_obj) = leg.get("instrument") {
+                        if let Some(sym) = instr_obj.get("symbol").and_then(|v| v.as_str()) {
+                            if sym.contains("SPX") {
+                                is_spx = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if !is_spx { continue; }
+
+            let order_strat_id = wo.get("strategy_id").and_then(|v| v.as_str()).unwrap_or("");
+            let belongs_here = order_strat_id == trade.strategy_id || trade.purpose == "RECONCILIATION";
+
+            let mut is_stale = !belongs_here;
+            let mut order_legs_data = Vec::new();
+
+            if let Some(leg_array) = wo.get("orderLegCollection").and_then(|v| v.as_array()) {
+                for leg in leg_array {
+                    let instr = leg.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+                    let qty = leg.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let instr_obj = leg.get("instrument").cloned().unwrap_or(serde_json::Value::Null);
+                    let symbol = instr_obj.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+
+                    let (strike, side) = if let Some(parsed) = parse_occ_symbol(symbol) {
+                        (parsed.strike, parsed.side)
+                    } else {
+                        let s = instr_obj.get("strikePrice").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let sd = instr_obj.get("putCall").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        (s, sd)
+                    };
+
+                    if strike > 0.0 && !side.is_empty() {
+                        let k = (strike.round() as i64, side);
+                        let mult = if instr.contains("BUY") { 1.0 } else { -1.0 };
+                        let working_qty = qty * mult;
+
+                        let target_leg = trade.legs.iter().find(|l| (l.strike.round() as i64) == k.0 && l.side == k.1);
+                        match target_leg {
+                            Some(t_leg) => {
+                                // If the direction is opposite, the order is stale!
+                                if (t_leg.quantity > 0 && working_qty < 0.0) || (t_leg.quantity < 0 && working_qty > 0.0) {
+                                    is_stale = true;
+                                }
+                            }
+                            None => {
+                                is_stale = true;
+                            }
+                        }
+                        order_legs_data.push((k, working_qty));
+                    } else {
+                        is_stale = true;
+                    }
+                }
+            } else {
+                is_stale = true;
+            }
+
+            if is_stale {
+                to_cancel.push(wid);
+            } else {
+                protected_ids.insert(wid);
+                for (k, val) in order_legs_data {
+                    *working_qtys.entry(k).or_insert(0.0) += val;
+                }
+            }
         }
 
+        // Subtract protected working quantities from target trade quantities
+        let mut remaining_legs = Vec::new();
+        for leg in trade.legs.iter() {
+            let key = (leg.strike.round() as i64, leg.side.clone());
+            let needed = leg.quantity as f64;
+            let already_covered = *working_qtys.get(&key).unwrap_or(&0.0);
+
+            let mut to_fill = needed;
+            if (needed > 0.0 && already_covered > 0.0) || (needed < 0.0 && already_covered < 0.0) {
+                if needed.abs() > already_covered.abs() {
+                    to_fill = needed - already_covered;
+                } else {
+                    to_fill = 0.0;
+                }
+            }
+
+            if to_fill.abs() > 0.01 {
+                let mut new_leg = leg.clone();
+                new_leg.quantity = to_fill as i32;
+                remaining_legs.push(new_leg);
+            }
+        }
+
+        (to_cancel, remaining_legs)
+    }
+
+    /// Compare simulated combined portfolio with live broker reality and suggest syncing trades
+    pub async fn check_reconciliation(&self, account_hash: &str) -> Result<()> {
         // Only run if there is no pending trade currently
         if self.pending_trade.lock().await.is_some() {
             return Ok(());
-        }
-
-        // Don't run while a GAP_RECON order is still working at the broker.
-        // The order may not have filled yet, so live positions won't match
-        // live_portfolio until the fill is confirmed.
-        {
-            let working = self.working_orders.lock().await;
-            if working.iter().any(|o| o.get("strategy_id").and_then(|v| v.as_str()) == Some("GAP_RECON")) {
-                return Ok(());
-            }
         }
 
         let live_positions = match self.execution_client.get_live_positions(account_hash).await {
@@ -1360,6 +1502,14 @@ impl StrategySupervisor {
                 return Ok(());
             }
         };
+
+        // Sync the actual broker snapshot back into our Live Portfolio tracking for the UI
+        self.broker_portfolio.lock().await.sync_from_broker(&live_positions);
+
+        let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        if !enabled {
+            return Ok(());
+        }
 
         let sim_positions = {
             let port = self.live_portfolio.lock().await;
@@ -1440,7 +1590,8 @@ impl StrategySupervisor {
         }
 
         if !legs.is_empty() {
-            let commission = legs.len() as f64 * self.config.commission_per_contract;
+            let total_contracts: i32 = legs.iter().map(|l| l.quantity.abs()).sum();
+            let commission = total_contracts as f64 * self.config.commission_per_contract;
             let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
             let timestamp = now_ct.to_rfc3339();
 
@@ -1452,6 +1603,13 @@ impl StrategySupervisor {
                 purpose: "RECONCILIATION".to_string(),
                 strategy_id: "GAP_RECON".to_string(),
             };
+
+            // Run execution plan check!
+            let (to_cancel, remaining_legs) = self.create_execution_plan(&trade).await;
+            if to_cancel.is_empty() && remaining_legs.is_empty() {
+                info!("Reconciliation GAP_SYNC generated, but broker already has matching orders. Suppressing pop.");
+                return Ok(());
+            }
 
             info!("Routing reconciliation trade to pending_trade for confirmation: {:?}", trade);
             *self.pending_trade.lock().await = Some(PendingTrade {
@@ -1480,24 +1638,43 @@ impl StrategySupervisor {
         }
 
         // Append session history at ~30s granularity inside trading hours
-        let now_secs = now_ct.timestamp();
-        if now_secs % 30 == 0 {
-            let mut hist = self.session_history.lock().await;
-            let spx = self.grid.get_underlying_price();
-            let net_pnl = self.live_portfolio.lock().await.net_pnl();
-            let (live_pnl, sim_pnl) = if self.config.dry_run {
-                (0.0, net_pnl)
-            } else {
-                (net_pnl, 0.0)
+        {
+            let should_record = {
+                let mut last_hist = self.last_history_ct.lock().await;
+                match *last_hist {
+                    None => {
+                        *last_hist = Some(now_ct);
+                        true
+                    }
+                    Some(last) => {
+                        if now_ct.signed_duration_since(last).num_seconds() >= 30 {
+                            *last_hist = Some(now_ct);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
             };
-            hist.push_back(HistoryPoint {
-                ts: now_ct.to_rfc3339(),
-                spx,
-                live_pnl,
-                sim_pnl,
-            });
-            if hist.len() > 1000 {
-                hist.pop_front();
+
+            if should_record {
+                let mut hist = self.session_history.lock().await;
+                let spx = self.grid.get_underlying_price();
+                let net_pnl = self.live_portfolio.lock().await.net_pnl();
+                let (live_pnl, sim_pnl) = if self.config.dry_run {
+                    (0.0, net_pnl)
+                } else {
+                    (net_pnl, 0.0)
+                };
+                hist.push_back(HistoryPoint {
+                    ts: now_ct.to_rfc3339(),
+                    spx,
+                    live_pnl,
+                    sim_pnl,
+                });
+                if hist.len() > 1000 {
+                    hist.pop_front();
+                }
             }
         }
 
@@ -1508,13 +1685,21 @@ impl StrategySupervisor {
         if account_hash.is_empty() {
             return Ok(());
         }
-
         if let Err(e) = self.check_reconciliation(&account_hash).await {
             error!("Failed to check reconciliation: {:?}", e);
         }
 
         let mut strats = self.sub_strategies.lock().await;
         for (sid, s) in strats.iter_mut() {
+            // Do not evaluate entry/exit if there is already a working order for this strategy
+            let has_working = {
+                let wo = self.working_orders.lock().await;
+                wo.iter().any(|o| o.get("strategy_id").and_then(|v| v.as_str()) == Some(sid))
+            };
+            if has_working {
+                continue;
+            }
+
             if s.state == StrategyState::Idle && current_time >= s.trade_start_time {
                 // Swarm fix: skip missed tranches to prevent identical simultaneous entries on late start
                 let elapsed_secs = (current_time - s.trade_start_time).num_seconds();
@@ -1536,10 +1721,16 @@ impl StrategySupervisor {
                     }
 
                     info!("Trading is enabled. Routing to pending_trade for user confirmation.");
-                    *self.pending_trade.lock().await = Some(PendingTrade {
-                        strat_id: sid.clone(),
-                        trade: trade.clone(),
-                    });
+                    let mut pending = self.pending_trade.lock().await;
+                    if pending.is_none() {
+                        *pending = Some(PendingTrade {
+                            strat_id: sid.clone(),
+                            trade: trade.clone(),
+                        });
+                        s.state = StrategyState::EnteringSpread;
+                    } else {
+                        info!("Dropped entry signal for {} because another trade is already pending.", sid);
+                    }
                     continue;
                 }
             } else if s.state == StrategyState::Working {
@@ -1559,10 +1750,14 @@ impl StrategySupervisor {
                             }
 
                             info!("Trading is enabled. Routing to pending_trade for user confirmation.");
-                            *self.pending_trade.lock().await = Some(PendingTrade {
-                                strat_id: sid.clone(),
-                                trade: exit_trade.clone(),
-                            });
+                            let mut pending = self.pending_trade.lock().await;
+                            if pending.is_none() {
+                                *pending = Some(PendingTrade {
+                                    strat_id: sid.clone(),
+                                    trade: exit_trade.clone(),
+                                });
+                                s.state = StrategyState::Exiting;
+                            }
                             continue;
                         }
                     }
@@ -1578,10 +1773,14 @@ impl StrategySupervisor {
                         }
 
                         info!("Trading is enabled. Routing to pending_trade for user confirmation.");
-                        *self.pending_trade.lock().await = Some(PendingTrade {
-                            strat_id: sid.clone(),
-                            trade: trade.clone(),
-                        });
+                        let mut pending = self.pending_trade.lock().await;
+                        if pending.is_none() {
+                            *pending = Some(PendingTrade {
+                                strat_id: sid.clone(),
+                                trade: trade.clone(),
+                            });
+                            s.state = StrategyState::Exiting;
+                        }
                         continue;
                     }
                 }
@@ -1607,10 +1806,6 @@ impl StrategySupervisor {
             if !is_our_order {
                 continue;
             }
-            if event.status == "Filled" || event.status == "Cancelled" || event.status == "Rejected" || event.status == "Canceled" {
-                let mut wo = self.working_orders.lock().await;
-                wo.retain(|o| o.get("orderId").and_then(|v| v.as_str()) != Some(&event.order_id));
-            }
             if event.status == "Filled" {
                 info!("🎉 Strategy {} order fully filled!", sid);
                 s.state = StrategyState::Working;
@@ -1621,6 +1816,66 @@ impl StrategySupervisor {
                 s.active_order_id = None;
             }
         }
+
+        // Drop the strats lock before making async REST calls to prevent blocking
+        drop(strats);
+
+        let hash_opt = self.account_hash.lock().await.clone();
+        if let Some(hash) = hash_opt {
+            // Fast sync working orders to UI
+            match self.execution_client.get_working_orders(&hash).await {
+                Ok(orders) => {
+                    let num_working = orders.len();
+                    {
+                        let mut wo = self.working_orders.lock().await;
+                        let mut merged_orders = Vec::new();
+                        for mut new_order in orders {
+                            let old_strat_id = if let Some(new_id) = new_order.get("orderId").or_else(|| new_order.get("id")) {
+                                wo.iter().find(|old_order| {
+                                    let old_id = old_order.get("orderId").or_else(|| old_order.get("id"));
+                                    old_id == Some(new_id)
+                                }).and_then(|old_order| old_order.get("strategy_id").cloned())
+                            } else {
+                                None
+                            };
+
+                            if let Some(strat_id) = old_strat_id {
+                                if let Some(obj) = new_order.as_object_mut() {
+                                    obj.insert("strategy_id".to_string(), strat_id);
+                                }
+                            }
+                            merged_orders.push(new_order);
+                        }
+                        *wo = merged_orders;
+                    }
+                    
+                    if num_working > 0 {
+                        // Auto-dismiss confirmation modal if a working order just hit the exchange
+                        *self.pending_trade.lock().await = None;
+                    }
+
+                    info!("🔄 Fast-synced {} working orders from Schwab REST API", num_working);
+                }
+                Err(e) => warn!("Failed to fast-sync working orders: {:?}", e),
+            }
+
+            // Fast sync live filled trades to broker_portfolio if an order was filled
+            if event.status == "Filled" || event.message_type == "ExecutionCreated" {
+                match self.execution_client.get_today_filled_orders(&hash, self.config.commission_per_contract).await {
+                    Ok(trades) => {
+                        let mut bp = self.broker_portfolio.lock().await;
+                        bp.trades.clear();
+                        bp.cash = 0.0;
+                        bp.positions.clear();
+                        for trade in trades {
+                            bp.add_trade(&trade, None);
+                        }
+                        info!("🔄 Fast-synced filled trades into broker portfolio (cleared and rebuilt to avoid duplicates)");
+                    }
+                    Err(e) => warn!("Failed to fast-sync filled trades: {:?}", e),
+                }
+            }
+        }
     }
 
     pub async fn confirm_trade(&self, strat_id: &str, overrides: Vec<LegOverride>) -> Result<()> {
@@ -1628,13 +1883,33 @@ impl StrategySupervisor {
         if let Some(t) = pending {
             let account_hash = self.account_hash.lock().await.clone().unwrap_or_default();
 
+            // Run execution plan to determine cancels and remaining legs
+            let (to_cancel, remaining_legs) = self.create_execution_plan(&t.trade).await;
+
+            // 1. Cancel outdated/stale working orders first
+            for oid in to_cancel {
+                info!("Cancelling outdated/opposite working order: {}", oid);
+                if let Err(e) = self.execution_client.cancel_order(&account_hash, &oid).await {
+                    warn!("Failed to cancel working order {}: {:?}", oid, e);
+                }
+            }
+
+            if remaining_legs.is_empty() {
+                info!("All legs covered by working orders after cancel phase. No new order to place.");
+                return Ok(());
+            }
+
+            // Create temporary trade with remaining legs
+            let mut adjusted_trade = t.trade.clone();
+            adjusted_trade.legs = remaining_legs;
+
             if strat_id == "GAP_RECON" || t.trade.purpose == "RECONCILIATION" {
                 let positions = {
                     let live_port = self.live_portfolio.lock().await;
                     live_port.positions.clone()
                 };
                 let execute_res = execute_trade(
-                    &self.execution_client, &account_hash, &t.trade,
+                    &self.execution_client, &account_hash, &adjusted_trade,
                     self.config.dry_run, self.config.order_offset, &positions,
                     &overrides
                 ).await;
@@ -1643,11 +1918,6 @@ impl StrategySupervisor {
                         for oid in order_ids.iter().flatten() {
                             self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": "GAP_RECON"}));
                         }
-                        // Do NOT call live_portfolio.add_trade here. live_portfolio is the
-                        // "sim" side in check_reconciliation — it already reflects the target
-                        // state. Adding the recon legs again would double the positions and
-                        // inflate live PnL. The broker will match live_portfolio once the
-                        // working order fills.
                     }
                     Err((order_ids, e)) => {
                         for oid in order_ids.iter().flatten() {
@@ -1668,7 +1938,7 @@ impl StrategySupervisor {
                 };
 
                 let execute_res = execute_trade(
-                    &self.execution_client, &account_hash, &t.trade,
+                    &self.execution_client, &account_hash, &adjusted_trade,
                     self.config.dry_run, self.config.order_offset, &positions,
                     &overrides
                 ).await;
@@ -1695,6 +1965,11 @@ impl StrategySupervisor {
                             for oid in order_ids.iter().flatten() {
                                 self.working_orders.lock().await.push(json!({"orderId": oid, "strategy_id": t.strat_id.clone()}));
                             }
+                            if s.state == StrategyState::EnteringSpread {
+                                s.state = StrategyState::Idle;
+                            } else if s.state == StrategyState::Exiting {
+                                s.state = StrategyState::Working;
+                            }
                             return Err(e);
                         }
                     }
@@ -1704,8 +1979,16 @@ impl StrategySupervisor {
         Ok(())
     }
 
-    pub async fn dismiss_trade(&self, _strat_id: &str) {
+    pub async fn dismiss_trade(&self, strat_id: &str) {
         let _ = self.pending_trade.lock().await.take();
+        let mut strats = self.sub_strategies.lock().await;
+        if let Some(s) = strats.get_mut(strat_id) {
+            if s.state == StrategyState::EnteringSpread {
+                s.state = StrategyState::Idle;
+            } else if s.state == StrategyState::Exiting {
+                s.state = StrategyState::Working;
+            }
+        }
     }
 
     pub fn set_timer_paused(&self, is_paused: bool) {

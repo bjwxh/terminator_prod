@@ -201,18 +201,250 @@ impl ExecutionClient {
         }
     }
 
-    pub async fn chase_order(&self, account_hash: &str, order_id: &str) -> Result<bool> {
-        info!("Sending Chase request for Order ID: {} (currently just cancels)", order_id);
-        self.cancel_order(account_hash, order_id).await
+    pub async fn chase_order(&self, account_hash: &str, order_id: &str, grid: &crate::grid::OptionsGrid) -> Result<bool> {
+        let working = self.get_working_orders(account_hash).await?;
+        let order = working.into_iter().find(|o| {
+            o.get("orderId").and_then(|v| {
+                if v.is_number() {
+                    Some(v.to_string())
+                } else {
+                    v.as_str().map(|s| s.to_string())
+                }
+            }).as_deref() == Some(order_id)
+        });
+
+        let order = match order {
+            Some(o) => o,
+            None => {
+                error!("Cannot chase order {}: Not found in working orders.", order_id);
+                return Ok(false);
+            }
+        };
+
+        let mark = match Self::get_order_mark(&order, grid) {
+            Some(m) => m,
+            None => {
+                error!("Cannot chase order {}: Could not calculate mark.", order_id);
+                return Ok(false);
+            }
+        };
+
+        // Pricing logic:
+        // Credit (mark < 0): Round DOWN in absolute value to accept less credit (e.g. 5.27 -> 5.25)
+        // Debit (mark >= 0): Round UP in absolute value to pay more debit (e.g. 5.27 -> 5.30)
+        let mark_abs = mark.abs();
+        let is_credit = mark < 0.0;
+        let new_abs_price = if is_credit {
+            (mark_abs / 0.05).floor() * 0.05
+        } else {
+            (mark_abs / 0.05).ceil() * 0.05
+        };
+        let new_abs_price = (new_abs_price * 100.0).round() / 100.0;
+
+        let old_price = order.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if (old_price - new_abs_price).abs() < 0.01 {
+            info!("Order {} price ${} is already at target ${:.2}. Skipping.", order_id, old_price, new_abs_price);
+            return Ok(true);
+        }
+
+        info!("Chasing order {} from ${} to ${:.2} (Mark: {:.2})", order_id, old_price, new_abs_price, mark);
+
+        // Build replacement payload
+        let mut legs_collection = Vec::new();
+        if let Some(legs) = order.get("orderLegCollection").and_then(|v| v.as_array()) {
+            for leg in legs {
+                let instr = leg.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+                let qty = leg.get("quantity").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                let symbol = leg.pointer("/instrument/symbol").and_then(|v| v.as_str()).unwrap_or("");
+                
+                legs_collection.push(serde_json::json!({
+                    "instruction": instr,
+                    "quantity": qty,
+                    "instrument": {
+                        "symbol": symbol,
+                        "assetType": "OPTION"
+                    }
+                }));
+            }
+        }
+        
+        let mut replacement_spec = serde_json::json!({
+            "orderType": order.get("orderType").and_then(|v| v.as_str()).unwrap_or("LIMIT"),
+            "session": "NORMAL",
+            "duration": "DAY",
+            "price": format!("{:.2}", new_abs_price),
+            "orderStrategyType": "SINGLE",
+            "quantity": order.get("quantity").and_then(|v| v.as_f64()).unwrap_or(1.0),
+            "orderLegCollection": legs_collection
+        });
+        
+        if let Some(complex_type) = order.get("complexOrderStrategyType") {
+            if !complex_type.is_null() {
+                replacement_spec["complexOrderStrategyType"] = complex_type.clone();
+            }
+        }
+
+        let access_token = self.token_manager.get_access_token();
+        let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}/orders/{}", account_hash, order_id);
+        
+        let response = self.client
+            .put(&url)
+            .bearer_auth(access_token)
+            .json(&replacement_spec)
+            .send()
+            .await
+            .context("Failed HTTP request to replace order")?;
+
+        if response.status().is_success() {
+            info!("Order replacement request accepted for ID: {}", order_id);
+            Ok(true)
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("REST order replacement failed with status {}: {}", status, body);
+            anyhow::bail!("REST order replacement failure: {} - {}", status, body)
+        }
     }
 
-    pub async fn cancel_all_orders(&self, _account_hash: &str) -> Result<Vec<String>> {
-        warn!("cancel_all_orders is a stub that currently does nothing");
-        Ok(Vec::new())
+    pub async fn cancel_all_orders(&self, account_hash: &str) -> Result<Vec<String>> {
+        let working = self.get_working_orders(account_hash).await?;
+        let mut cancelled_ids = Vec::new();
+        for order in working {
+            if let Some(order_id) = order.get("orderId").and_then(|v| {
+                if v.is_number() {
+                    Some(v.to_string())
+                } else {
+                    v.as_str().map(|s| s.to_string())
+                }
+            }) {
+                if self.cancel_order(account_hash, &order_id).await.unwrap_or(false) {
+                    cancelled_ids.push(order_id);
+                }
+            }
+        }
+        Ok(cancelled_ids)
+    }
+
+fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64> {
+    let legs = order.get("orderLegCollection")?.as_array()?;
+    if legs.is_empty() { return None; }
+    
+    let order_qty = order.get("quantity").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let mut total_mark = 0.0;
+    
+    for leg in legs {
+        let instr = leg.get("instrument")?;
+        let symbol = instr.get("symbol")?.as_str()?;
+        let instruction = leg.get("instruction")?.as_str()?;
+        let qty = leg.get("quantity").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        
+        let lookup = grid.symbol_lookup.get(symbol)?;
+        let quote_ref = grid.quotes.get(&lookup.strike)?;
+        let quote = quote_ref.value();
+        
+        let leg_quote = if lookup.is_call {
+            quote.call.as_ref()?
+        } else {
+            quote.put.as_ref()?
+        };
+        
+        let mid = leg_quote.mid;
+        let leg_val = mid * (qty / order_qty);
+        if instruction.contains("SELL") {
+            total_mark -= leg_val;
+        } else {
+            total_mark += leg_val;
+        }
+    }
+    
+    Some(total_mark)
+}
+
+    pub async fn get_working_orders(&self, account_hash: &str) -> Result<Vec<Value>> {
+        let access_token = self.token_manager.get_access_token();
+        
+        let now_utc = Utc::now();
+        let from_time = (now_utc - chrono::Duration::days(60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let to_time = now_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}/orders", account_hash);
+        let response = self.client
+            .get(&url)
+            .query(&[
+                ("fromEnteredTime", from_time.as_str()),
+                ("toEnteredTime", to_time.as_str()),
+            ])
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .context("Failed HTTP request to get working orders")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Get working orders API returned error {}: {}", status, body);
+        }
+
+        let orders: Vec<Value> = response.json().await?;
+        info!("Schwab GET /orders returned {} total orders (before filter).", orders.len());
+        
+        fn flatten_orders(orders: Vec<Value>, parent_order_id: Option<String>) -> Vec<Value> {
+            let mut flattened = Vec::new();
+            for mut o in orders {
+                let children = o.get_mut("childOrderStrategies")
+                    .and_then(|v| v.as_array_mut())
+                    .map(|arr| std::mem::take(arr))
+                    .unwrap_or_default();
+
+                let current_id = o.get("orderId")
+                    .and_then(|v| {
+                        if v.is_number() {
+                            Some(v.to_string())
+                        } else {
+                            v.as_str().map(|s| s.to_string())
+                        }
+                    })
+                    .unwrap_or_default();
+
+                let strat_type = o.get("orderStrategyType").and_then(|v| v.as_str()).unwrap_or("");
+                
+                let top_parent_id = parent_order_id.clone().unwrap_or(current_id);
+
+                if !children.is_empty() {
+                    if strat_type == "FLATTEN" {
+                        if let Some(ref p_id) = parent_order_id {
+                            if let Some(obj) = o.as_object_mut() {
+                                obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
+                            }
+                        }
+                        flattened.push(o);
+                        flattened.extend(flatten_orders(children, Some(top_parent_id)));
+                    } else {
+                        flattened.extend(flatten_orders(children, Some(top_parent_id)));
+                    }
+                } else {
+                    if let Some(ref p_id) = parent_order_id {
+                        if let Some(obj) = o.as_object_mut() {
+                            obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
+                        }
+                    }
+                    flattened.push(o);
+                }
+            }
+            flattened
+        }
+
+        let flattened = flatten_orders(orders, None);
+        let active_orders: Vec<Value> = flattened.into_iter().filter(|o| {
+            let status = o.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            status != "FILLED" && status != "CANCELED" && status != "REJECTED" && status != "EXPIRED" && status != "REPLACED"
+        }).collect();
+
+        Ok(active_orders)
     }
 
     /// Fetch today's filled orders and parse them into Trades for Soft Bootstrap
-    pub async fn get_today_filled_orders(&self, account_hash: &str) -> Result<Vec<Trade>> {
+    pub async fn get_today_filled_orders(&self, account_hash: &str, commission_per_contract: f64) -> Result<Vec<Trade>> {
         let access_token = self.token_manager.get_access_token();
         
         let now_utc = Utc::now();
@@ -223,6 +455,8 @@ impl ExecutionClient {
         let start_of_day_ct = now_ct.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(tz).unwrap();
         let from_time = start_of_day_ct.with_timezone(&Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let to_time = now_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let today_yymmdd = now_ct.format("%y%m%d").to_string();
 
         let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}/orders", account_hash);
         let response = self.client
@@ -250,11 +484,9 @@ impl ExecutionClient {
             let status = order.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if status != "FILLED" { continue; }
 
-            // Check if it's an Iron Condor (4 legs)
             let legs = order.get("orderLegCollection").and_then(|v| v.as_array());
             if let Some(leg_array) = legs {
-                if leg_array.len() == 4 {
-                    let mut option_legs = Vec::new();
+                let mut option_legs = Vec::new();
                     for leg in leg_array {
                         let instr = leg.get("instrument").cloned().unwrap_or(Value::Null);
                         let symbol = instr.get("symbol").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -266,6 +498,17 @@ impl ExecutionClient {
                             "SELL_TO_OPEN" | "SELL_TO_CLOSE" => -quantity,
                             _ => quantity,
                         };
+
+                        let is_0dte_spx = if let Some(code) = symbol.split_whitespace().last() {
+                            if code.len() >= 15 {
+                                let date_str = &code[code.len() - 15..code.len() - 9];
+                                date_str == today_yymmdd
+                            } else { false }
+                        } else { false };
+
+                        if !is_0dte_spx {
+                            continue;
+                        }
 
                         if let Some(parsed) = parse_occ_symbol(&symbol) {
                             option_legs.push(OptionLeg {
@@ -281,8 +524,60 @@ impl ExecutionClient {
                         }
                     }
 
-                    if option_legs.len() == 4 {
-                        let credit = order.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0) * 100.0;
+                    if !option_legs.is_empty() {
+                        let mut executed_price = order.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let (_, is_credit_structural) = crate::strategy::classify_order_type(&option_legs);
+                        
+                        let mut found_execution_legs = false;
+                        let mut total_qty = 0.0;
+                        let mut weighted_price_sum = 0.0;
+                        if let Some(activities) = order.get("orderActivityCollection").and_then(|v| v.as_array()) {
+                            for activity in activities {
+                                if activity.get("activityType").and_then(|v| v.as_str()) == Some("EXECUTION") {
+                                    let qty = activity.get("quantity").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    if let Some(exec_legs) = activity.get("executionLegs").and_then(|v| v.as_array()) {
+                                        let mut net_price = 0.0;
+                                        for exec_leg in exec_legs {
+                                            if let Some(leg_id) = exec_leg.get("legId").and_then(|v| v.as_i64()) {
+                                                if let Some(price) = exec_leg.get("price").and_then(|v| v.as_f64()) {
+                                                    let mut instruction = "";
+                                                    if let Some(leg_collection) = order.get("orderLegCollection").and_then(|v| v.as_array()) {
+                                                        for l in leg_collection {
+                                                            if l.get("legId").and_then(|v| v.as_i64()) == Some(leg_id) {
+                                                                instruction = l.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+                                                            }
+                                                        }
+                                                    }
+                                                    if instruction.starts_with("SELL") {
+                                                        net_price += price;
+                                                    } else if instruction.starts_with("BUY") {
+                                                        net_price -= price;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if net_price != 0.0 && qty > 0.0 {
+                                            weighted_price_sum += net_price * qty;
+                                            total_qty += qty;
+                                            found_execution_legs = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if found_execution_legs && total_qty > 0.0 {
+                            executed_price = weighted_price_sum / total_qty;
+                        }
+
+                        let base_qty = option_legs.first().map(|l| l.quantity.abs() as f64).unwrap_or(1.0);
+                        let mut credit = executed_price * base_qty * 100.0;
+                        if !found_execution_legs && is_credit_structural == Some(false) {
+                            credit = -credit;
+                        }
+
+                        let total_contracts: i32 = option_legs.iter().map(|l| l.quantity.abs()).sum();
+                        let commission = total_contracts as f64 * commission_per_contract;
+
                         let timestamp = order.get("closeTime").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let order_id = order.get("orderId").and_then(|v| {
                             if v.is_number() {
@@ -294,14 +589,13 @@ impl ExecutionClient {
                         
                         filled_trades.push(Trade {
                             timestamp,
-                            legs: option_legs,
                             credit,
-                            commission: 0.0,
-                            purpose: "IRON_CONDOR".to_string(),
-                            strategy_id: order_id, // temporarily store order_id in strategy_id to map later
+                            commission,
+                            purpose: "HISTORICAL_BROKER".to_string(),
+                            legs: option_legs,
+                            strategy_id: order_id,
                         });
                     }
-                }
             }
         }
 

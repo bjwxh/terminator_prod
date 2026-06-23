@@ -145,3 +145,40 @@ impl AppConfig {
         })
     }
 }
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            schwab_token_path: std::path::PathBuf::from("dummy_token.json"),
+            schwab_account: "dummy_account".to_string(),
+            schwab_api_key: "dummy_api_key".to_string(),
+            schwab_api_secret: "dummy_api_secret".to_string(),
+            schwab_callback_url: "dummy_callback_url".to_string(),
+            dry_run: true,
+            initial_sum_delta: 0.25,
+            init_wing_delta: 0.05,
+            rebalance_threshold: 0.1,
+            long_leg_rebalance_delta_threshold: 0.1,
+            min_credit: 0.5,
+            max_spread_diff: 0.1,
+            commission_per_contract: 1.13,
+            order_offset: 0.0,
+            stale_guard_min_price: 0.0,
+            default_unit_size: 1,
+            account_id: "dummy_account_id".to_string(),
+            server_name: "dummy_server".to_string(),
+            min_long_delta: 0.01,
+            order_auto_execute_timeout: 60,
+            bootstrap_mode: "soft".to_string(),
+            db_path: "dummy_db.db".to_string(),
+            portfolio_start_time: NaiveTime::from_hms_opt(8, 30, 0).unwrap(),
+            portfolio_end_time: NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+            portfolio_interval_minutes: 1,
+            start_time: NaiveTime::from_hms_opt(8, 30, 0).unwrap(),
+            end_time: NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+            otm_offset: 50.0,
+            buffer_zone: 10.0,
+            web_port: 8080,
+        }
+    }
+}

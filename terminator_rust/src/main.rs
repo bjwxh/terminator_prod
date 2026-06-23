@@ -23,11 +23,19 @@ async fn main() -> anyhow::Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
+    // Create a rolling file appender that creates a new log file daily
+    let file_appender = tracing_appender::rolling::daily("logs", "terminator.log");
+    let (non_blocking_appender, _guard) = tracing_appender::non_blocking(file_appender);
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
-        .with(tracing_subscriber::fmt::layer())
-        .with(ring_layer)
+        .with(tracing_subscriber::fmt::layer()) // stdout
+        .with(tracing_subscriber::fmt::layer().with_writer(non_blocking_appender).with_ansi(false)) // file
+        .with(ring_layer) // web UI & TUI
         .init();
+
+    // _guard must live until the end of main so the non-blocking log appender
+    // flushes all buffered output before the process exits.
 
     info!("🦀 Terminator Rust Engine: Starting Phase 2 & 3 Dynamic TUI Pricing Engine...");
 
@@ -109,21 +117,30 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(msg) = message_rx.recv().await {
             // Process streaming market data (Level 1 equities and options)
-            if msg.to_uppercase().contains("RESPONSE") {
+            if msg.contains("\"RESPONSE\"") || msg.contains("\"response\"") {
                 tracing::info!("Raw Schwab Response: {}", msg);
             }
-            if let Some(new_spx) = parser::parse_streaming_message(&msg, &grid_parser) {
-                if let Err(e) = manager_parser.handle_index_update(new_spx).await {
-                    error!("Error during sliding-window subscription updates: {:?}", e);
+            
+            // Parse JSON payload once per tick
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&msg) {
+                if let Some(new_spx) = parser::parse_streaming_value(&val, &grid_parser) {
+                    if let Err(e) = manager_parser.handle_index_update(new_spx).await {
+                        error!("Error during sliding-window subscription updates: {:?}", e);
+                    }
                 }
-            }
 
-            // Process real-time account activity order events
-            let acct_events = parser::parse_acct_activity_message(&msg);
-            for event in acct_events {
-                info!("🔔 Order activity event received: ID={} Type={} Status={}", event.order_id, event.message_type, event.status);
-                if let Err(e) = acct_tx_clone.send(event) {
-                    error!("Failed to dispatch order event to strategy supervisor channel: {:?}", e);
+                // Process real-time account activity order events
+                let acct_events = parser::parse_acct_activity_value(&val);
+                for event in acct_events {
+                    info!("🔔 Order activity event received: ID={} Type={} Status={}", event.order_id, event.message_type, event.status);
+                    if let Err(e) = acct_tx_clone.send(event) {
+                        error!("Failed to dispatch order event to strategy supervisor channel: {:?}", e);
+                    }
+                }
+            } else {
+                // Not JSON, or malformed
+                if msg.to_uppercase().contains("RESPONSE") {
+                    tracing::info!("Raw Schwab Response (non-JSON): {}", msg);
                 }
             }
         }

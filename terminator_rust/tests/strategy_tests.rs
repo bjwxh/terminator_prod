@@ -61,9 +61,9 @@ fn test_find_closest_option_and_stale_guards() {
     // We modify the last_updated time manually in grid.quotes
     {
         let mut entry = grid.quotes.get_mut(&OrderedFloat(5300.0)).unwrap();
-        entry.value_mut().last_updated = Instant::now() - Duration::from_millis(600);
+        entry.value_mut().last_updated = Instant::now() - Duration::from_millis(6000);
         if let Some(ref mut call) = entry.value_mut().call {
-            call.last_update = Instant::now() - Duration::from_millis(600);
+            call.last_update = Instant::now() - Duration::from_millis(6000);
         }
     }
     
@@ -106,7 +106,7 @@ fn test_iron_condor_generation() {
     
     let s = SubStrategy::new("strat_0900".to_string(), NaiveTime::from_hms_opt(9, 0, 0).unwrap(), 0.25, 0.05, 2);
     
-    let entry_trade = check_entry(&grid, &s, now, 50.0);
+    let entry_trade = check_entry(&grid, &s, now, 50.0, 1.13);
     assert!(entry_trade.is_some());
     
     let trade = entry_trade.unwrap();
@@ -150,6 +150,8 @@ async fn test_strategy_supervisor_tick() {
         otm_offset: 50.0,
         buffer_zone: 10.0,
         dry_run: true,
+        max_spread_diff: 50.0,
+        ..Default::default()
     };
 
     // 3. Initialize TokenManager, ExecutionClient, and OptionsGrid
@@ -180,18 +182,17 @@ async fn test_strategy_supervisor_tick() {
         *hash_lock = Some("mocked_hash".to_string());
     }
 
-    // Set one of the sub-strategies start time to earlier so it fires during the tick
+    // Clear default strategies and insert only strat_0901 to isolate the test
     {
         let mut strats = supervisor.sub_strategies.lock().await;
-        let strat = strats.get_mut("strat_0901").unwrap();
-        // Set target deltas to match mock options (0.25 / 0.05)
-        strat.init_s_delta = 0.25;
-        strat.init_l_delta = 0.05;
-        strat.trade_start_time = NaiveTime::from_hms_opt(8, 30, 0).unwrap();
+        strats.clear();
+        let strat = SubStrategy::new("strat_0901".to_string(), NaiveTime::from_hms_opt(8, 55, 0).unwrap(), 0.25, 0.05, 2);
         
         // Assert initial state is Idle
         assert_eq!(strat.state, StrategyState::Idle);
         assert_eq!(strat.has_traded_today, false);
+        
+        strats.insert("strat_0901".to_string(), strat);
     }
 
     // 5. Trigger supervisor tick
@@ -201,14 +202,28 @@ async fn test_strategy_supervisor_tick() {
         std::env::set_var("TERMINATOR_TEST_T", "0.005");
     }
 
+    // Enable trading so tick doesn't skip it
+    supervisor.trading_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+
     let tick_result = supervisor.tick().await;
     assert!(tick_result.is_ok());
 
-    // 6. Verify that strat_0901 transitioned state because its start time is reached and a valid entry condor was generated
+    // Verify that a pending trade was queued
+    {
+        let pending = supervisor.pending_trade.lock().await;
+        assert!(pending.is_some());
+        assert_eq!(pending.as_ref().unwrap().strat_id, "strat_0901");
+    }
+
+    // Manually confirm the trade as the user would in the UI
+    let confirm_res = supervisor.confirm_trade("strat_0901", vec![]).await;
+    assert!(confirm_res.is_ok());
+
+    // 6. Verify that strat_0901 transitioned state because the trade was confirmed
     {
         let strats = supervisor.sub_strategies.lock().await;
         let strat = strats.get("strat_0901").unwrap();
-        assert_eq!(strat.state, StrategyState::Working); // transitions to Working on successful dry-run placement
+        assert_eq!(strat.state, StrategyState::Working);
         assert_eq!(strat.has_traded_today, true);
     }
 
@@ -242,6 +257,7 @@ async fn test_process_account_event_order_id_matching() {
         otm_offset: 50.0,
         buffer_zone: 10.0,
         dry_run: true,
+        ..Default::default()
     };
     let token_manager = Arc::new(TokenManager::new(config.clone()).unwrap());
     let execution_client = Arc::new(ExecutionClient::new(token_manager));
@@ -330,6 +346,7 @@ async fn test_startup_position_reconciliation() {
         otm_offset: 50.0,
         buffer_zone: 10.0,
         dry_run: true,
+        ..Default::default()
     };
     let token_manager = Arc::new(TokenManager::new(config.clone()).unwrap());
     let execution_client = Arc::new(ExecutionClient::new(token_manager));

@@ -115,7 +115,7 @@ impl NewsFetcher {
         let response = match self.client.get(url).query(&params).send().await {
             Ok(resp) => resp,
             Err(e) => {
-                error!("Error sending news request: {:?}", e);
+                warn!("Warning: Failed to fetch news (maybe timeout): {:?}", e);
                 return Vec::new();
             }
         };

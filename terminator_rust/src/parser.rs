@@ -39,7 +39,7 @@ pub fn parse_schwab_decimal(val: &Value) -> Option<f64> {
     
     let sign_scale = val.get("signScale")
         .or_else(|| val.get("sign-scale"))
-        .and_then(|s| s.as_i64())?;
+        .and_then(|s| s.as_i64().or_else(|| s.as_f64().map(|f| f as i64)))?;
     
     let exponent = sign_scale - 6;
     let factor = 10.0f64.powi(exponent as i32);
@@ -118,11 +118,11 @@ pub fn parse_acct_activity_data(
             for quote_val in quotes_val {
                 let leg_id = quote_val.get("SchwabOrderID").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 let symbol = quote_val.get("Symbol").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let side = quote_val.pointer("/OptionsQuote/PutCallCode").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let _side = quote_val.pointer("/OptionsQuote/PutCallCode").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 legs.push(OrderActivityLeg {
                     leg_id,
                     symbol,
-                    buy_sell: side,
+                    buy_sell: String::new(),
                     quantity: 0.0,
                 });
             }
@@ -190,21 +190,31 @@ pub fn parse_acct_activity_data(
 
 /// Extract and parse all ACCT_ACTIVITY events from raw WebSocket text stream update
 pub fn parse_acct_activity_message(txt: &str) -> Vec<OrderActivityEvent> {
-    let mut events = Vec::new();
     let val: Value = match serde_json::from_str(txt) {
         Ok(v) => v,
-        Err(_) => return events,
+        Err(_) => return Vec::new(),
     };
+    parse_acct_activity_value(&val)
+}
+
+pub fn parse_acct_activity_value(val: &Value) -> Vec<OrderActivityEvent> {
+    let mut events = Vec::new();
 
     let mut process_item = |content_val: &Value| {
         let msg_type = content_val.get("MESSAGE_TYPE")
             .or_else(|| content_val.get("message-type"))
+            .or_else(|| content_val.get("2")) // Schwab Streamer keys MESSAGE_TYPE as "2"
             .and_then(|v| v.as_str());
         let msg_data = content_val.get("MESSAGE_DATA")
             .or_else(|| content_val.get("message-data"))
+            .or_else(|| content_val.get("3")) // Schwab Streamer keys MESSAGE_DATA as "3"
             .and_then(|v| v.as_str());
 
         if let (Some(m_type), Some(m_data)) = (msg_type, msg_data) {
+            // Ignore the "SUBSCRIBED" initialization event
+            if m_type == "SUBSCRIBED" {
+                return;
+            }
             if let Some(event) = parse_acct_activity_data(m_type, m_data) {
                 events.push(event);
             }
@@ -247,12 +257,17 @@ pub fn parse_streaming_message(
     let val: Value = match serde_json::from_str(txt) {
         Ok(v) => v,
         Err(e) => {
-            // Some messages could be raw string lists or heartbeats
             debug!("Received non-JSON or control stream update: {} | Error: {:?}", txt, e);
             return None;
         }
     };
+    parse_streaming_value(&val, grid)
+}
 
+pub fn parse_streaming_value(
+    val: &Value,
+    grid: &OptionsGrid,
+) -> Option<f64> {
     let mut new_spx = None;
 
     if let Some(data_array) = val.get("data").and_then(|d| d.as_array()) {
@@ -311,7 +326,9 @@ pub fn parse_streaming_message(
                     let bid = bid_val.and_then(|b| b.as_f64());
                     let ask = ask_val.and_then(|a| a.as_f64());
 
-                    if bid.is_some() || ask.is_some() {
+                    // Always call update_option to refresh the last_update timestamp and recalculate Delta
+                    // based on new SPX price, even if bid/ask haven't changed (e.g. only Volume or Delta updated).
+                    if !key.is_empty() {
                         grid.update_option(key, bid, ask, spx_price);
                     }
                 }

@@ -613,9 +613,7 @@ function updateOrdersTable(orders) {
     const cancelAllBtn = document.getElementById('cancel-all-orders-btn');
     tbody.innerHTML = '';
 
-    const filteredOrders = (orders || []).filter(o => isSpx0DteOrder(o.symbol));
-
-    if (!filteredOrders || filteredOrders.length === 0) {
+    if (!orders || orders.length === 0) {
         tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-secondary);">No working orders</td></tr>';
         if (cancelAllBtn) {
             cancelAllBtn.disabled = true;
@@ -630,7 +628,7 @@ function updateOrdersTable(orders) {
         cancelAllBtn.style.opacity = '1';
         cancelAllBtn.style.cursor = 'pointer';
     }
-    filteredOrders.forEach(o => {
+    orders.forEach(o => {
         const row = document.createElement('tr');
         row.innerHTML = `
             <td>${o.time || '--:--:--'}</td>
@@ -1011,15 +1009,9 @@ function showTradeModal(tradeData) {
             orderListEl.appendChild(orderCard);
         });
 
-        const creditEl = document.getElementById('modal-total-credit');
-        if (creditEl) {
-            let totalCredit = tradeData.total_credit;
-            if (tradeData.trade && tradeData.trade.credit !== undefined) {
-                const creditVal = tradeData.trade.credit;
-                totalCredit = `${formatUSD(Math.abs(creditVal / 100))} ${creditVal >= 0 ? 'Credit' : 'Debit'}`;
-            }
-            creditEl.textContent = totalCredit || '$0.00';
-        }
+        // Calculate dynamic total credit based on the offset order leg prices,
+        // rather than the raw mid prices from the background engine
+        updateTotalCreditDisplay();
 
         window.currentTradeMaxTime = tradeData.timeout || TRADE_TIMEOUT_SEC;
         tradeTimeLeft = window.currentTradeMaxTime;

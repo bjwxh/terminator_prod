@@ -143,25 +143,35 @@ impl WebsocketClient {
         }
 
         info!("Registering subscription for {} symbols on service {}...", symbols.len(), service);
-        let mut registry = self.subscribed_symbols.lock().await;
-        let mut new_symbols = Vec::new();
-        for sym in &symbols {
-            if registry.insert(sym.clone()) {
-                new_symbols.push(sym.clone());
+        let (new_symbols, is_first_for_service) = {
+            let mut registry = self.subscribed_symbols.lock().await;
+            
+            let count_before = if service == "LEVELONE_EQUITIES" {
+                registry.iter().filter(|s| s.starts_with('$')).count()
+            } else {
+                registry.iter().filter(|s| !s.starts_with('$')).count()
+            };
+
+            let mut new_symbols = Vec::new();
+            for sym in &symbols {
+                if registry.insert(sym.clone()) {
+                    new_symbols.push(sym.clone());
+                }
             }
-        }
+            (new_symbols, count_before == 0)
+        };
 
         if !new_symbols.is_empty() {
             if let Some(tx) = self.active_cmd_tx.lock().await.as_ref() {
                 if let Some(streamer) = self.active_streamer_info.lock().await.as_ref() {
-                    // Use ADD (not SUBS) — SUBS replaces the entire subscription list for the
-                    // service, so chunking with SUBS would cancel all prior chunks. ADD appends.
-                    for chunk in new_symbols.chunks(40) {
+                    for (i, chunk) in new_symbols.chunks(40).enumerate() {
                         let req_id = self.next_request_id().await;
+                        let command = if is_first_for_service && i == 0 { "SUBS" } else { "ADD" };
+                        
                         let sub_req = WsRequest {
                             service: service.to_string(),
                             requestid: req_id,
-                            command: "ADD".to_string(),
+                            command: command.to_string(),
                             customer_id: streamer.schwab_client_customer_id.clone(),
                             correl_id: streamer.schwab_client_correl_id.clone(),
                             parameters: serde_json::json!({
@@ -173,7 +183,7 @@ impl WebsocketClient {
                         let msg_str = serde_json::to_string(&payload)?;
                         let _ = tx.send(Message::Text(msg_str.into()));
                     }
-                    info!("Dynamically sent ADD subscription request for {} symbols", new_symbols.len());
+                    info!("Dynamically sent subscription request for {} symbols (First: {})", new_symbols.len(), is_first_for_service);
                 }
             }
         }
@@ -312,21 +322,21 @@ impl WebsocketClient {
         info!("Streamer login successful! Sending initial subscriptions...");
 
         // Subscribe to Account Activity (Order Fills, etc.)
-        // let req_id = self.next_request_id().await;
-        // let acct_req = WsRequest {
-        //     service: "ACCT_ACTIVITY".to_string(),
-        //     requestid: req_id,
-        //     command: "SUBS".to_string(),
-        //     customer_id: streamer.schwab_client_customer_id.clone(),
-        //     correl_id: streamer.schwab_client_correl_id.clone(),
-        //     parameters: serde_json::json!({
-        //         "keys": streamer.schwab_client_correl_id.clone(),
-        //         "fields": "0,1,2,3"
-        //     }),
-        // };
-        // let acct_payload = WsRequestContainer { requests: vec![acct_req] };
-        // write_half.send(Message::Text(serde_json::to_string(&acct_payload)?.into())).await?;
-        // info!("Subscribed to real-time ACCT_ACTIVITY feed for account correl ID: {}", streamer.schwab_client_correl_id);
+        let req_id = self.next_request_id().await;
+        let acct_req = WsRequest {
+            service: "ACCT_ACTIVITY".to_string(),
+            requestid: req_id,
+            command: "SUBS".to_string(),
+            customer_id: streamer.schwab_client_customer_id.clone(),
+            correl_id: streamer.schwab_client_correl_id.clone(),
+            parameters: serde_json::json!({
+                "keys": streamer.schwab_client_correl_id.clone(),
+                "fields": "0,1,2,3"
+            }),
+        };
+        let acct_payload = WsRequestContainer { requests: vec![acct_req] };
+        write_half.send(Message::Text(serde_json::to_string(&acct_payload)?.into())).await?;
+        info!("Subscribed to real-time ACCT_ACTIVITY feed for account correl ID: {}", streamer.schwab_client_correl_id);
 
         // 4. Send dynamic subscriptions registered in our dynamic registry
         let active_subs = {
@@ -398,7 +408,7 @@ impl WebsocketClient {
         let (session_tx, mut session_rx) = mpsc::unbounded_channel::<Message>();
         {
             let mut cmd_tx_lock = self.active_cmd_tx.lock().await;
-            *cmd_tx_lock = Some(session_tx);
+            *cmd_tx_lock = Some(session_tx.clone());
             let mut info_lock = self.active_streamer_info.lock().await;
             *info_lock = Some(streamer.clone());
         }
@@ -406,9 +416,9 @@ impl WebsocketClient {
         info!("Entering main streaming select loop...");
 
         // 5. Main concurrent select loop
-        // Heartbeat timeout: if no frame arrives within 30s the TCP connection is stale
+        // Heartbeat timeout: if no frame arrives within 120s the TCP connection is stale
         // (half-open) and we bail so the supervisor loop can reconnect.
-        let heartbeat_timeout = Duration::from_secs(30);
+        let heartbeat_timeout = Duration::from_secs(120);
         loop {
             tokio::select! {
                 msg_result = tokio::time::timeout(heartbeat_timeout, read_half.next()) => {
@@ -427,9 +437,8 @@ impl WebsocketClient {
                         Ok(Some(Ok(msg))) => {
                             match msg {
                                 Message::Text(text) => {
-                                    info!("Received WebSocket message: {}", text);
-                                    let text_upper = text.to_uppercase();
-                                    if text_upper.contains("RESPONSE") || text_upper.contains("DATA") {
+                                    debug!("Received WebSocket message: {}", text);
+                                    if text.contains("\"RESPONSE\"") || text.contains("\"response\"") || text.contains("\"data\"") || text.contains("\"DATA\"") {
                                         let _ = self.message_tx.send(text.clone());
                                     } else {
                                         debug!("Received unhandled Stream message: {}", text);
@@ -441,7 +450,11 @@ impl WebsocketClient {
                                         let _ = self.message_tx.send(txt);
                                     }
                                 }
-                                Message::Ping(_) => {
+                                Message::Ping(payload) => {
+                                    if let Err(e) = write_half.send(Message::Pong(payload)).await {
+                                        warn!("Failed to send Pong: {:?} — reconnecting", e);
+                                        break;
+                                    }
                                     debug!("Ping received, Pong sent.");
                                 }
                                 Message::Close(_) => {

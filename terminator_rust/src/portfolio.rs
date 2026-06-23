@@ -39,6 +39,7 @@ pub struct Portfolio {
     pub positions: Vec<PositionLeg>,
     pub trades: Vec<Trade>,
     pub cash: f64,
+    pub broker_pnl_override: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -62,6 +63,7 @@ impl Portfolio {
             positions: Vec::new(),
             trades: Vec::new(),
             cash: 0.0,
+            broker_pnl_override: None,
         }
     }
 
@@ -86,6 +88,9 @@ impl Portfolio {
     }
 
     pub fn net_pnl(&self) -> f64 {
+        if let Some(pnl) = self.broker_pnl_override {
+            return pnl;
+        }
         self.gross_pnl() - self.fees()
     }
 
@@ -139,40 +144,42 @@ impl Portfolio {
             strikes.sort_by(|a, b| a.partial_cmp(b).unwrap());
             strikes.dedup();
 
-            let mut max_loss: f64 = 0.0;
-            for &test_strike in &strikes {
-                let mut loss_at_strike = 0.0;
+            let mut test_strikes = Vec::new();
+            if let Some(&first) = strikes.first() {
+                test_strikes.push(first - 1.0);
+            }
+            test_strikes.extend(strikes.iter().cloned());
+            if let Some(&last) = strikes.last() {
+                test_strikes.push(last + 1.0);
+            }
+
+            let mut max_risk: f64 = 0.0;
+            for test_strike in test_strikes {
+                let mut intrinsic_val = 0.0;
                 for leg in legs {
-                    // Intrinsic value of option side at test_strike
-                    let intrinsic = if leg.side == "CALL" {
+                    let val = if leg.side == "CALL" {
                         (test_strike - leg.strike).max(0.0)
                     } else {
                         (leg.strike - test_strike).max(0.0)
                     };
-                    // Value change relative to entry_price
-                    // For short: entry_price - intrinsic
-                    // For long: intrinsic - entry_price
-                    let leg_qty = leg.quantity as f64;
-                    let pnl = if leg_qty < 0.0 {
-                        (leg.entry_price - intrinsic) * leg_qty.abs() * 100.0
-                    } else {
-                        (intrinsic - leg.entry_price) * leg_qty * 100.0
-                    };
-                    loss_at_strike += pnl;
+                    intrinsic_val += val * (leg.quantity as f64);
                 }
-                if loss_at_strike < 0.0 {
-                    max_loss = max_loss.max(-loss_at_strike);
+                let risk = -intrinsic_val;
+                if risk > max_risk {
+                    max_risk = risk;
                 }
             }
-            max_loss
+            max_risk
         };
 
         let call_risk = calculate_side_risk(&calls);
         let put_risk = calculate_side_risk(&puts);
-        call_risk.max(put_risk)
+        call_risk.max(put_risk) * 100.0
     }
 
     pub fn add_trade(&mut self, trade: &Trade, fill_prices: Option<Vec<f64>>) {
+
+
         self.trades.push(trade.clone());
         self.cash += trade.credit;
 
@@ -234,6 +241,41 @@ impl Portfolio {
                     pos.current_day_pnl = (pos.price - pos.entry_price) * (pos.quantity as f64) * 100.0;
                 }
             }
+        }
+    }
+
+    pub fn sync_from_broker(&mut self, broker_positions: &[crate::execution::BrokerPosition]) {
+        let mut new_positions = Vec::new();
+        let mut total_pnl = 0.0;
+        
+        for bp in broker_positions {
+            let existing = self.positions.iter().find(|p| p.symbol == bp.symbol);
+            
+            let mut p = existing.cloned().unwrap_or_else(|| PositionLeg {
+                symbol: bp.symbol.clone(),
+                strike: bp.strike,
+                side: bp.side.clone(),
+                quantity: 0,
+                delta: 0.0,
+                theta: 0.0,
+                price: bp.price,
+                entry_price: bp.avg_price,
+                bid: 0.0,
+                ask: 0.0,
+                current_day_pnl: 0.0,
+            });
+
+            p.quantity = bp.quantity;
+            p.current_day_pnl = bp.current_day_pnl;
+            p.entry_price = bp.avg_price;
+            p.price = bp.price;
+
+            total_pnl += bp.current_day_pnl;
+            new_positions.push(p);
+        }
+        self.positions = new_positions;
+        if !broker_positions.is_empty() {
+            self.broker_pnl_override = Some(total_pnl);
         }
     }
 

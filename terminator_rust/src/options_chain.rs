@@ -35,8 +35,9 @@ pub async fn fetch_0dte_option_chain(
     let access_token = token_manager.get_access_token();
     let client = reqwest::Client::new();
     
-    // Format today's date in YYYY-MM-DD local format
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    // Format today's date in YYYY-MM-DD America/Chicago format
+    let chicago_time = chrono::Utc::now().with_timezone(&chrono_tz::America::Chicago);
+    let today = chicago_time.format("%Y-%m-%d").to_string();
     
     info!("Fetching Schwab options chain for $SPX 0DTE on {}...", today);
     
@@ -69,9 +70,13 @@ pub async fn fetch_0dte_option_chain(
     let mut process_map = |exp_map: &HashMap<String, HashMap<String, Vec<SchwabOptionContract>>>, is_call: bool| {
         for (_exp_str, strikes) in exp_map {
             for (strike_str, contracts) in strikes {
-                let strike = strike_str.parse::<f64>().unwrap_or_default();
+                let strike = strike_str
+                    .split(':')
+                    .next()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or_default();
                 for contract in contracts {
-                    if contract.days_to_expiration == 0 {
+                    if contract.days_to_expiration <= 1 {
                         let key = StrikeAndSide {
                             strike: ordered_float::OrderedFloat(strike),
                             is_call,
@@ -93,10 +98,14 @@ pub async fn fetch_0dte_option_chain(
     // 2. Process StrategyChain structures
     let mut process_chain = |strategy_chain: &HashMap<String, HashMap<String, Vec<SchwabOptionContract>>>, is_call: bool| {
         for (strike_str, exps) in strategy_chain {
-            let strike = strike_str.parse::<f64>().unwrap_or_default();
+            let strike = strike_str
+                .split(':')
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or_default();
             for (_exp_str, contracts) in exps {
                 for contract in contracts {
-                    if contract.days_to_expiration == 0 {
+                    if contract.days_to_expiration <= 1 {
                         let key = StrikeAndSide {
                             strike: ordered_float::OrderedFloat(strike),
                             is_call,
