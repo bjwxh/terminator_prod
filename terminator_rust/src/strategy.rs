@@ -18,7 +18,7 @@ use crate::parser::parse_occ_symbol;
 #[derive(Clone, Debug)]
 pub struct LegOverride { pub idx: usize, pub price_ea: f64 }
 #[derive(Clone, Debug)]
-pub struct PendingTrade { pub strat_id: String, pub trade: Trade }
+pub struct PendingTrade { pub strat_id: String, pub trade: Trade, pub ui_legs: Vec<OptionLeg>, pub to_cancel: Vec<String> }
 #[derive(Clone, Debug)]
 pub struct HistoryPoint { pub ts: String, pub spx: f64, pub live_pnl: f64, pub sim_pnl: f64 }
 
@@ -1408,7 +1408,11 @@ impl StrategySupervisor {
             let order_strat_id = wo.get("strategy_id").and_then(|v| v.as_str()).unwrap_or("");
             let belongs_here = order_strat_id == trade.strategy_id || trade.purpose == "RECONCILIATION";
 
-            let mut is_stale = !belongs_here;
+            if !belongs_here {
+                continue;
+            }
+
+            let mut is_stale = false;
             let mut order_legs_data = Vec::new();
 
             if let Some(leg_array) = wo.get("orderLegCollection").and_then(|v| v.as_array()) {
@@ -1453,7 +1457,9 @@ impl StrategySupervisor {
             }
 
             if is_stale {
-                to_cancel.push(wid);
+                if order_strat_id == trade.strategy_id {
+                    to_cancel.push(wid);
+                }
             } else {
                 protected_ids.insert(wid);
                 for (k, val) in order_legs_data {
@@ -1615,6 +1621,8 @@ impl StrategySupervisor {
             *self.pending_trade.lock().await = Some(PendingTrade {
                 strat_id: "GAP_RECON".to_string(),
                 trade,
+                ui_legs: remaining_legs,
+                to_cancel,
             });
         }
 
@@ -1721,11 +1729,14 @@ impl StrategySupervisor {
                     }
 
                     info!("Trading is enabled. Routing to pending_trade for user confirmation.");
+                    let (to_cancel, remaining_legs) = self.create_execution_plan(&trade).await;
                     let mut pending = self.pending_trade.lock().await;
                     if pending.is_none() {
                         *pending = Some(PendingTrade {
                             strat_id: sid.clone(),
                             trade: trade.clone(),
+                            ui_legs: remaining_legs,
+                            to_cancel,
                         });
                         s.state = StrategyState::EnteringSpread;
                     } else {
@@ -1750,11 +1761,14 @@ impl StrategySupervisor {
                             }
 
                             info!("Trading is enabled. Routing to pending_trade for user confirmation.");
+                            let (to_cancel, remaining_legs) = self.create_execution_plan(&exit_trade).await;
                             let mut pending = self.pending_trade.lock().await;
                             if pending.is_none() {
                                 *pending = Some(PendingTrade {
                                     strat_id: sid.clone(),
                                     trade: exit_trade.clone(),
+                                    ui_legs: remaining_legs,
+                                    to_cancel,
                                 });
                                 s.state = StrategyState::Exiting;
                             }
@@ -1773,11 +1787,14 @@ impl StrategySupervisor {
                         }
 
                         info!("Trading is enabled. Routing to pending_trade for user confirmation.");
+                        let (to_cancel, remaining_legs) = self.create_execution_plan(&trade).await;
                         let mut pending = self.pending_trade.lock().await;
                         if pending.is_none() {
                             *pending = Some(PendingTrade {
                                 strat_id: sid.clone(),
                                 trade: trade.clone(),
+                                ui_legs: remaining_legs,
+                                to_cancel,
                             });
                             s.state = StrategyState::Exiting;
                         }
@@ -1883,25 +1900,22 @@ impl StrategySupervisor {
         if let Some(t) = pending {
             let account_hash = self.account_hash.lock().await.clone().unwrap_or_default();
 
-            // Run execution plan to determine cancels and remaining legs
-            let (to_cancel, remaining_legs) = self.create_execution_plan(&t.trade).await;
-
             // 1. Cancel outdated/stale working orders first
-            for oid in to_cancel {
+            for oid in &t.to_cancel {
                 info!("Cancelling outdated/opposite working order: {}", oid);
-                if let Err(e) = self.execution_client.cancel_order(&account_hash, &oid).await {
+                if let Err(e) = self.execution_client.cancel_order(&account_hash, oid).await {
                     warn!("Failed to cancel working order {}: {:?}", oid, e);
                 }
             }
 
-            if remaining_legs.is_empty() {
+            if t.ui_legs.is_empty() {
                 info!("All legs covered by working orders after cancel phase. No new order to place.");
                 return Ok(());
             }
 
             // Create temporary trade with remaining legs
             let mut adjusted_trade = t.trade.clone();
-            adjusted_trade.legs = remaining_legs;
+            adjusted_trade.legs = t.ui_legs.clone();
 
             if strat_id == "GAP_RECON" || t.trade.purpose == "RECONCILIATION" {
                 let positions = {

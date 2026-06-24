@@ -354,9 +354,9 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
     // Pending confirmation trade
     let pending_trade_val = match &*state.supervisor.pending_trade.lock().await {
         Some(t) => {
-            let orders_val = build_orders_val(&t.trade.legs, state.supervisor.config.order_offset);
+            let orders_val = build_orders_val(&t.ui_legs, state.supervisor.config.order_offset);
 
-            let legs_val: Vec<serde_json::Value> = t.trade.legs.iter().map(|l| {
+            let legs_val: Vec<serde_json::Value> = t.ui_legs.iter().map(|l| {
                 json!({
                     "symbol": l.symbol, "strike": l.strike, "side": l.side, "quantity": l.quantity,
                     "price": l.price, "delta": l.delta
@@ -477,7 +477,7 @@ async fn handle_ws_socket(socket: WebSocket, state: AppState) {
         lock.clone()
     };
     if let Some(t) = pending_trade_opt {
-        let legs_val: Vec<serde_json::Value> = t.trade.legs.iter().map(|l| {
+        let legs_val: Vec<serde_json::Value> = t.ui_legs.iter().map(|l| {
             json!({
                 "symbol": l.symbol, "strike": l.strike, "side": l.side, "quantity": l.quantity,
                 "price": l.price, "delta": l.delta
@@ -486,7 +486,7 @@ async fn handle_ws_socket(socket: WebSocket, state: AppState) {
 
         // Build chunked orders — same logic as build_state_snapshot so the reconnect modal
         // renders grouped multi-leg cards instead of individual legs.
-        let orders_val = build_orders_val(&t.trade.legs, state.supervisor.config.order_offset);
+        let orders_val = build_orders_val(&t.ui_legs, state.supervisor.config.order_offset);
 
         let reconnect_payload = json!({
             "type": "trade_signal",
