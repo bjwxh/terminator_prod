@@ -1408,7 +1408,7 @@ impl StrategySupervisor {
             let order_strat_id = wo.get("strategy_id").and_then(|v| v.as_str()).unwrap_or("");
             let belongs_here = order_strat_id == trade.strategy_id || trade.purpose == "RECONCILIATION";
 
-            if !belongs_here {
+            if !belongs_here && !order_strat_id.is_empty() {
                 continue;
             }
 
@@ -1457,7 +1457,7 @@ impl StrategySupervisor {
             }
 
             if is_stale {
-                if order_strat_id == trade.strategy_id {
+                if order_strat_id == trade.strategy_id || order_strat_id.is_empty() {
                     to_cancel.push(wid);
                 }
             } else {
