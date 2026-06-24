@@ -1408,11 +1408,7 @@ impl StrategySupervisor {
             let order_strat_id = wo.get("strategy_id").and_then(|v| v.as_str()).unwrap_or("");
             let belongs_here = order_strat_id == trade.strategy_id || trade.purpose == "RECONCILIATION";
 
-            if !belongs_here && !order_strat_id.is_empty() {
-                continue;
-            }
-
-            let mut is_stale = false;
+            let mut is_stale = !belongs_here && !order_strat_id.is_empty();
             let mut order_legs_data = Vec::new();
 
             if let Some(leg_array) = wo.get("orderLegCollection").and_then(|v| v.as_array()) {
@@ -1457,9 +1453,7 @@ impl StrategySupervisor {
             }
 
             if is_stale {
-                if order_strat_id == trade.strategy_id || order_strat_id.is_empty() {
-                    to_cancel.push(wid);
-                }
+                to_cancel.push(wid);
             } else {
                 protected_ids.insert(wid);
                 for (k, val) in order_legs_data {
