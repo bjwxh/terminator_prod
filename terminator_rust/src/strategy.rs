@@ -972,7 +972,6 @@ pub async fn execute_trade(
     positions: &[crate::portfolio::PositionLeg],
     overrides: &[LegOverride],
 ) -> Result<(Vec<ExecutedChunk>, Vec<DeferredChunk>), (Vec<ExecutedChunk>, anyhow::Error)> {
-    let chunks = get_smart_chunks(&trade.legs);
     let mut order_ids = Vec::new();
     let mut deferred_chunks = Vec::new();
 
@@ -981,26 +980,46 @@ pub async fn execute_trade(
         closing_remaining.insert(p.symbol.clone(), p.quantity.abs());
     }
 
-    let mut actively_closed_symbols = std::collections::HashSet::new();
-    let mut chunk_classifications = Vec::new();
+    // Pre-split legs into close-only and open-only groups before chunking.
+    // This prevents get_smart_chunks from mixing close (BTC/STC) and open (BTO/STO) legs
+    // for the same symbol into incoherent IC structures (the "duplicate-symbol" problem).
+    let mut close_legs: Vec<OptionLeg> = Vec::new();
+    let mut open_legs: Vec<OptionLeg> = Vec::new();
     {
         let mut temp_remaining = closing_remaining.clone();
-        for chunk in &chunks {
-            let mut is_closing = false;
-            for leg in chunk {
-                let remaining = temp_remaining.get(&leg.symbol).copied().unwrap_or(0);
-                let broker_opposing = positions.iter().any(|p| {
-                    p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
-                });
-                if broker_opposing && remaining > 0 {
-                    is_closing = true;
-                    actively_closed_symbols.insert(leg.symbol.clone());
-                    *temp_remaining.entry(leg.symbol.clone()).or_insert(0) -= 1;
-                }
+        for leg in &trade.legs {
+            let remaining = temp_remaining.get(&leg.symbol).copied().unwrap_or(0);
+            let broker_opposing = positions.iter().any(|p| {
+                p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
+            });
+            if broker_opposing && remaining > 0 {
+                close_legs.push(leg.clone());
+                *temp_remaining.entry(leg.symbol.clone()).or_insert(0) -= leg.quantity.abs();
+            } else {
+                open_legs.push(leg.clone());
             }
-            chunk_classifications.push(is_closing);
         }
     }
+
+    // Chunk each group independently, then concatenate. Close chunks come first so
+    // symbol_to_order_id is populated before open chunks need it for deferral.
+    let mut close_chunks = get_smart_chunks(&close_legs);
+    let open_chunks = get_smart_chunks(&open_legs);
+    let close_chunk_count = close_chunks.len();
+    close_chunks.extend(open_chunks);
+    let chunks = close_chunks;
+
+    // All symbols being closed — used to defer opening chunks that would conflict.
+    let mut actively_closed_symbols = std::collections::HashSet::new();
+    for leg in &close_legs {
+        actively_closed_symbols.insert(leg.symbol.clone());
+    }
+
+    // chunk_classifications[i] = true if chunk i is a close chunk (submitted immediately).
+    // Open chunks after index close_chunk_count may be deferred by the flip-queue.
+    let chunk_classifications: Vec<bool> = (0..chunks.len())
+        .map(|i| i < close_chunk_count)
+        .collect();
 
     let mut symbol_to_order_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut temp_closing_remaining = closing_remaining.clone();
@@ -1938,20 +1957,17 @@ impl StrategySupervisor {
         let close_len = close_adjustments.len();
         let open_len = open_adjustments.len();
 
-        // We prioritize closing positions first. If there are closing adjustments, we build a
-        // flatten/close trade. Any remaining open adjustments are routed as the open trade.
-        // If there are no closing adjustments, we bundle all open adjustments as a single trade.
-        let adjustments_to_route = if has_close_adjustments {
-            close_adjustments
-        } else {
-            open_adjustments
-        };
+        // Route ALL adjustments together so the confirmation modal shows both the flatten
+        // and the non-conflicting IC opens simultaneously. Inside execute_trade, close and
+        // open legs are chunked separately so get_smart_chunks never mixes them.
+        let mut adjustments_to_route = close_adjustments;
+        adjustments_to_route.extend(open_adjustments);
 
         if adjustments_to_route.is_empty() {
             return Ok(());
         }
 
-        info!("⚠️ Reconciliation Discrepancy: Found {} close / {} open adjustments. Routing prioritised batch size {}.", 
+        info!("⚠️ Reconciliation Discrepancy: Found {} close / {} open adjustments. Routing {} legs total.",
              close_len, open_len, adjustments_to_route.len());
 
         let mut legs = Vec::new();
