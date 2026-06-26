@@ -727,3 +727,170 @@ async fn test_net_zero_roll_rebalance_guard() {
     assert!(finalized_after_fill);
     assert!(s.previous_portfolio.is_none());
 }
+
+#[tokio::test]
+async fn test_non_overlapping_chunks_execute_immediately() {
+    let temp_token_path = std::env::temp_dir().join("test_token_non_overlap.json");
+    let _ = std::fs::write(&temp_token_path, r#"{"creation_timestamp":1716300000,"token":{"expires_in":1800,"token_type":"Bearer","scope":"readonly","refresh_token":"dummy","access_token":"dummy","id_token":"dummy","expires_at":1800000000000}}"#);
+    
+    let config = AppConfig {
+        schwab_token_path: temp_token_path.clone(),
+        schwab_account: "12345678".to_string(),
+        schwab_api_key: "key".to_string(),
+        schwab_api_secret: "secret".to_string(),
+        schwab_callback_url: "http://localhost".to_string(),
+        dry_run: true,
+        ..Default::default()
+    };
+    let tm = Arc::new(TokenManager::new(config).unwrap());
+    let client = ExecutionClient::new(tm);
+    
+    // Create non-overlapping legs on different symbols/strikes
+    let legs = vec![
+        OptionLeg {
+            symbol: "SPXW  260522C05300000".to_string(),
+            strike: 5300.0,
+            side: "CALL".to_string(),
+            quantity: 1,
+            delta: 0.0,
+            theta: 0.0,
+            price: 5.00,
+            instruction: None,
+        },
+        OptionLeg {
+            symbol: "SPXW  260522P05200000".to_string(),
+            strike: 5200.0,
+            side: "PUT".to_string(),
+            quantity: 1,
+            delta: 0.0,
+            theta: 0.0,
+            price: 5.00,
+            instruction: None,
+        },
+    ];
+    let trade = Trade {
+        timestamp: "".to_string(),
+        legs,
+        credit: 0.0,
+        commission: 0.0,
+        purpose: "RECON".to_string(),
+        strategy_id: "GAP_RECON".to_string(),
+    };
+
+    // Under dry_run = true, nothing is deferred, and execute_trade doesn't make any REST calls.
+    let positions = vec![];
+    let res = terminator_rust::strategy::execute_trade(&client, "hash", &trade, true, 0.0, &positions, &[]).await;
+    let (executed, deferred) = res.expect("execute_trade failed");
+    
+    assert!(deferred.is_empty(), "Should not defer any chunks in dry run or since there are no opposing positions to flip");
+    assert!(!executed.is_empty());
+    let _ = std::fs::remove_file(temp_token_path);
+}
+
+#[tokio::test]
+async fn test_flipping_chunks_are_queued_and_triggered() {
+    use std::sync::Arc;
+    let temp_token_path = std::env::temp_dir().join("test_token_flip.json");
+    let _ = std::fs::write(&temp_token_path, r#"{"creation_timestamp":1716300000,"token":{"expires_in":1800,"token_type":"Bearer","scope":"readonly","refresh_token":"dummy","access_token":"dummy","id_token":"dummy","expires_at":1800000000000}}"#);
+    
+    let config = AppConfig {
+        schwab_token_path: temp_token_path.clone(),
+        schwab_account: "mock_hash".to_string(),
+        schwab_api_key: "key".to_string(),
+        schwab_api_secret: "secret".to_string(),
+        schwab_callback_url: "http://localhost".to_string(),
+        dry_run: true,
+        ..Default::default()
+    };
+    let tm = Arc::new(TokenManager::new(config.clone()).unwrap());
+    let client = Arc::new(ExecutionClient::new(tm));
+    let grid = Arc::new(OptionsGrid::new(HashMap::new()));
+    
+    let supervisor = StrategySupervisor::new(config, client, grid);
+    *supervisor.account_hash.lock().await = Some("mock_hash".to_string());
+
+    // Setup active broker positions: we are Long 1 contract of SPXW  260522C05300000
+    let symbol = "SPXW  260522C05300000".to_string();
+    let initial_pos = terminator_rust::portfolio::PositionLeg {
+        symbol: symbol.clone(),
+        strike: 5300.0,
+        side: "CALL".to_string(),
+        quantity: 1,
+        delta: 0.0,
+        theta: 0.0,
+        price: 5.0,
+        entry_price: 5.0,
+        bid: 5.0,
+        ask: 5.0,
+        current_day_pnl: 0.0,
+    };
+    supervisor.broker_portfolio.lock().await.positions.push(initial_pos.clone());
+
+    // We want to perform a flip: Sell to Close 1 (closing), then Buy to Open 1 (opening opposing)
+    let legs = vec![
+        // Closing leg
+        OptionLeg {
+            symbol: symbol.clone(),
+            strike: 5300.0,
+            side: "CALL".to_string(),
+            quantity: -1, // Selling to close
+            delta: 0.0,
+            theta: 0.0,
+            price: 5.0,
+            instruction: Some("SELL_TO_CLOSE".to_string()),
+        },
+        // Opening opposing leg (re-entering/flipping)
+        OptionLeg {
+            symbol: symbol.clone(),
+            strike: 5300.0,
+            side: "CALL".to_string(),
+            quantity: -1, // Selling short (flipping to short position)
+            delta: 0.0,
+            theta: 0.0,
+            price: 5.0,
+            instruction: Some("SELL_TO_OPEN".to_string()),
+        },
+    ];
+    
+    let trade = Trade {
+        timestamp: "".to_string(),
+        legs: legs.clone(),
+        credit: 0.0,
+        commission: 0.0,
+        purpose: "RECON".to_string(),
+        strategy_id: "GAP_RECON".to_string(),
+    };
+
+    let _positions = vec![initial_pos];
+    
+    // Let's verify the queueing logic:
+    // 1. Manually construct a DeferredChunk and push it to supervisor.execution_queue
+    let dummy_order_id = "schwab_order_123".to_string();
+    let deferred_chunk = terminator_rust::strategy::DeferredChunk {
+        chunk: vec![legs[1].clone()], // opening leg
+        awaiting_order_id: dummy_order_id.clone(),
+    };
+    supervisor.execution_queue.lock().await.push(deferred_chunk);
+
+    // Verify it is queued
+    assert_eq!(supervisor.execution_queue.lock().await.len(), 1);
+
+    // Simulate Receiving "Filled" for the prerequisite closing order (schwab_order_123)
+    let fill_event = terminator_rust::parser::OrderActivityEvent {
+        order_id: dummy_order_id.clone(),
+        account_number: "mock_hash".to_string(),
+        message_type: "OrderActivity".to_string(),
+        status: "Filled".to_string(),
+        legs: vec![],
+        limit_price: None,
+    };
+
+    // Process event - this should trigger the deferred chunk submission (via execute_trade with dry_run = true since config.dry_run = true)
+    supervisor.process_account_event(fill_event).await;
+
+    // The queue should now be empty because it was removed and submitted (simulated in dry_run)
+    assert_eq!(supervisor.execution_queue.lock().await.len(), 0);
+
+    let _ = std::fs::remove_file(temp_token_path);
+}
+

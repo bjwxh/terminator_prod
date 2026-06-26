@@ -957,7 +957,12 @@ pub struct ExecutedChunk {
     pub legs: Vec<serde_json::Value>,
 }
 
-/// Place the generated trade to Schwab API
+#[derive(Debug, Clone)]
+pub struct DeferredChunk {
+    pub chunk: Vec<OptionLeg>,
+    pub awaiting_order_id: String,
+}
+
 pub async fn execute_trade(
     client: &ExecutionClient,
     account_hash: &str,
@@ -966,55 +971,44 @@ pub async fn execute_trade(
     order_offset: f64,
     positions: &[crate::portfolio::PositionLeg],
     overrides: &[LegOverride],
-) -> Result<Vec<ExecutedChunk>, (Vec<ExecutedChunk>, anyhow::Error)> {
+) -> Result<(Vec<ExecutedChunk>, Vec<DeferredChunk>), (Vec<ExecutedChunk>, anyhow::Error)> {
     let chunks = get_smart_chunks(&trade.legs);
     let mut order_ids = Vec::new();
+    let mut deferred_chunks = Vec::new();
 
     let mut closing_remaining: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
     for p in positions {
         closing_remaining.insert(p.symbol.clone(), p.quantity.abs());
     }
 
-    // Quota-aware conflict detection: scan chunks in order and consume quota as we go.
-    // A chunk is "conflict-resolving" only when it has a leg that can actually close an
-    // existing broker position (i.e. the per-symbol quota is still > 0 at that point).
-    // This prevents later chunks whose legs share the same symbol (but would be SELL_TO_OPEN
-    // new shorts, not closings) from being incorrectly flagged as conflict chunks.
-    let conflict_chunks: Vec<usize> = {
-        let mut detection_remaining = closing_remaining.clone();
-        chunks.iter().enumerate()
-            .filter(|(_, chunk)| {
-                let chunk_closes = chunk.iter().any(|leg| {
-                    let remaining = detection_remaining.get(&leg.symbol).copied().unwrap_or(0);
-                    let broker_opposing = positions.iter().any(|p| {
-                        p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
-                    });
-                    broker_opposing && remaining > 0
+    let mut actively_closed_symbols = std::collections::HashSet::new();
+    let mut chunk_classifications = Vec::new();
+    {
+        let mut temp_remaining = closing_remaining.clone();
+        for chunk in &chunks {
+            let mut is_closing = false;
+            for leg in chunk {
+                let remaining = temp_remaining.get(&leg.symbol).copied().unwrap_or(0);
+                let broker_opposing = positions.iter().any(|p| {
+                    p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
                 });
-                if chunk_closes {
-                    // Consume quota for this chunk's closing legs so subsequent chunks
-                    // don't inherit a stale "still conflicting" view.
-                    for leg in chunk.iter() {
-                        let remaining = detection_remaining.get(&leg.symbol).copied().unwrap_or(0);
-                        let broker_opposing = positions.iter().any(|p| {
-                            p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
-                        });
-                        if broker_opposing && remaining > 0 {
-                            *detection_remaining.entry(leg.symbol.clone()).or_insert(0) -= 1;
-                        }
-                    }
+                if broker_opposing && remaining > 0 {
+                    is_closing = true;
+                    actively_closed_symbols.insert(leg.symbol.clone());
+                    *temp_remaining.entry(leg.symbol.clone()).or_insert(0) -= 1;
                 }
-                chunk_closes
-            })
-            .map(|(i, _)| i)
-            .collect()
-    };
+            }
+            chunk_classifications.push(is_closing);
+        }
+    }
 
-    let has_conflicts = !conflict_chunks.is_empty();
+    let mut symbol_to_order_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut temp_closing_remaining = closing_remaining.clone();
 
     for (i, chunk) in chunks.iter().enumerate() {
-        if has_conflicts && !conflict_chunks.contains(&i) {
-            info!("Deferring chunk {} (pure opening) until position conflicts are resolved", i);
+        let is_deferred = !dry_run && !chunk_classifications[i] && chunk.iter().any(|leg| actively_closed_symbols.contains(&leg.symbol));
+        if is_deferred {
+            info!("Deferring chunk {} (flip opening) until sibling position conflicts are resolved", i);
             continue;
         }
 
@@ -1121,6 +1115,18 @@ pub async fn execute_trade(
         match client.place_order(account_hash, order_body).await {
             Ok(order_id) => {
                 info!("Chunk {} placed successfully. Order ID: {:?}", i, order_id);
+                if let Some(ref oid) = order_id {
+                    for leg in chunk {
+                        let remaining = temp_closing_remaining.get(&leg.symbol).copied().unwrap_or(0);
+                        let broker_opposing = positions.iter().any(|p| {
+                            p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
+                        });
+                        if broker_opposing && remaining > 0 {
+                            symbol_to_order_id.insert(leg.symbol.clone(), oid.clone());
+                            *temp_closing_remaining.entry(leg.symbol.clone()).or_insert(0) -= 1;
+                        }
+                    }
+                }
                 order_ids.push(ExecutedChunk { order_id, quantity: num_units as f64, legs: legs_collection });
             }
             Err(e) => {
@@ -1130,7 +1136,29 @@ pub async fn execute_trade(
         }
     }
 
-    Ok(order_ids)
+    // Construct DeferredChunks for deferred chunks
+    for (i, chunk) in chunks.iter().enumerate() {
+        let is_deferred = !dry_run && !chunk_classifications[i] && chunk.iter().any(|leg| actively_closed_symbols.contains(&leg.symbol));
+        if is_deferred {
+            let mut awaiting_order_id = String::new();
+            for leg in chunk {
+                if let Some(oid) = symbol_to_order_id.get(&leg.symbol) {
+                    awaiting_order_id = oid.clone();
+                    break;
+                }
+            }
+            if !awaiting_order_id.is_empty() {
+                deferred_chunks.push(DeferredChunk {
+                    chunk: chunk.clone(),
+                    awaiting_order_id,
+                });
+            } else {
+                warn!("Deferred chunk {} could not find prerequisite order ID from sibling closing chunks. Dropping.", i);
+            }
+        }
+    }
+
+    Ok((order_ids, deferred_chunks))
 }
 
 
@@ -1158,6 +1186,7 @@ pub struct StrategySupervisor {
     pub timer_paused: std::sync::atomic::AtomicBool,
     pub session_history: tokio::sync::Mutex<std::collections::VecDeque<HistoryPoint>>,
     pub last_history_ct: tokio::sync::Mutex<Option<chrono::DateTime<chrono_tz::Tz>>>,
+    pub execution_queue: Arc<tokio::sync::Mutex<Vec<DeferredChunk>>>,
 }
 
 impl StrategySupervisor {
@@ -1201,6 +1230,7 @@ impl StrategySupervisor {
             timer_paused: std::sync::atomic::AtomicBool::new(false),
             session_history: Mutex::new(std::collections::VecDeque::new()),
             last_history_ct: Mutex::new(None),
+            execution_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -2256,9 +2286,103 @@ impl StrategySupervisor {
                 }
             }
         }
+        
+        // Handle execution_queue updates
+        let mut chunks_to_submit = Vec::new();
+        if event.status == "Filled" {
+            let mut queue = self.execution_queue.lock().await;
+            let mut i = 0;
+            while i < queue.len() {
+                if queue[i].awaiting_order_id == event.order_id {
+                    let dc = queue.remove(i);
+                    chunks_to_submit.push(dc.chunk);
+                } else {
+                    i += 1;
+                }
+            }
+        } else if event.status == "Cancelled" || event.status == "Rejected" {
+            let mut queue = self.execution_queue.lock().await;
+            let mut i = 0;
+            while i < queue.len() {
+                if queue[i].awaiting_order_id == event.order_id {
+                    warn!("⚠️ Dropping deferred chunk from execution queue because prerequisite order {} was cancelled/rejected: {:?}", event.order_id, queue[i].chunk);
+                    queue.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
 
         // Drop the strats lock before making async REST calls to prevent blocking
         drop(strats);
+
+        // Submit any deferred chunks that have been freed
+        if !chunks_to_submit.is_empty() {
+            let hash_opt = self.account_hash.lock().await.clone();
+            if let Some(hash) = hash_opt {
+                let broker_positions = self.broker_portfolio.lock().await.positions.clone();
+                for chunk in chunks_to_submit {
+                    info!("Submitting deferred chunk following fill of prerequisite order {}: {:?}", event.order_id, chunk);
+                    let reconstructed_trade = Trade {
+                        timestamp: Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc()).to_rfc3339(),
+                        legs: chunk,
+                        credit: 0.0,
+                        commission: 0.0,
+                        purpose: "GAP_RECON".to_string(),
+                        strategy_id: "GAP_RECON".to_string(),
+                    };
+                    let is_dry_run = self.config.dry_run;
+                    let execute_res = execute_trade(
+                        &self.execution_client,
+                        &hash,
+                        &reconstructed_trade,
+                        is_dry_run,
+                        self.config.order_offset,
+                        &broker_positions,
+                        &[],
+                    ).await;
+
+                    if !is_dry_run {
+                        match execute_res {
+                            Ok((executed, deferred)) => {
+                                for ex in executed {
+                                    if let Some(oid) = ex.order_id {
+                                        self.working_orders.lock().await.push(json!({
+                                            "orderId": oid,
+                                            "strategy_id": "GAP_RECON",
+                                            "quantity": ex.quantity,
+                                            "orderLegCollection": ex.legs,
+                                            "local_stub_ts": chrono::Utc::now().timestamp()
+                                        }));
+                                    }
+                                }
+                                if !deferred.is_empty() {
+                                    let mut queue = self.execution_queue.lock().await;
+                                    for dc in deferred {
+                                        info!("Queueing deferred flip chunk waiting for order ID: {}", dc.awaiting_order_id);
+                                        queue.push(dc);
+                                    }
+                                }
+                            }
+                            Err((executed, e)) => {
+                                for ex in executed {
+                                    if let Some(oid) = ex.order_id {
+                                        self.working_orders.lock().await.push(json!({
+                                            "orderId": oid,
+                                            "strategy_id": "GAP_RECON",
+                                            "quantity": ex.quantity,
+                                            "orderLegCollection": ex.legs,
+                                            "local_stub_ts": chrono::Utc::now().timestamp()
+                                        }));
+                                    }
+                                }
+                                error!("Failed to submit deferred chunk: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let hash_opt = self.account_hash.lock().await.clone();
         if let Some(hash) = hash_opt {
@@ -2451,7 +2575,7 @@ impl StrategySupervisor {
                     }
                 } else {
                     match execute_res {
-                        Ok(chunks) => {
+                        Ok((chunks, deferred)) => {
                             for chunk in chunks {
                                 if let Some(oid) = chunk.order_id {
                                     self.working_orders.lock().await.push(json!({
@@ -2461,6 +2585,13 @@ impl StrategySupervisor {
                                         "orderLegCollection": chunk.legs,
                                         "local_stub_ts": chrono::Utc::now().timestamp()
                                     }));
+                                }
+                            }
+                            if !deferred.is_empty() {
+                                let mut queue = self.execution_queue.lock().await;
+                                for dc in deferred {
+                                    info!("Queueing deferred flip chunk waiting for order ID: {}", dc.awaiting_order_id);
+                                    queue.push(dc);
                                 }
                             }
                         }
