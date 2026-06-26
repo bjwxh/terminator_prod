@@ -894,3 +894,55 @@ async fn test_flipping_chunks_are_queued_and_triggered() {
     let _ = std::fs::remove_file(temp_token_path);
 }
 
+#[test]
+fn test_reconciliation_separates_exit_and_entry_legs() {
+    use ordered_float::OrderedFloat;
+    use std::collections::HashMap;
+    use terminator_rust::strategy::separate_recon_adjustments;
+
+    // Scenario: broker is LONG 1 x C7420, sim targets SHORT 2 x C7420.
+    // This is a position flip (long → short), so the reconciliation must:
+    //   close leg : -1 C7420  (sell to close the broker long)
+    //   open leg  : -2 C7420  (sell to open new short target)
+    let mut sim_map: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+    sim_map.insert((OrderedFloat(7420.0), "CALL".to_string()), -2);
+
+    let mut live_map: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+    live_map.insert((OrderedFloat(7420.0), "CALL".to_string()), 1);
+
+    let (close, open) = separate_recon_adjustments(&sim_map, &live_map);
+
+    assert_eq!(close.len(), 1, "expected exactly one close leg");
+    assert_eq!(close[0].0, 7420.0);
+    assert_eq!(close[0].1, "CALL");
+    assert_eq!(close[0].2, -1, "close leg should sell 1 to exit the broker long");
+
+    assert_eq!(open.len(), 1, "expected exactly one open leg");
+    assert_eq!(open[0].0, 7420.0);
+    assert_eq!(open[0].1, "CALL");
+    assert_eq!(open[0].2, -2, "open leg should be the full new short target");
+
+    // Also test a pure reduction (no flip): broker SHORT 2, sim SHORT 1 → reduce by 1 (buy to close).
+    let mut sim2: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+    sim2.insert((OrderedFloat(7420.0), "CALL".to_string()), -1);
+
+    let mut live2: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+    live2.insert((OrderedFloat(7420.0), "CALL".to_string()), -2);
+
+    let (close2, open2) = separate_recon_adjustments(&sim2, &live2);
+    assert_eq!(close2.len(), 1, "reduction is a close");
+    assert_eq!(close2[0].2, 1, "buy 1 to reduce the short");
+    assert!(open2.is_empty(), "no open leg for a pure reduction");
+
+    // Pure open: broker has nothing, sim wants SHORT 1 x C7420.
+    let mut sim3: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+    sim3.insert((OrderedFloat(7420.0), "CALL".to_string()), -1);
+    let live3: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
+
+    let (close3, open3) = separate_recon_adjustments(&sim3, &live3);
+    assert!(close3.is_empty(), "no close leg when broker has no position");
+    assert_eq!(open3.len(), 1);
+    assert_eq!(open3[0].2, -1);
+}
+
+

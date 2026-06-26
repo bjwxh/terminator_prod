@@ -82,6 +82,11 @@ impl ExecutionClient {
 
     /// Fetch SPX options positions currently open on the broker.
     pub async fn get_live_positions(&self, account_hash: &str) -> Result<Vec<BrokerPosition>> {
+        if let Ok(mock_json) = std::env::var("TERMINATOR_TEST_LIVE_POSITIONS") {
+            if let Ok(pos) = serde_json::from_str::<Vec<BrokerPosition>>(&mock_json) {
+                return Ok(pos);
+            }
+        }
         if std::env::var("TERMINATOR_TEST_ENV").is_ok() {
             return Ok(Vec::new());
         }

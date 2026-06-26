@@ -1189,6 +1189,44 @@ pub struct StrategySupervisor {
     pub execution_queue: Arc<tokio::sync::Mutex<Vec<DeferredChunk>>>,
 }
 
+/// Split gap legs into close (reducing/exiting existing broker positions) and open (new positions).
+/// For a position flip (sign crosses zero), the exit portion goes to `close` and the new
+/// target size goes to `open`. This keeps `get_smart_chunks` from seeing duplicate-symbol legs.
+pub fn separate_recon_adjustments(
+    sim_map: &std::collections::HashMap<(OrderedFloat<f64>, String), i32>,
+    live_map: &std::collections::HashMap<(OrderedFloat<f64>, String), i32>,
+) -> (Vec<(f64, String, i32)>, Vec<(f64, String, i32)>) {
+    let mut all_keys = std::collections::HashSet::new();
+    for k in sim_map.keys() { all_keys.insert(k.clone()); }
+    for k in live_map.keys() { all_keys.insert(k.clone()); }
+
+    let mut close_adjustments: Vec<(f64, String, i32)> = Vec::new();
+    let mut open_adjustments: Vec<(f64, String, i32)> = Vec::new();
+
+    for (strike, side) in all_keys {
+        let key = (strike, side.clone());
+        let sq = *sim_map.get(&key).unwrap_or(&0);
+        let lq = *live_map.get(&key).unwrap_or(&0);
+        let diff = sq - lq;
+        if diff != 0 {
+            if (lq < 0 && sq > 0) || (lq > 0 && sq < 0) {
+                // Position flip: exit to zero first, then new target as a separate open leg
+                close_adjustments.push((strike.into_inner(), side.clone(), -lq));
+                open_adjustments.push((strike.into_inner(), side.clone(), sq));
+            } else {
+                let is_closing = lq != 0 && (lq as f64).signum() == -(diff as f64).signum();
+                if is_closing {
+                    close_adjustments.push((strike.into_inner(), side.clone(), diff));
+                } else {
+                    open_adjustments.push((strike.into_inner(), side.clone(), diff));
+                }
+            }
+        }
+    }
+
+    (close_adjustments, open_adjustments)
+}
+
 impl StrategySupervisor {
     pub fn new(
         config: crate::config::AppConfig,
@@ -1617,11 +1655,12 @@ impl StrategySupervisor {
             if !is_spx { continue; }
 
             let order_strat_id = wo.get("strategy_id").and_then(|v| v.as_str()).unwrap_or("");
-            let belongs_here = order_strat_id == trade.strategy_id || trade.purpose == "RECONCILIATION";
+            let is_recon_purpose = trade.purpose == "RECONCILIATION" || trade.purpose == "FLATTEN";
+            let belongs_here = order_strat_id == trade.strategy_id || is_recon_purpose;
 
-            // If the order is a GAP_RECON order, and the current trade is NOT a RECONCILIATION trade,
+            // If the order is a GAP_RECON order, and the current trade is NOT a RECONCILIATION/FLATTEN trade,
             // we should completely ignore it. Normal sub-strategies do not manage or cancel GAP_RECON orders.
-            if order_strat_id == "GAP_RECON" && trade.purpose != "RECONCILIATION" {
+            if order_strat_id == "GAP_RECON" && !is_recon_purpose {
                 continue;
             }
 
@@ -1881,7 +1920,7 @@ impl StrategySupervisor {
         };
 
         // Create mapping of strike/side to quantity for sim and live
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashMap;
         let mut sim_map: HashMap<(OrderedFloat<f64>, String), i32> = HashMap::new();
         for p in &sim_positions {
             sim_map.insert((OrderedFloat(p.strike), p.side.clone()), p.quantity);
@@ -1892,39 +1931,33 @@ impl StrategySupervisor {
             live_map.insert((OrderedFloat(p.strike), p.side.clone()), p.quantity);
         }
 
-        let mut all_keys: HashSet<(OrderedFloat<f64>, String)> = HashSet::new();
-        for k in sim_map.keys() { all_keys.insert((*k).clone()); }
-        for k in live_map.keys() { all_keys.insert((*k).clone()); }
+        let (close_adjustments, open_adjustments) =
+            separate_recon_adjustments(&sim_map, &live_map);
 
-        let mut needed_adjustments: Vec<(f64, String, i32)> = Vec::new();
-        for (strike, side) in all_keys {
-            let key = (strike, side.clone());
-            let sq = *sim_map.get(&key).unwrap_or(&0);
-            let lq = *live_map.get(&key).unwrap_or(&0);
-            let diff = sq - lq;
-            if diff != 0 {
-                // NO FLIP RULE: If crossing zero, split into two separate legs
-                if (lq < 0 && sq > 0) || (lq > 0 && sq < 0) {
-                    // 1. Exit portion: gets us back to 0
-                    needed_adjustments.push((strike.into_inner(), side.clone(), -lq));
-                    // 2. Entry portion: target size from 0
-                    needed_adjustments.push((strike.into_inner(), side.clone(), sq));
-                } else {
-                    needed_adjustments.push((strike.into_inner(), side.clone(), diff));
-                }
-            }
-        }
+        let has_close_adjustments = !close_adjustments.is_empty();
+        let close_len = close_adjustments.len();
+        let open_len = open_adjustments.len();
 
-        if needed_adjustments.is_empty() {
+        // We prioritize closing positions first. If there are closing adjustments, we build a
+        // flatten/close trade. Any remaining open adjustments are routed as the open trade.
+        // If there are no closing adjustments, we bundle all open adjustments as a single trade.
+        let adjustments_to_route = if has_close_adjustments {
+            close_adjustments
+        } else {
+            open_adjustments
+        };
+
+        if adjustments_to_route.is_empty() {
             return Ok(());
         }
 
-        info!("⚠️ Reconciliation Discrepancy: Found {} legs mismatch. Generating Gap Sync Trade.", needed_adjustments.len());
+        info!("⚠️ Reconciliation Discrepancy: Found {} close / {} open adjustments. Routing prioritised batch size {}.", 
+             close_len, open_len, adjustments_to_route.len());
 
         let mut legs = Vec::new();
         let mut total_credit = 0.0;
 
-        for (strike, side, qty) in needed_adjustments {
+        for (strike, side, qty) in adjustments_to_route {
             // Find option in grid
             if let Some(quote) = self.grid.quotes.get(&OrderedFloat(strike)) {
                 let leg_quote_opt = if side == "CALL" {
@@ -1959,12 +1992,19 @@ impl StrategySupervisor {
             let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
             let timestamp = now_ct.to_rfc3339();
 
+            // Label purpose as FLATTEN if this batch contains close legs, otherwise RECONCILIATION
+            let purpose = if has_close_adjustments {
+                "FLATTEN".to_string()
+            } else {
+                "RECONCILIATION".to_string()
+            };
+
             let trade = Trade {
                 timestamp,
                 legs,
                 credit: total_credit,
                 commission,
-                purpose: "RECONCILIATION".to_string(),
+                purpose,
                 strategy_id: "GAP_RECON".to_string(),
             };
 
@@ -2495,7 +2535,8 @@ impl StrategySupervisor {
             let mut adjusted_trade = t.trade.clone();
             adjusted_trade.legs = t.ui_legs.clone();
 
-            if strat_id == "GAP_RECON" || t.trade.purpose == "RECONCILIATION" {
+            let is_recon_or_flatten = t.trade.purpose == "RECONCILIATION" || t.trade.purpose == "FLATTEN";
+            if strat_id == "GAP_RECON" || is_recon_or_flatten {
                 let positions = {
                     let broker_port = self.broker_portfolio.lock().await;
                     broker_port.positions.clone()
@@ -2621,7 +2662,7 @@ impl StrategySupervisor {
                     }
                 }
             } else {
-                // pending_trade is only ever set for RECONCILIATION trades (see check_reconciliation).
+                // pending_trade is only ever set for RECONCILIATION/FLATTEN trades (see check_reconciliation).
                 // A non-GAP_RECON confirm here would double-count the optimistic add_trade from tick().
                 warn!("confirm_trade: unexpected non-GAP_RECON pending trade (purpose={}, strat_id={}). Ignoring.", t.trade.purpose, strat_id);
             }
