@@ -344,7 +344,7 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
             "id": order_id,
             "symbol": leg_texts.join(", "),
             "side": side,
-            "qty": total_rem_leg_qty as i32,
+            "qty": (total_orig * ratio).round() as i32,
             "price": o.get("price"),
             "mark": serde_json::Value::Null,
             "status": order_status

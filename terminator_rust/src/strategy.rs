@@ -1080,7 +1080,7 @@ pub async fn execute_trade(
 
             legs_collection.push(json!({
                 "instruction": inst,
-                "quantity": leg.quantity.abs() / num_units,
+                "quantity": leg.quantity.abs(),  // total contracts; Schwab uses leg qty for complex orders
                 "instrument": {
                     "symbol": leg.symbol,
                     "assetType": "OPTION"
@@ -1108,7 +1108,7 @@ pub async fn execute_trade(
             "price": price_str,
             "orderStrategyType": "SINGLE",
             "complexOrderStrategyType": complex_type,
-            "quantity": num_units,
+            "quantity": 1,  // Schwab ignores top-level quantity for complex orders; leg qty drives contract count
             "orderLegCollection": legs_collection
         });
 
@@ -1712,6 +1712,15 @@ impl StrategySupervisor {
         // Only run if there is no pending trade currently
         if self.pending_trade.lock().await.is_some() {
             return Ok(());
+        }
+        // Don't re-reconcile while GAP_RECON orders are already working or pending placement.
+        // This prevents the re-reconciliation loop where the next tick fires before broker
+        // positions reflect the just-placed working orders.
+        {
+            let wo = self.working_orders.lock().await;
+            if wo.iter().any(|o| o.get("strategy_id").and_then(|v| v.as_str()) == Some("GAP_RECON")) {
+                return Ok(());
+            }
         }
 
         let live_positions = match self.execution_client.get_live_positions(account_hash).await {
