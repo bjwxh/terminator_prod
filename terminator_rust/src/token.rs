@@ -21,7 +21,7 @@ pub struct TokenDetails {
     pub refresh_token: String,
     pub access_token: String,
     pub id_token: String,
-    pub expires_at: i64,
+    pub expires_at: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +133,7 @@ impl TokenManager {
                 refresh_token: new_refresh_token,
                 access_token: oauth_res.access_token,
                 id_token: oauth_res.id_token,
-                expires_at: now_sec + oauth_res.expires_in,
+                expires_at: (now_sec + oauth_res.expires_in) as f64,
             },
         };
 
@@ -156,7 +156,7 @@ impl TokenManager {
             // Check current expiration state
             let token = self.current_token.load_full();
             let now_sec = chrono::Utc::now().timestamp();
-            let time_to_expiry = token.token.expires_at - now_sec;
+            let time_to_expiry = (token.token.expires_at as i64) - now_sec;
 
             // Access tokens are typically valid for 30 mins (1800s). We refresh if < 5 mins (300s) left.
             if time_to_expiry < 300 {

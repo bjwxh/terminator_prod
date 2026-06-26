@@ -35,6 +35,7 @@ pub struct OptionLegSnapshot {
     pub side: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct Portfolio {
     pub positions: Vec<PositionLeg>,
     pub trades: Vec<Trade>,
@@ -58,6 +59,10 @@ pub struct PortfolioSnapshot {
 }
 
 impl Portfolio {
+    pub fn position_qty_for(&self, symbol: &str) -> i32 {
+        self.positions.iter().find(|p| p.symbol == symbol).map(|p| p.quantity).unwrap_or(0)
+    }
+
     pub fn new() -> Self {
         Self {
             positions: Vec::new(),

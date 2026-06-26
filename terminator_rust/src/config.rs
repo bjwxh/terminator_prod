@@ -44,8 +44,19 @@ struct SchwabApiFile {
     callback_url: String,
 }
 
+fn expand_tilde(path: &str) -> PathBuf {
+    if path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(&path[2..]);
+        }
+    }
+    PathBuf::from(path)
+}
+
 #[derive(Deserialize)]
 struct ConfigJson {
+    credentials_file: Option<String>,
+    token_file: Option<String>,
     initial_sum_delta: f64,
     init_wing_delta: f64,
     rebalance_threshold: f64,
@@ -88,18 +99,40 @@ impl AppConfig {
         let config_json: ConfigJson = serde_json::from_str(&config_content)
             .context("Failed to parse config.json")?;
 
-        let schwab_api_path = PathBuf::from(
-            std::env::var("SCHWAB_API_PATH")
-                .context("SCHWAB_API_PATH environment variable is not set")?
-        );
+        let schwab_api_path = if let Some(ref path) = config_json.credentials_file {
+            if !path.is_empty() && path != "/path/to/schwab_api.json" {
+                expand_tilde(path)
+            } else {
+                PathBuf::from(
+                    std::env::var("SCHWAB_API_PATH")
+                        .context("SCHWAB_API_PATH environment variable is not set")?
+                )
+            }
+        } else {
+            PathBuf::from(
+                std::env::var("SCHWAB_API_PATH")
+                    .context("SCHWAB_API_PATH environment variable is not set")?
+            )
+        };
 
-        let schwab_token_path = PathBuf::from(
-            std::env::var("SCHWAB_TOKEN_PATH")
-                .context("SCHWAB_TOKEN_PATH environment variable is not set")?
-        );
+        let schwab_token_path = if let Some(ref path) = config_json.token_file {
+            if !path.is_empty() && path != "/path/to/schwab_token.json" {
+                expand_tilde(path)
+            } else {
+                PathBuf::from(
+                    std::env::var("SCHWAB_TOKEN_PATH")
+                        .context("SCHWAB_TOKEN_PATH environment variable is not set")?
+                )
+            }
+        } else {
+            PathBuf::from(
+                std::env::var("SCHWAB_TOKEN_PATH")
+                    .context("SCHWAB_TOKEN_PATH environment variable is not set")?
+            )
+        };
 
         let schwab_account = std::env::var("SCHWAB_ACCOUNT")
-            .context("SCHWAB_ACCOUNT environment variable is not set")?;
+            .unwrap_or_else(|_| config_json.account_id.clone());
 
         let api_file: SchwabApiFile = {
             let content = std::fs::read_to_string(&schwab_api_path)

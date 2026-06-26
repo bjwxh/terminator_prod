@@ -363,6 +363,13 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
                 })
             }).collect();
 
+            let working_orders = state.supervisor.working_orders.lock().await;
+            let to_cancel_val: Vec<serde_json::Value> = t.to_cancel.iter().filter_map(|id| {
+                working_orders.iter().find(|wo| {
+                    wo.get("orderId").and_then(|v| v.as_u64()).map(|v| v.to_string()) == Some(id.clone())
+                }).cloned()
+            }).collect();
+
             json!({
                 "strat_id": t.strat_id,
                 "trade": {
@@ -371,7 +378,8 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
                     "commission": t.trade.commission,
                     "purpose": t.trade.purpose,
                     "legs": legs_val,
-                    "orders": orders_val
+                    "orders": orders_val,
+                    "to_cancel": to_cancel_val
                 }
             })
         }

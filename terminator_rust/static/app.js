@@ -1009,6 +1009,63 @@ function showTradeModal(tradeData) {
             orderListEl.appendChild(orderCard);
         });
 
+        let toCancel = (tradeData.trade && tradeData.trade.to_cancel) || [];
+        if (toCancel.length > 0) {
+            const cancelHeader = document.createElement('div');
+            cancelHeader.className = 'trade-sub-desc';
+            cancelHeader.style.color = '#ff6b6b';
+            cancelHeader.style.marginTop = '1rem';
+            cancelHeader.style.marginBottom = '0.5rem';
+            cancelHeader.textContent = 'Stale Orders to Cancel:';
+            orderListEl.appendChild(cancelHeader);
+
+            toCancel.forEach((wo, idx) => {
+                const cancelCard = document.createElement('div');
+                cancelCard.className = `order-card type-sell`; // Use red styling
+                
+                // Format description based on leg collection
+                let desc = 'Unknown structure';
+                if (wo.orderLegCollection) {
+                    desc = wo.orderLegCollection.map(l => {
+                        const side = l.instruction.includes('BUY') ? 'LONG' : 'SHORT';
+                        let callPut = l.instrument.putCall;
+                        let strike = l.instrument.strikePrice;
+                        
+                        if (!strike || !callPut) {
+                            const sym = l.instrument.symbol || '';
+                            const match = sym.match(/([A-Z]+)\s+(\d{6})([CP])(\d{8})/);
+                            if (match) {
+                                callPut = callPut || (match[3] === 'C' ? 'CALL' : 'PUT');
+                                strike = strike || (parseFloat(match[4]) / 1000);
+                            }
+                        }
+                        
+                        return `${side} ${callPut || ''} ${strike || ''}`.trim();
+                    }).join(' | ');
+                }
+                const qty = wo.quantity || 1;
+                const price = wo.price || 0;
+                
+                cancelCard.innerHTML = `
+                    <div class="order-header">
+                        <span class="order-title">Cancel Order #${wo.orderId || idx}</span>
+                        <span class="order-qty">Qty: ${qty}</span>
+                    </div>
+                    <div class="order-details-mini">
+                        <div class="modal-detail">
+                            <span class="label">Structure</span>
+                            <span class="value">${desc}</span>
+                        </div>
+                        <div class="modal-detail">
+                            <span class="label">Resting Price</span>
+                            <span class="value">${formatOrderPrice(price)}</span>
+                        </div>
+                    </div>
+                `;
+                orderListEl.appendChild(cancelCard);
+            });
+        }
+
         // Calculate dynamic total credit based on the offset order leg prices,
         // rather than the raw mid prices from the background engine
         updateTotalCreditDisplay();

@@ -87,7 +87,7 @@ fn draw_dashboard(
     let spx = grid.get_underlying_price();
     let token = token_manager.get_token();
     let now_sec = chrono::Utc::now().timestamp();
-    let time_to_expiry = token.token.expires_at - now_sec;
+    let time_to_expiry = (token.token.expires_at as i64) - now_sec;
     
     let status_text = format!(
         " UNDERLYING SPX: {:.2}  |  ACTIVE ACCOUNT: {}  |  TOKEN HEALTH: {}s remaining  |  ACTIVE SYMBOLS: {}",

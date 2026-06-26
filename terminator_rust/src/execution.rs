@@ -82,6 +82,9 @@ impl ExecutionClient {
 
     /// Fetch SPX options positions currently open on the broker.
     pub async fn get_live_positions(&self, account_hash: &str) -> Result<Vec<BrokerPosition>> {
+        if std::env::var("TERMINATOR_TEST_ENV").is_ok() {
+            return Ok(Vec::new());
+        }
         let access_token = self.token_manager.get_access_token();
         let url = format!("https://api.schwabapi.com/trader/v1/accounts/{}", account_hash);
 
