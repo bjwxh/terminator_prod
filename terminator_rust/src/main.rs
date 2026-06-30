@@ -206,9 +206,20 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Terminator Rust Engine fully initialized! Booting TUI Dashboard...");
 
-    // 11. Run interactive TUI loop in the foreground
-    if let Err(e) = tui::run_tui_loop(grid, token_manager_arc).await {
-        error!("TUI session error or interruption: {:?}", e);
+    // 11. Run interactive TUI loop in the foreground, or block if headless
+    if std::env::var("HEADLESS").unwrap_or_default() == "true" {
+        info!("Running in HEADLESS mode. TUI is disabled. Keeping process alive...");
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+        }
+    } else {
+        if let Err(e) = tui::run_tui_loop(grid, token_manager_arc).await {
+            error!("TUI session error or interruption: {:?}", e);
+            warn!("TUI initialization failed. Falling back to blocking loop to keep engine and Web UI alive...");
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            }
+        }
     }
 
     info!("Terminator Rust Engine shutdown complete.");
