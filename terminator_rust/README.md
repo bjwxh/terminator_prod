@@ -59,3 +59,32 @@ Trading processes run only when the NYSE market is open:
 
 ### 3. VPN & Security
 The live trading server runs Tailscale VPN. Public access to port `8081` (Web UI) is blocked, and access is only permitted securely over your Tailscale tailnet.
+
+### 4. Build & Deployment Workflow (AWS EC2)
+Because compiling Rust with high optimizations (LTO, single-codegen unit) is resource-intensive and can crash a small production instance via Out-Of-Memory (OOM), the binary should be compiled on a **build machine** (or local MacBook if cross-compiling) and transferred.
+
+#### Step 1: Compile the release build on the build machine
+```bash
+cd terminator_rust
+cargo build --release
+```
+
+#### Step 2: Transfer the binary to the production EC2 instance
+```bash
+# Copy from build environment to production temp path
+scp -i ~/.ssh/terminator-key.pem target/release/terminator_rust ubuntu@<PROD_EC2_IP>:/tmp/
+```
+
+#### Step 3: Promote binary and restart services on production EC2
+SSH into the production trading server and run:
+```bash
+# Move binary to deployment path and make executable
+sudo mv /tmp/terminator_rust /opt/terminator/terminator_rust
+sudo chmod +x /opt/terminator/terminator_rust
+
+# Restart the trading service
+sudo systemctl restart terminator-backend.service
+
+# Tail the logs to verify startup
+journalctl -u terminator-backend -f
+```
