@@ -164,10 +164,14 @@ echo "=== 🛑 Stopping build server (minimizing costs) ==="
 aws ec2 stop-instances --region "$REGION" --instance-ids "$INSTANCE_ID" >/dev/null
 echo "Build server stopped."
 
-echo "=== 🚀 Deploying binary to Target Trading Server: $DEST_IP ==="
+echo "=== 🚀 Deploying binary and assets to Target Trading Server: $DEST_IP ==="
 # Copy binary to temp directory on production server
 scp -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "$KEY_PATH" target/release/terminator_rust_aws ubuntu@"$DEST_IP":/tmp/terminator_rust
 
-# Move to opt/terminator and restart trading systemd service
+# Sync static assets to temp directory on production server
+rsync -avz -e "ssh -i $KEY_PATH -o StrictHostKeyChecking=no -o IdentitiesOnly=yes" \
+    terminator_rust/static/ ubuntu@"$DEST_IP":/tmp/static/
+
+# Move binary and static folder to opt/terminator and restart trading systemd service
 ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "$KEY_PATH" ubuntu@"$DEST_IP" \
-    "sudo mv /tmp/terminator_rust /opt/terminator/terminator_rust && sudo chmod +x /opt/terminator/terminator_rust && sudo systemctl restart terminator-backend.service && echo 'Deployment completed successfully!'"
+    "sudo mv /tmp/terminator_rust /opt/terminator/terminator_rust && sudo chmod +x /opt/terminator/terminator_rust && sudo rm -rf /opt/terminator/static && sudo mv /tmp/static /opt/terminator/static && sudo systemctl restart terminator-backend.service && echo 'Deployment completed successfully!'"
