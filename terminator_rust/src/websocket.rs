@@ -176,7 +176,7 @@ impl WebsocketClient {
                             correl_id: streamer.schwab_client_correl_id.clone(),
                             parameters: serde_json::json!({
                                 "keys": chunk.join(","),
-                                "fields": if service == "LEVELONE_OPTIONS" { "0,1,2,3,4,8,9,41" } else { "0,1,2,3,34,35" }
+                                "fields": if service == "LEVELONE_OPTIONS" { "0,1,2,3,4,8,9,28" } else { "0,1,2,3,34,35" }
                             }),
                         };
                         let payload = WsRequestContainer { requests: vec![sub_req] };

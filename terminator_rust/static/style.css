@@ -1063,3 +1063,8 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
     max-height: 1000px;
 }
 
+#positions-container {
+    max-height: none !important;
+    overflow-y: hidden !important;
+}
+

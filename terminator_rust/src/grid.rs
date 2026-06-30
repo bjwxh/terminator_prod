@@ -95,34 +95,14 @@ impl OptionsGrid {
             return;
         }
 
-        let t = crate::greeks::calculate_t_to_expiration();
-        let r = 0.0525; // standard short term risk-free rate estimate
-
-        for mut entry in self.quotes.iter_mut() {
-            let strike = entry.key().0;
-            let quote = entry.value_mut();
-
-            if let Some(ref mut call) = quote.call {
-                if call.mid > 0.0 {
-                    // TODO: Document known divergence - Rust computes delta via BS over mid price; Python uses Schwab stream.
-                    call.delta = crate::greeks::calculate_delta(call.mid, spx_price, strike, t, r, true);
-                    call.theta = 0.0; // TODO: Compute actual BS theta or stream it from Schwab instead of using mid
-                }
-            }
-
-            if let Some(ref mut put) = quote.put {
-                if put.mid > 0.0 {
-                    // TODO: Document known divergence - Rust computes delta via BS over mid price; Python uses Schwab stream.
-                    put.delta = crate::greeks::calculate_delta(put.mid, spx_price, strike, t, r, false);
-                    put.theta = 0.0; // TODO: Compute actual BS theta or stream it from Schwab instead of using mid
-                }
-            }
-            quote.last_updated = Instant::now();
-        }
+        // We intentionally no longer recalculate option deltas here via BSM.
+        // Schwab streams delta changes natively in LEVELONE_OPTIONS. Recalculating
+        // BSM delta (without an IV surface) across the entire grid on every SPX tick
+        // overwrote Schwab's accurate deltas and caused severe UI flickering.
     }
 
     /// Updates individual option bids and asks, preserving existing quotes for partial updates.
-    pub fn update_option(&self, symbol: &str, bid: Option<f64>, ask: Option<f64>, spx_price: f64) {
+    pub fn update_option(&self, symbol: &str, bid: Option<f64>, ask: Option<f64>, delta: Option<f64>, spx_price: f64) {
         if let Some(lookup) = self.symbol_lookup.get(symbol) {
             let strike = lookup.strike;
             let is_call = lookup.is_call;
@@ -160,21 +140,29 @@ impl OptionsGrid {
             }
 
             let mid = (current_bid + current_ask) / 2.0;
-            let t = crate::greeks::calculate_t_to_expiration();
-            let r = 0.0525;
-
-            let delta = if spx_price > 0.0 && mid > 0.0 {
-                crate::greeks::calculate_delta(mid, spx_price, strike.0, t, r, is_call)
+            
+            // Extract existing delta to avoid overwriting with 0 if no new delta is provided
+            let mut current_delta = if is_call {
+                if let Some(ref call) = quote.call { call.delta } else { 0.0 }
             } else {
-                0.0
+                if let Some(ref put) = quote.put { put.delta } else { 0.0 }
             };
+
+            if let Some(d) = delta {
+                current_delta = d;
+            } else if current_delta == 0.0 && spx_price > 0.0 && mid > 0.0 {
+                // Only fallback to BSM if we have literally NO delta from Schwab yet
+                let t = crate::greeks::calculate_t_to_expiration();
+                let r = 0.0525;
+                current_delta = crate::greeks::calculate_delta(mid, spx_price, strike.0, t, r, is_call);
+            }
 
             let leg = OptionLegQuote {
                 symbol: symbol.to_string(),
                 bid: current_bid,
                 ask: current_ask,
                 mid,
-                delta,
+                delta: current_delta,
                 theta: 0.0, // TODO: Compute actual BS theta or stream it from Schwab instead of using mid
                 last_update: Instant::now(),
             };

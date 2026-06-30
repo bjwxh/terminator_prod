@@ -322,14 +322,17 @@ pub fn parse_streaming_value(
                         .or_else(|| entry.get("BID_PRICE"));
                     let ask_val = entry.get("3")
                         .or_else(|| entry.get("ASK_PRICE"));
+                    let delta_val = entry.get("28")
+                        .or_else(|| entry.get("DELTA"));
                         
                     let bid = bid_val.and_then(|b| b.as_f64());
                     let ask = ask_val.and_then(|a| a.as_f64());
+                    let delta = delta_val.and_then(|d| d.as_f64());
 
                     // Always call update_option to refresh the last_update timestamp and recalculate Delta
                     // based on new SPX price, even if bid/ask haven't changed (e.g. only Volume or Delta updated).
                     if !key.is_empty() {
-                        grid.update_option(key, bid, ask, spx_price);
+                        grid.update_option(key, bid, ask, delta, spx_price);
                     }
                 }
             }

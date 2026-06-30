@@ -85,10 +85,7 @@ pub struct AppState {
 
 pub async fn start_server(state: AppState, port: u16) {
     let cors = CorsLayer::new()
-        .allow_origin([
-            format!("http://localhost:{}", port).parse::<HeaderValue>().unwrap(),
-            format!("http://127.0.0.1:{}", port).parse::<HeaderValue>().unwrap(),
-        ])
+        .allow_origin(tower_http::cors::Any)
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(tower_http::cors::Any);
 
@@ -166,8 +163,11 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
         json!({ "status": "Healthy", "age_minutes": 0, "should_alert": false })
     };
 
-    // Serialized portfolio snapshots
-    let live_snap = state.supervisor.live_portfolio.lock().await.snapshot();
+    let live_snap = {
+        let mut port = state.supervisor.live_portfolio.lock().await;
+        port.update_pricing(&state.grid);
+        port.snapshot()
+    };
 
     // Option book — OTM window only, matching the SlidingWindowManager subscription range.
     // Calls: [spx, spx + otm_offset], Puts: [spx - otm_offset, spx].
@@ -195,11 +195,11 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
             // low (green) = live WS tick, high (red) = bootstrap/stale data
             let (c_bid, c_ask, c_delta, c_updated) = if in_call_range {
                 match &q.call {
-                    Some(call) => (
+                    Some(call) if call.last_update.elapsed().as_secs() < 60 => (
                         json!(call.bid), json!(call.ask), json!(call.delta),
                         json!(call.last_update.elapsed().as_secs()),
                     ),
-                    None => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
+                    _ => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
                 }
             } else {
                 (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null)
@@ -207,11 +207,11 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
 
             let (p_delta, p_bid, p_ask, p_updated) = if in_put_range {
                 match &q.put {
-                    Some(put) => (
+                    Some(put) if put.last_update.elapsed().as_secs() < 60 => (
                         json!(put.delta), json!(put.bid), json!(put.ask),
                         json!(put.last_update.elapsed().as_secs()),
                     ),
-                    None => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
+                    _ => (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null),
                 }
             } else {
                 (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null)
@@ -237,7 +237,11 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
     
     // live_portfolio = sim (strategy trades, used by reconciliation as ground truth).
     // broker_portfolio = live (only trades physically sent to the exchange).
-    let broker_snap = state.supervisor.broker_portfolio.lock().await.snapshot();
+    let broker_snap = {
+        let mut port = state.supervisor.broker_portfolio.lock().await;
+        port.update_pricing(&state.grid);
+        port.snapshot()
+    };
     let sim_payload = json!(live_snap);
     let live_payload = json!(broker_snap);
 
@@ -372,6 +376,7 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
 
             json!({
                 "strat_id": t.strat_id,
+                "timeout": state.supervisor.config.order_auto_execute_timeout,
                 "trade": {
                     "timestamp": t.trade.timestamp,
                     "credit": t.trade.credit,
@@ -499,6 +504,7 @@ async fn handle_ws_socket(socket: WebSocket, state: AppState) {
         let reconnect_payload = json!({
             "type": "trade_signal",
             "strat_id": t.strat_id,
+            "timeout": state.supervisor.config.order_auto_execute_timeout,
             "trade": {
                 "timestamp": t.trade.timestamp,
                 "credit": t.trade.credit,

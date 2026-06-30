@@ -878,13 +878,24 @@ pub fn get_smart_chunks(legs: &[OptionLeg]) -> Vec<Vec<OptionLeg>> {
 
     let mut found_combos = Vec::new();
 
-    // Priority 1: Iron Condors (4 legs: 1xLC, 1xSC, 1xLP, 1xSP)
+    // Priority 1: Iron Condors (4 legs: 1xLC, 1xSC, 1xLP, 1xSP).
+    // Both the call spread and the put spread must be the same type — either both credit
+    // (standard short IC: sell nearer strikes) or both debit (long IC: buy nearer strikes).
+    // A combo where one side is credit and the other is debit is NOT a valid iron condor
+    // and is left for lower-priority grouping.
     while remaining.len() >= 4 {
         let ic = extract_chunk(&mut remaining, 4, |c| {
-            c.iter().filter(|l| l.side == "CALL" && l.quantity > 0).count() == 1 &&
-            c.iter().filter(|l| l.side == "CALL" && l.quantity < 0).count() == 1 &&
-            c.iter().filter(|l| l.side == "PUT" && l.quantity > 0).count() == 1 &&
-            c.iter().filter(|l| l.side == "PUT" && l.quantity < 0).count() == 1
+            if c.iter().filter(|l| l.side == "CALL" && l.quantity > 0).count() != 1 { return false; }
+            if c.iter().filter(|l| l.side == "CALL" && l.quantity < 0).count() != 1 { return false; }
+            if c.iter().filter(|l| l.side == "PUT"  && l.quantity > 0).count() != 1 { return false; }
+            if c.iter().filter(|l| l.side == "PUT"  && l.quantity < 0).count() != 1 { return false; }
+            let lc = c.iter().find(|l| l.side == "CALL" && l.quantity > 0).unwrap();
+            let sc = c.iter().find(|l| l.side == "CALL" && l.quantity < 0).unwrap();
+            let lp = c.iter().find(|l| l.side == "PUT"  && l.quantity > 0).unwrap();
+            let sp = c.iter().find(|l| l.side == "PUT"  && l.quantity < 0).unwrap();
+            let call_credit = sc.strike < lc.strike; // sell lower call = credit call spread
+            let put_credit  = sp.strike > lp.strike; // sell higher put = credit put spread
+            call_credit == put_credit                 // both sides must be same type
         });
         match ic {
             Some(combo) => found_combos.push(combo),
@@ -980,11 +991,11 @@ pub async fn execute_trade(
         closing_remaining.insert(p.symbol.clone(), p.quantity.abs());
     }
 
-    // Pre-split legs into close-only and open-only groups before chunking.
-    // This prevents get_smart_chunks from mixing close (BTC/STC) and open (BTO/STO) legs
-    // for the same symbol into incoherent IC structures (the "duplicate-symbol" problem).
-    let mut close_legs: Vec<OptionLeg> = Vec::new();
-    let mut open_legs: Vec<OptionLeg> = Vec::new();
+    // Group all legs together so they can be structured as valid multi-leg complex orders
+    let chunks = get_smart_chunks(&trade.legs);
+
+    // All symbols being closed — used to defer opening chunks that would conflict.
+    let mut actively_closed_symbols = std::collections::HashSet::new();
     {
         let mut temp_remaining = closing_remaining.clone();
         for leg in &trade.legs {
@@ -993,33 +1004,32 @@ pub async fn execute_trade(
                 p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
             });
             if broker_opposing && remaining > 0 {
-                close_legs.push(leg.clone());
-                *temp_remaining.entry(leg.symbol.clone()).or_insert(0) -= leg.quantity.abs();
-            } else {
-                open_legs.push(leg.clone());
+                actively_closed_symbols.insert(leg.symbol.clone());
+                let qty_deduct = leg.quantity.abs();
+                let entry = temp_remaining.entry(leg.symbol.clone()).or_insert(0);
+                *entry = entry.saturating_sub(qty_deduct);
             }
         }
     }
 
-    // Chunk each group independently, then concatenate. Close chunks come first so
-    // symbol_to_order_id is populated before open chunks need it for deferral.
-    let mut close_chunks = get_smart_chunks(&close_legs);
-    let open_chunks = get_smart_chunks(&open_legs);
-    let close_chunk_count = close_chunks.len();
-    close_chunks.extend(open_chunks);
-    let chunks = close_chunks;
-
-    // All symbols being closed — used to defer opening chunks that would conflict.
-    let mut actively_closed_symbols = std::collections::HashSet::new();
-    for leg in &close_legs {
-        actively_closed_symbols.insert(leg.symbol.clone());
-    }
-
-    // chunk_classifications[i] = true if chunk i is a close chunk (submitted immediately).
-    // Open chunks after index close_chunk_count may be deferred by the flip-queue.
-    let chunk_classifications: Vec<bool> = (0..chunks.len())
-        .map(|i| i < close_chunk_count)
-        .collect();
+    // Classify chunks: a chunk is a close chunk (must be executed immediately and not deferred)
+    // if it contains any leg that is closing an existing position at the broker.
+    let chunk_classifications: Vec<bool> = chunks.iter().map(|chunk| {
+        let mut temp_remaining = closing_remaining.clone();
+        chunk.iter().any(|leg| {
+            let remaining = temp_remaining.get(&leg.symbol).copied().unwrap_or(0);
+            let broker_opposing = positions.iter().any(|p| {
+                p.symbol == leg.symbol && (p.quantity as f64).signum() != (leg.quantity as f64).signum()
+            });
+            let is_close = broker_opposing && remaining > 0;
+            if is_close {
+                let qty_deduct = leg.quantity.abs();
+                let entry = temp_remaining.entry(leg.symbol.clone()).or_insert(0);
+                *entry = entry.saturating_sub(qty_deduct);
+            }
+            is_close
+        })
+    }).collect();
 
     let mut symbol_to_order_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut temp_closing_remaining = closing_remaining.clone();
@@ -1083,7 +1093,9 @@ pub async fn execute_trade(
             };
 
             if is_closing {
-                *closing_remaining.entry(leg.symbol.clone()).or_insert(0) -= 1;
+                let qty_deduct = leg.quantity.abs();
+                let entry = closing_remaining.entry(leg.symbol.clone()).or_insert(0);
+                *entry = entry.saturating_sub(qty_deduct);
             }
 
             let inst = if let Some(ref inst_str) = leg.instruction {
@@ -1142,7 +1154,9 @@ pub async fn execute_trade(
                         });
                         if broker_opposing && remaining > 0 {
                             symbol_to_order_id.insert(leg.symbol.clone(), oid.clone());
-                            *temp_closing_remaining.entry(leg.symbol.clone()).or_insert(0) -= 1;
+                            let qty_deduct = leg.quantity.abs();
+                            let entry = temp_closing_remaining.entry(leg.symbol.clone()).or_insert(0);
+                            *entry = entry.saturating_sub(qty_deduct);
                         }
                     }
                 }
@@ -1211,6 +1225,13 @@ pub struct StrategySupervisor {
 /// Split gap legs into close (reducing/exiting existing broker positions) and open (new positions).
 /// For a position flip (sign crosses zero), the exit portion goes to `close` and the new
 /// target size goes to `open`. This keeps `get_smart_chunks` from seeing duplicate-symbol legs.
+///
+/// Paired vertical spread detection: if a broker LONG position is being closed on a given
+/// side (CALL or PUT), any broker SHORT positions on the *same side* are also promoted to
+/// `close_adjustments` (buy them back to go flat), with their full sim target added to
+/// `open_adjustments` for the subsequent wave.  This prevents Schwab position-conflict
+/// rejections when closing a debit vertical spread while simultaneously wanting to reopen
+/// new shorts on the same symbol.
 pub fn separate_recon_adjustments(
     sim_map: &std::collections::HashMap<(OrderedFloat<f64>, String), i32>,
     live_map: &std::collections::HashMap<(OrderedFloat<f64>, String), i32>,
@@ -1221,9 +1242,11 @@ pub fn separate_recon_adjustments(
 
     let mut close_adjustments: Vec<(f64, String, i32)> = Vec::new();
     let mut open_adjustments: Vec<(f64, String, i32)> = Vec::new();
+    // Tracks which option sides (CALL/PUT) have a broker LONG position being closed.
+    let mut closing_long_sides: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (strike, side) in all_keys {
-        let key = (strike, side.clone());
+    for (strike, side) in &all_keys {
+        let key = (strike.clone(), side.clone());
         let sq = *sim_map.get(&key).unwrap_or(&0);
         let lq = *live_map.get(&key).unwrap_or(&0);
         let diff = sq - lq;
@@ -1232,13 +1255,53 @@ pub fn separate_recon_adjustments(
                 // Position flip: exit to zero first, then new target as a separate open leg
                 close_adjustments.push((strike.into_inner(), side.clone(), -lq));
                 open_adjustments.push((strike.into_inner(), side.clone(), sq));
+                if lq > 0 {
+                    closing_long_sides.insert(side.clone());
+                }
             } else {
                 let is_closing = lq != 0 && (lq as f64).signum() == -(diff as f64).signum();
                 if is_closing {
                     close_adjustments.push((strike.into_inner(), side.clone(), diff));
+                    if lq > 0 {
+                        closing_long_sides.insert(side.clone());
+                    }
                 } else {
                     open_adjustments.push((strike.into_inner(), side.clone(), diff));
                 }
+            }
+        }
+    }
+
+    // Paired vertical spread promotion: for each broker SHORT position that ended up in
+    // open_adjustments on a side where a LONG is being closed, include it in the flatten
+    // wave instead so the whole vertical is unwound before new shorts are opened.
+    if !closing_long_sides.is_empty() {
+        let to_promote: Vec<(f64, String)> = open_adjustments.iter()
+            .filter(|(s, side, _)| {
+                let key = (OrderedFloat(*s), side.clone());
+                let lq = *live_map.get(&key).unwrap_or(&0);
+                // Promote only if: broker is SHORT on a side where a LONG is being closed,
+                // AND not already in close_adjustments (flips are already handled there).
+                lq < 0
+                    && closing_long_sides.contains(side)
+                    && !close_adjustments.iter().any(|(cs, csd, _)| {
+                        (*cs - s).abs() < 0.01 && csd == side
+                    })
+            })
+            .map(|(s, side, _)| (*s, side.clone()))
+            .collect();
+
+        for (strike, side) in to_promote {
+            let key = (OrderedFloat(strike), side.clone());
+            let lq = *live_map.get(&key).unwrap_or(&0); // < 0 (short)
+            let sq = *sim_map.get(&key).unwrap_or(&0);
+            // Remove the diff-based entry added during the main loop
+            open_adjustments.retain(|(s, sd, _)| !((*s - strike).abs() < 0.01 && sd == &side));
+            // Buy back the short to go flat
+            close_adjustments.push((strike, side.clone(), -lq));
+            // Add the full sim target as a fresh open (from flat, not from diff)
+            if sq != 0 {
+                open_adjustments.push((strike, side, sq));
             }
         }
     }
@@ -1790,7 +1853,11 @@ impl StrategySupervisor {
         };
 
         // Sync the actual broker snapshot back into our Live Portfolio tracking for the UI
-        self.broker_portfolio.lock().await.sync_from_broker(&live_positions);
+        {
+            let mut port = self.broker_portfolio.lock().await;
+            port.sync_from_broker(&live_positions);
+            port.update_pricing(&self.grid);
+        }
 
         let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
         if !enabled {
@@ -2159,22 +2226,23 @@ impl StrategySupervisor {
                 if let Some(trade) = check_entry(&self.grid, s, now_ct, self.config.max_spread_diff, self.config.commission_per_contract) {
                     info!("🎯 Entry signal triggered for {}! Net credit: ${:.2}. Executing...", sid, trade.credit);
 
-                    let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-                    if !enabled {
-                        info!("Trading is disabled. Skipping entry trade.");
-                        continue;
-                    }
-
                     if s.previous_portfolio.is_some() {
                         info!("Skipping entry re-firing for {} because a prior optimistic update is still unconfirmed.", sid);
                         continue;
                     }
-                    s.previous_portfolio = Some((*s.portfolio.lock().await).clone());
-                    s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
-                    s.last_update_ts = Some(now_ct);
+
+                    let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed) || self.config.dry_run;
+                    if enabled {
+                        s.previous_portfolio = Some((*s.portfolio.lock().await).clone());
+                        s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
+                        s.last_update_ts = Some(now_ct);
+                        s.state = StrategyState::EnteringSpread;
+                    } else {
+                        s.state = StrategyState::Working;
+                    }
+
                     s.portfolio.lock().await.add_trade(&trade, None);
-                    s.state = StrategyState::EnteringSpread;
-                    info!("Optimistically updated portfolio for entry of {}", sid);
+                    info!("Updated sim portfolio for entry of {} (Live trading enabled: {})", sid, enabled);
                     continue;
                 }
             } else if s.state == StrategyState::Working {
@@ -2187,22 +2255,24 @@ impl StrategySupervisor {
                         let spx = self.grid.get_underlying_price();
 
                         if let Some(exit_trade) = check_exit(&self.grid, &*s_port, now_ct, &s.sid, self.config.commission_per_contract, spx) {
-                            let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-                            if !enabled {
-                                info!("Trading is disabled. Skipping exit trade.");
-                                continue;
-                            }
-
                             if s.previous_portfolio.is_some() {
                                 info!("Skipping exit re-firing for {} because a prior optimistic update is still unconfirmed.", sid);
                                 continue;
                             }
-                            s.previous_portfolio = Some((*s_port).clone());
-                            s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
-                            s.last_update_ts = Some(now_ct);
+
+                            let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed) || self.config.dry_run;
+                            if enabled {
+                                s.previous_portfolio = Some((*s_port).clone());
+                                s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
+                                s.last_update_ts = Some(now_ct);
+                                s.state = StrategyState::Exiting;
+                            } else {
+                                s.state = StrategyState::Idle;
+                                s.has_traded_today = true;
+                            }
+
                             s_port.add_trade(&exit_trade, None);
-                            s.state = StrategyState::Exiting;
-                            info!("Optimistically updated portfolio for exit of {}", sid);
+                            info!("Updated sim portfolio for exit of {} (Live trading enabled: {})", sid, enabled);
                             continue;
                         }
                     }
@@ -2211,23 +2281,22 @@ impl StrategySupervisor {
                     let rebal_trades = check_rebalance(&self.grid, s, &*s_port, now_ct, start_time, end_time, &self.config);
 
                     if !rebal_trades.is_empty() {
-                        let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-                        if !enabled {
-                            info!("Trading is disabled. Skipping rebalance trade.");
-                            continue;
-                        }
-
                         if s.previous_portfolio.is_some() {
                             info!("Skipping rebalance re-firing for {} because a prior optimistic update is still unconfirmed.", sid);
                             continue;
                         }
-                        s.previous_portfolio = Some((*s_port).clone());
-                        s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
-                        s.last_update_ts = Some(now_ct);
+
+                        let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed) || self.config.dry_run;
+                        if enabled {
+                            s.previous_portfolio = Some((*s_port).clone());
+                            s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
+                            s.last_update_ts = Some(now_ct);
+                        }
+
                         for trade in rebal_trades {
                             s_port.add_trade(&trade, None);
                         }
-                        info!("Optimistically updated portfolio for rebalance of {}", sid);
+                        info!("Updated sim portfolio for rebalance of {} (Live trading enabled: {})", sid, enabled);
                     }
                 }
             }

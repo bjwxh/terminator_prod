@@ -1016,3 +1016,8 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
     font-size: 1.1rem;
 }
 
+#positions-container {
+    max-height: none !important;
+    overflow-y: hidden !important;
+}
+

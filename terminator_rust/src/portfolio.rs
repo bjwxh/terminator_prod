@@ -40,7 +40,6 @@ pub struct Portfolio {
     pub positions: Vec<PositionLeg>,
     pub trades: Vec<Trade>,
     pub cash: f64,
-    pub broker_pnl_override: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -68,7 +67,6 @@ impl Portfolio {
             positions: Vec::new(),
             trades: Vec::new(),
             cash: 0.0,
-            broker_pnl_override: None,
         }
     }
 
@@ -93,9 +91,6 @@ impl Portfolio {
     }
 
     pub fn net_pnl(&self) -> f64 {
-        if let Some(pnl) = self.broker_pnl_override {
-            return pnl;
-        }
         self.gross_pnl() - self.fees()
     }
 
@@ -279,9 +274,6 @@ impl Portfolio {
             new_positions.push(p);
         }
         self.positions = new_positions;
-        if !broker_positions.is_empty() {
-            self.broker_pnl_override = Some(total_pnl);
-        }
     }
 
     pub fn snapshot(&self) -> PortfolioSnapshot {

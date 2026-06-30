@@ -61,6 +61,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let token_manager_arc = Arc::new(token_manager);
+
+    // 3. Ensure Token is Healthy Synchronously at Startup
+    {
+        let token = token_manager_arc.get_token();
+        let now_sec = chrono::Utc::now().timestamp();
+        let time_to_expiry = (token.token.expires_at as i64) - now_sec;
+        if time_to_expiry < 300 {
+            info!("Access token is expired or close to expiration ({}s remaining). Performing synchronous startup refresh...", time_to_expiry);
+            if let Err(e) = token_manager_arc.refresh_token_now().await {
+                error!("Failed to refresh token at startup: {:?}", e);
+            }
+        }
+    }
     
     // Spawn background token auto-refresh loop
     let refresh_tm_clone = Arc::clone(&token_manager_arc);
