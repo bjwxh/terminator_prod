@@ -148,6 +148,9 @@ pub fn parse_acct_activity_data(
         "OrderUROutCompleted" => {
             status = "Cancelled".to_string();
         }
+        "OrderFillCompleted" => {
+            status = "Filled".to_string();
+        }
         "ExecutionCreated" => {
             // Check trans type to see if it is cancellation ("UROut") or fill
             let trans_type = data.pointer("/BaseEvent/ExecutionCreatedEventExecutionInfo/ExecutionInfo/ExecutionTransType")
