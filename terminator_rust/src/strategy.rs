@@ -1220,6 +1220,8 @@ pub struct StrategySupervisor {
     pub session_history: tokio::sync::Mutex<std::collections::VecDeque<HistoryPoint>>,
     pub last_history_ct: tokio::sync::Mutex<Option<chrono::DateTime<chrono_tz::Tz>>>,
     pub execution_queue: Arc<tokio::sync::Mutex<Vec<DeferredChunk>>>,
+    pub fast_sync_tx: tokio::sync::mpsc::Sender<bool>,
+    pub fast_sync_rx: Mutex<Option<tokio::sync::mpsc::Receiver<bool>>>,
 }
 
 /// Split gap legs into close (reducing/exiting existing broker positions) and open (new positions).
@@ -1332,6 +1334,8 @@ impl StrategySupervisor {
             t = next_t;
         }
 
+        let (fast_sync_tx, fast_sync_rx) = tokio::sync::mpsc::channel::<bool>(100);
+
         Self {
             config: config.clone(),
             execution_client,
@@ -1351,6 +1355,8 @@ impl StrategySupervisor {
             session_history: Mutex::new(std::collections::VecDeque::new()),
             last_history_ct: Mutex::new(None),
             execution_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            fast_sync_tx,
+            fast_sync_rx: Mutex::new(Some(fast_sync_rx)),
         }
     }
 
@@ -2519,82 +2525,9 @@ impl StrategySupervisor {
         }
 
         let hash_opt = self.account_hash.lock().await.clone();
-        if let Some(hash) = hash_opt {
-            // Fast sync working orders to UI
-            match self.execution_client.get_working_orders(&hash).await {
-                Ok(orders) => {
-                    let num_working = orders.len();
-                    {
-                        let mut wo = self.working_orders.lock().await;
-                        let mut merged_orders = Vec::new();
-                        let mut broker_oids = std::collections::HashSet::new();
-
-                        for mut new_order in orders {
-                            let new_id = new_order.get("orderId").or_else(|| new_order.get("id"));
-                            let new_id_str = new_id.and_then(|id| if id.is_number() { Some(id.to_string()) } else { id.as_str().map(|s| s.to_string()) });
-
-                            if let Some(ref id_str) = new_id_str {
-                                broker_oids.insert(id_str.clone());
-                            }
-
-                            let old_strat_id = if let Some(ref id_str) = new_id_str {
-                                wo.iter().find(|old_order| {
-                                    let old_id = old_order.get("orderId").or_else(|| old_order.get("id"));
-                                    let old_id_str = old_id.and_then(|id| if id.is_number() { Some(id.to_string()) } else { id.as_str().map(|s| s.to_string()) });
-                                    old_id_str == Some(id_str.clone())
-                                }).and_then(|old_order| old_order.get("strategy_id").cloned())
-                            } else {
-                                None
-                            };
-
-                            if let Some(strat_id) = old_strat_id {
-                                if let Some(obj) = new_order.as_object_mut() {
-                                    obj.insert("strategy_id".to_string(), strat_id);
-                                }
-                            }
-                            merged_orders.push(new_order);
-                        }
-
-                        let now = chrono::Utc::now().timestamp();
-                        for old_order in wo.iter() {
-                            let old_id = old_order.get("orderId").or_else(|| old_order.get("id"));
-                            let old_id_str = old_id.and_then(|id| if id.is_number() { Some(id.to_string()) } else { id.as_str().map(|s| s.to_string()) });
-                            
-                            if let Some(id_str) = old_id_str {
-                                if !broker_oids.contains(&id_str) {
-                                    if let Some(stub_ts) = old_order.get("local_stub_ts").and_then(|v| v.as_i64()) {
-                                        if now - stub_ts < 10 { // 10 seconds grace period
-                                            merged_orders.push(old_order.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        *wo = merged_orders;
-                    }
-
-                    info!("🔄 Fast-synced {} working orders from Schwab REST API", num_working);
-                }
-                Err(e) => warn!("Failed to fast-sync working orders: {:?}", e),
-            }
-
-            // Fast sync live filled trades to broker_portfolio if an order was filled
-            if event.status == "Filled" || event.message_type == "ExecutionCreated" {
-                match self.execution_client.get_today_filled_orders(&hash, self.config.commission_per_contract).await {
-                    Ok(trades) => {
-                        let mut bp = self.broker_portfolio.lock().await;
-                        bp.trades.clear();
-                        bp.cash = 0.0;
-                        bp.positions.clear();
-                        for trade in trades {
-                            bp.add_trade(&trade, None);
-                        }
-                        info!("🔄 Fast-synced filled trades into broker portfolio (cleared and rebuilt to avoid duplicates)");
-                    }
-                    Err(e) => warn!("Failed to fast-sync filled trades: {:?}", e),
-                }
-            }
+        if let Some(_) = hash_opt {
+            let need_full = event.status == "Filled" || event.message_type == "ExecutionCreated";
+            let _ = self.fast_sync_tx.try_send(need_full);
         }
     }
 
@@ -2779,5 +2712,99 @@ impl StrategySupervisor {
         let current = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
         self.trading_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
         !current
+    }
+
+    pub async fn run_fast_sync_loop(self: Arc<Self>) {
+        let mut rx = {
+            let mut opt = self.fast_sync_rx.lock().await;
+            opt.take().expect("fast_sync_rx already taken")
+        };
+        info!("🔄 Fast-sync background worker loop started.");
+        while let Some(mut need_full) = rx.recv().await {
+            // Coalesce multiple rapid fill signals into a single REST sync
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            while let Ok(next_need_full) = rx.try_recv() {
+                need_full = need_full || next_need_full;
+            }
+
+            let hash_opt = self.account_hash.lock().await.clone();
+            if let Some(hash) = hash_opt {
+                // Perform working orders sync
+                match self.execution_client.get_working_orders(&hash).await {
+                    Ok(orders) => {
+                        let num_working = orders.len();
+                        {
+                            let mut wo = self.working_orders.lock().await;
+                            let mut merged_orders = Vec::new();
+                            let mut broker_oids = std::collections::HashSet::new();
+
+                            for mut new_order in orders {
+                                let new_id = new_order.get("orderId").or_else(|| new_order.get("id"));
+                                let new_id_str = new_id.and_then(|id| if id.is_number() { Some(id.to_string()) } else { id.as_str().map(|s| s.to_string()) });
+
+                                if let Some(ref id_str) = new_id_str {
+                                    broker_oids.insert(id_str.clone());
+                                }
+
+                                let old_strat_id = if let Some(ref id_str) = new_id_str {
+                                    wo.iter().find(|old_order| {
+                                        let old_id = old_order.get("orderId").or_else(|| old_order.get("id"));
+                                        let old_id_str = old_id.and_then(|id| if id.is_number() { Some(id.to_string()) } else { id.as_str().map(|s| s.to_string()) });
+                                        old_id_str == Some(id_str.clone())
+                                    }).and_then(|old_order| old_order.get("strategy_id").cloned())
+                                } else {
+                                    None
+                                };
+
+                                if let Some(strat_id) = old_strat_id {
+                                    if let Some(obj) = new_order.as_object_mut() {
+                                        obj.insert("strategy_id".to_string(), strat_id);
+                                    }
+                                }
+                                merged_orders.push(new_order);
+                            }
+
+                            let now = chrono::Utc::now().timestamp();
+                            for old_order in wo.iter() {
+                                let old_id = old_order.get("orderId").or_else(|| old_order.get("id"));
+                                let old_id_str = old_id.and_then(|id| if id.is_number() { Some(id.to_string()) } else { id.as_str().map(|s| s.to_string()) });
+                                
+                                if let Some(id_str) = old_id_str {
+                                    if !broker_oids.contains(&id_str) {
+                                        if let Some(stub_ts) = old_order.get("local_stub_ts").and_then(|v| v.as_i64()) {
+                                            if now - stub_ts < 10 { // 10 seconds grace period
+                                                merged_orders.push(old_order.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            *wo = merged_orders;
+                        }
+
+                        info!("🔄 Fast-synced {} working orders from Schwab REST API", num_working);
+                    }
+                    Err(e) => warn!("Failed to fast-sync working orders: {:?}", e),
+                }
+
+                // Perform today's filled orders sync if requested
+                if need_full {
+                    match self.execution_client.get_today_filled_orders(&hash, self.config.commission_per_contract).await {
+                        Ok(trades) => {
+                            let mut bp = self.broker_portfolio.lock().await;
+                            bp.trades.clear();
+                            bp.cash = 0.0;
+                            bp.positions.clear();
+                            for trade in trades {
+                                bp.add_trade(&trade, None);
+                            }
+                            info!("🔄 Fast-synced filled trades into broker portfolio (cleared and rebuilt to avoid duplicates)");
+                        }
+                        Err(e) => warn!("Failed to fast-sync filled trades: {:?}", e),
+                    }
+                }
+            }
+        }
     }
 }

@@ -182,6 +182,12 @@ async fn main() -> anyhow::Result<()> {
         supervisor_loop_clone.run_supervisor_loop().await;
     });
 
+    // 14.2. Spawn supervisor background fast sync loop
+    let supervisor_sync_clone = Arc::clone(&supervisor);
+    tokio::spawn(async move {
+        supervisor_sync_clone.run_fast_sync_loop().await;
+    });
+
     // 14.5 Web UI setup
     let news_fetcher = terminator_rust::news::NewsFetcher::new();
     let news_fetcher_clone = Arc::clone(&news_fetcher);
