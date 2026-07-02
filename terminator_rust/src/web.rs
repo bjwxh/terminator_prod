@@ -341,6 +341,42 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
             side = if first_instruction.contains("BUY") { "debit".to_string() } else { "credit".to_string() };
         }
 
+        let mut mark_price = serde_json::Value::Null;
+        let mut net_flow = 0.0;
+        let mut has_quotes = true;
+        if let Some(legs_coll) = o.get("orderLegCollection").and_then(|v| v.as_array()) {
+            for leg in legs_coll {
+                let sym = leg.pointer("/instrument/symbol").and_then(|v| v.as_str()).unwrap_or("");
+                let instruction = leg.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+                let l_orig_qty = leg.get("quantity").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                let unit_qty = if total_orig > 0.0 { l_orig_qty / total_orig } else { 1.0 };
+
+                let mut mid_price = None;
+                if let Some(parsed) = crate::parser::parse_occ_symbol(sym) {
+                    if let Some(quote) = state.grid.quotes.get(&ordered_float::OrderedFloat(parsed.strike)) {
+                        let leg_quote = if parsed.side == "CALL" { &quote.call } else { &quote.put };
+                        if let Some(lq) = leg_quote {
+                            if lq.mid > 0.0 {
+                                mid_price = Some(lq.mid);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(mid) = mid_price {
+                    let sign = if instruction.contains("SELL") { 1.0 } else { -1.0 };
+                    net_flow += sign * mid * unit_qty;
+                } else {
+                    has_quotes = false;
+                    break;
+                }
+            }
+        }
+
+        if has_quotes {
+            mark_price = json!(-net_flow);
+        }
+
         let order_id = o.get("orderId").or_else(|| o.get("id"));
 
         json!({
@@ -350,7 +386,7 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
             "side": side,
             "qty": (total_orig * ratio).round() as i32,
             "price": o.get("price"),
-            "mark": serde_json::Value::Null,
+            "mark": mark_price,
             "status": order_status
         })
     }).collect();
