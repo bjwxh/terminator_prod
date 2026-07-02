@@ -107,7 +107,6 @@ function connect() {
             } else if (data.type === 'trade_signal') {
                 pendingDismissStratId = null;
                 closeTradeModal();
-                playSound('alert');
                 showTradeModal(data);
             } else if (data.type === 'trade_action') {
                 console.log("Remote trade action received:", data);
@@ -945,14 +944,22 @@ function togglePortfolioFold(type) {
     }
 }
 
+let notificationAudioCtx = null;
+
 function playNotificationSound() {
+    if (isMuted) return; // Respect mute state
     try {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (!notificationAudioCtx) {
+            notificationAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (notificationAudioCtx.state === 'suspended') {
+            notificationAudioCtx.resume();
+        }
         const playTone = (freq, startTime, duration) => {
-            const osc = audioCtx.createOscillator();
-            const gainNode = audioCtx.createGain();
+            const osc = notificationAudioCtx.createOscillator();
+            const gainNode = notificationAudioCtx.createGain();
             osc.connect(gainNode);
-            gainNode.connect(audioCtx.destination);
+            gainNode.connect(notificationAudioCtx.destination);
             osc.type = 'sine';
             osc.frequency.setValueAtTime(freq, startTime);
             gainNode.gain.setValueAtTime(0, startTime);
@@ -961,7 +968,7 @@ function playNotificationSound() {
             osc.start(startTime);
             osc.stop(startTime + duration);
         };
-        const now = audioCtx.currentTime;
+        const now = notificationAudioCtx.currentTime;
         // Premium two-tone notification chime
         playTone(880, now, 0.4);
         playTone(1100, now + 0.15, 0.5);
