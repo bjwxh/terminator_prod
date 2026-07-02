@@ -36,6 +36,58 @@ pub struct ExecutionClient {
     client: Client,
 }
 
+fn flatten_orders(orders: Vec<Value>, parent_order_id: Option<String>) -> Vec<Value> {
+    let mut flattened = Vec::new();
+    for mut o in orders {
+        let children = o.get_mut("childOrderStrategies")
+            .and_then(|v| v.as_array_mut())
+            .map(|arr| std::mem::take(arr))
+            .unwrap_or_default();
+
+        let current_id = o.get("orderId")
+            .and_then(|v| {
+                if v.is_number() {
+                    Some(v.to_string())
+                } else {
+                    v.as_str().map(|s| s.to_string())
+                }
+            })
+            .unwrap_or_default();
+
+        let strat_type = o.get("orderStrategyType").and_then(|v| v.as_str()).unwrap_or("");
+        
+        let top_parent_id = parent_order_id.clone().unwrap_or(current_id);
+
+        if !children.is_empty() {
+            if strat_type == "FLATTEN" {
+                if let Some(ref p_id) = parent_order_id {
+                    if let Some(obj) = o.as_object_mut() {
+                        obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
+                        obj.insert("top_parent_order_id".to_string(), Value::String(top_parent_id.clone()));
+                    }
+                }
+                flattened.push(o);
+                flattened.extend(flatten_orders(children, Some(top_parent_id)));
+            } else {
+                flattened.extend(flatten_orders(children, Some(top_parent_id)));
+            }
+        } else {
+            if let Some(ref p_id) = parent_order_id {
+                if let Some(obj) = o.as_object_mut() {
+                    obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
+                    obj.insert("top_parent_order_id".to_string(), Value::String(top_parent_id.clone()));
+                }
+            } else {
+                if let Some(obj) = o.as_object_mut() {
+                    obj.insert("top_parent_order_id".to_string(), Value::String(top_parent_id.clone()));
+                }
+            }
+            flattened.push(o);
+        }
+    }
+    flattened
+}
+
 impl ExecutionClient {
     pub fn new(token_manager: Arc<TokenManager>) -> Self {
         let client = Client::builder()
@@ -396,52 +448,6 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
         let orders: Vec<Value> = response.json().await?;
         info!("Schwab GET /orders returned {} total orders (before filter).", orders.len());
         
-        fn flatten_orders(orders: Vec<Value>, parent_order_id: Option<String>) -> Vec<Value> {
-            let mut flattened = Vec::new();
-            for mut o in orders {
-                let children = o.get_mut("childOrderStrategies")
-                    .and_then(|v| v.as_array_mut())
-                    .map(|arr| std::mem::take(arr))
-                    .unwrap_or_default();
-
-                let current_id = o.get("orderId")
-                    .and_then(|v| {
-                        if v.is_number() {
-                            Some(v.to_string())
-                        } else {
-                            v.as_str().map(|s| s.to_string())
-                        }
-                    })
-                    .unwrap_or_default();
-
-                let strat_type = o.get("orderStrategyType").and_then(|v| v.as_str()).unwrap_or("");
-                
-                let top_parent_id = parent_order_id.clone().unwrap_or(current_id);
-
-                if !children.is_empty() {
-                    if strat_type == "FLATTEN" {
-                        if let Some(ref p_id) = parent_order_id {
-                            if let Some(obj) = o.as_object_mut() {
-                                obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
-                            }
-                        }
-                        flattened.push(o);
-                        flattened.extend(flatten_orders(children, Some(top_parent_id)));
-                    } else {
-                        flattened.extend(flatten_orders(children, Some(top_parent_id)));
-                    }
-                } else {
-                    if let Some(ref p_id) = parent_order_id {
-                        if let Some(obj) = o.as_object_mut() {
-                            obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
-                        }
-                    }
-                    flattened.push(o);
-                }
-            }
-            flattened
-        }
-
         let flattened = flatten_orders(orders, None);
         let active_orders: Vec<Value> = flattened.into_iter().filter(|o| {
             let status = o.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -486,9 +492,10 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
         }
 
         let orders: Vec<Value> = response.json().await?;
+        let flattened = flatten_orders(orders, None);
         let mut filled_trades = Vec::new();
 
-        for order in orders {
+        for order in flattened {
             let status = order.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if status != "FILLED" { continue; }
 
@@ -596,13 +603,15 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
                         let commission = total_contracts as f64 * commission_per_contract;
 
                         let timestamp = order.get("closeTime").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let order_id = order.get("orderId").and_then(|v| {
-                            if v.is_number() {
-                                Some(v.to_string())
-                            } else {
-                                v.as_str().map(|s| s.to_string())
-                            }
-                        }).unwrap_or_default();
+                        let order_id = order.get("top_parent_order_id")
+                            .or_else(|| order.get("orderId"))
+                            .and_then(|v| {
+                                if v.is_number() {
+                                    Some(v.to_string())
+                                } else {
+                                    v.as_str().map(|s| s.to_string())
+                                }
+                            }).unwrap_or_default();
                         
                         filled_trades.push(Trade {
                             timestamp,
