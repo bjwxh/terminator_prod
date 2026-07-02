@@ -31,10 +31,13 @@
 *   **Unique Leaf OrderId Deduplication**: Reverted the trade `strategy_id` key back to the unique leaf `orderId` to prevent deduplication collisions inside `apply_broker_fills_to_strategies` (which would have caused subsequent sibling child fills under the same parent to be skipped and permanently dropped).
 *   **Unreachable Dead Code & Dead Variable Cleanup**: Removed the dead `strat_type == "FLATTEN"` branch inside `flatten_orders` (since `"FLATTEN"` is our app's internal purpose string rather than a Schwab API strategy value). Also completely removed the pre-existing but unused `_parent_order_id` insertion on leaf orders and stripped out the redundant `parent_order_id` argument tracking from `flatten_orders` to keep the codebase clean and surgical.
 
-## Robust Daily PnL Calculation & Starting Value Baseline Fix
-*   **Portfolio-level Starting Market Value Baseline**: Added a `starting_market_value` field to `Portfolio` to track the starting asset value at the beginning of the day. In `sync_from_broker`, this is calculated as $\text{Current MV} - \text{Total Schwab PnL} + \text{Today's Cash Flow}$. This is mathematically exact under any same-day fills or carryover scenarios and prevents double-counting fills.
-*   **Daily PnL Formula**: Updated `net_pnl()` to compute the correct daily PnL as $(\text{Current MV} + \text{Today's Cash Flow}) - \text{Starting Market Value} - \text{Fees}$, aligning perfectly with Schwab's daily performance metrics and the Python app.
-*   **Reconstruct Option Yesterday's Close (`prev_close`)**: Added a `prev_close` field to `PositionLeg`. During `sync_from_broker`, we mathematically reconstruct yesterday's close price directly from Schwab's positions payload. Unrealized PnL is now calculated relative to this `prev_close` to reflect streaming daily PnL.
-*   **Daily Realized PnL Alignment**: Redefined `realized_pnl()` as `net_pnl() - unrealized_pnl()` to guarantee that realized changes for closed yesterday-held positions are correctly computed.
+## Simplified Today-Only Daily PnL Calculation
+*   **Focus on Today Only**: Removed all complex carryover tracking, yesterday's close price reconstructions (`prev_close`), and baseline starting market values (`starting_market_value`). Since the strategy trades 0DTE SPX options that expire daily, carryover values are treated as $0.0$ and we focus strictly on today's session performance.
+*   **Today's PnL Formulas**: 
+    *   `net_pnl()` is simply $\text{Current Open Position MV} + \text{Today's Cash Flow} - \text{Fees}$.
+    *   `unrealized_pnl()` is $\sum (\text{price} - \text{entry\_price}) \times \text{quantity} \times 100$.
+    *   `realized_pnl()` is $\text{Today's Cash Flow} - \text{Fees}$.
+*   This keeps the codebase minimal, clean, and 100% correct for today's trading.
+
 
 
