@@ -126,6 +126,7 @@ impl SubStrategy {
                 let mut port = self.portfolio.lock().await;
                 port.positions = prev_port.positions;
                 port.cash = prev_port.cash;
+                port.trades = prev_port.trades;
             }
             self.last_update_ts = None;
             self.snapshot_trade_count = None;
@@ -2792,18 +2793,125 @@ impl StrategySupervisor {
                 if need_full {
                     match self.execution_client.get_today_filled_orders(&hash, self.config.commission_per_contract).await {
                         Ok(trades) => {
-                            let mut bp = self.broker_portfolio.lock().await;
-                            bp.trades.clear();
-                            bp.cash = 0.0;
-                            bp.positions.clear();
-                            for trade in trades {
-                                bp.add_trade(&trade, None);
+                            {
+                                let mut bp = self.broker_portfolio.lock().await;
+                                bp.trades.clear();
+                                bp.cash = 0.0;
+                                bp.positions.clear();
+                                for trade in &trades {
+                                    bp.add_trade(trade, None);
+                                }
                             }
                             info!("🔄 Fast-synced filled trades into broker portfolio (cleared and rebuilt to avoid duplicates)");
+                            self.apply_broker_fills_to_strategies(&trades).await;
                         }
                         Err(e) => warn!("Failed to fast-sync filled trades: {:?}", e),
                     }
                 }
+            }
+        }
+    }
+
+    pub async fn apply_broker_fills_to_strategies(&self, trades: &[Trade]) {
+        let mut strats = self.sub_strategies.lock().await;
+        let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
+
+        for trade in trades {
+            // Check if this trade (order ID) has already been applied to any sub-strategy
+            let mut already_applied = false;
+            for s in strats.values() {
+                let port = s.portfolio.lock().await;
+                if port.trades.iter().any(|t| t.strategy_id == trade.strategy_id) {
+                    already_applied = true;
+                    break;
+                }
+                if let Some(prev) = &s.previous_portfolio {
+                    if prev.trades.iter().any(|t| t.strategy_id == trade.strategy_id) {
+                        already_applied = true;
+                        break;
+                    }
+                }
+            }
+
+            if already_applied {
+                continue;
+            }
+
+            // Distribute this trade's legs to waiting strategies
+            for leg in &trade.legs {
+                let symbol = &leg.symbol;
+                let is_buy = leg.quantity > 0;
+                let sign = if is_buy { 1 } else { -1 };
+                let mut remaining_fill = leg.quantity.abs();
+
+                let mut mid_price = 0.0;
+                let mut delta = 0.0;
+                let mut theta = 0.0;
+                if let Some(quote) = self.grid.quotes.get(&OrderedFloat(leg.strike)) {
+                    let leg_quote = if leg.side == "CALL" { &quote.call } else { &quote.put };
+                    if let Some(lq) = leg_quote {
+                        mid_price = lq.mid;
+                        delta = lq.delta;
+                        theta = lq.theta;
+                    }
+                }
+                if mid_price == 0.0 {
+                    mid_price = 0.05;
+                }
+
+                let mut waiting = Vec::new();
+                for (sid, s) in strats.iter() {
+                    if let Some(prev) = &s.previous_portfolio {
+                        let port = s.portfolio.lock().await;
+                        let target_qty = port.position_qty_for(symbol);
+                        let current_qty = prev.position_qty_for(symbol);
+                        let diff = target_qty - current_qty;
+                        if diff != 0 && (diff > 0) == is_buy {
+                            waiting.push((sid.clone(), diff.abs(), s.last_update_ts.unwrap_or(now_ct)));
+                        }
+                    }
+                }
+
+                waiting.sort_by_key(|&(_, _, ts)| ts);
+
+                for (sid, needed_qty, _) in waiting {
+                    if remaining_fill <= 0 {
+                        break;
+                    }
+                    let alloc = needed_qty.min(remaining_fill);
+                    let alloc_qty = alloc * sign;
+
+                    if let Some(s) = strats.get_mut(&sid) {
+                        if let Some(ref mut prev_port) = s.previous_portfolio {
+                            let fill_trade = Trade {
+                                timestamp: trade.timestamp.clone(),
+                                legs: vec![OptionLeg {
+                                    symbol: symbol.clone(),
+                                    strike: leg.strike,
+                                    side: leg.side.clone(),
+                                    quantity: alloc_qty,
+                                    delta,
+                                    theta,
+                                    price: mid_price,
+                                    instruction: leg.instruction.clone(),
+                                }],
+                                credit: -(alloc_qty as f64) * mid_price * 100.0,
+                                commission: 0.0,
+                                purpose: "BROKER_FILL".to_string(),
+                                strategy_id: trade.strategy_id.clone(),
+                            };
+                            prev_port.add_trade(&fill_trade, Some(vec![mid_price]));
+                        }
+                    }
+                    remaining_fill -= alloc;
+                }
+            }
+        }
+
+        // Finalize any sub-strategies that are now fully filled
+        for s in strats.values_mut() {
+            if s.previous_portfolio.is_some() {
+                s.check_and_finalize_fill().await;
             }
         }
     }
