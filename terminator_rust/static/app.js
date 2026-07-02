@@ -945,12 +945,38 @@ function togglePortfolioFold(type) {
     }
 }
 
+function playNotificationSound() {
+    try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const playTone = (freq, startTime, duration) => {
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(freq, startTime);
+            gainNode.gain.setValueAtTime(0, startTime);
+            gainNode.gain.linearRampToValueAtTime(0.3, startTime + 0.05);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+            osc.start(startTime);
+            osc.stop(startTime + duration);
+        };
+        const now = audioCtx.currentTime;
+        // Premium two-tone notification chime
+        playTone(880, now, 0.4);
+        playTone(1100, now + 0.15, 0.5);
+    } catch (e) {
+        console.error("Web Audio API failed to play sound:", e);
+    }
+}
+
 function showTradeModal(tradeData) {
     if (!tradeData) {
         console.error("showTradeModal called with null data!");
         return;
     }
     console.log("showTradeModal() triggered for:", tradeData.strat_id);
+    playNotificationSound();
 
     try {
         const titleEl = document.getElementById('modal-strat-title');
