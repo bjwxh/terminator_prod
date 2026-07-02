@@ -20,3 +20,7 @@
 
 ## Stale Working Orders (Ghost Orders) Fix
 *   **Periodic 30-Second working_orders Refresh**: Added a periodic 30-second trigger in the Strategy Supervisor tick loop that sends a non-full sync signal to `fast_sync_tx`. This periodically polls the Schwab `get_working_orders` REST API to refresh the active orders list, preventing filled/canceled orders from getting permanently stuck in the UI as "ghost" working orders due to Schwab REST API DB propagation lag when WebSocket-triggered syncs execute too quickly.
+
+## Interactive Trade Confirmation Audio Notification
+*   **Web Audio Synthesis Chime**: Implemented `playNotificationSound()` in `app.js` using the standard browser Web Audio API. It synthesizes a clean, high-fidelity, two-tone double chime (880Hz sine wave for 0.4s, followed by 1100Hz for 0.5s with linear and exponential volume ramps).
+*   **Chime on Modal Popup**: Triggered this play call whenever `showTradeModal()` is invoked (indicating a new order confirmation window has popped up), prompting the user to act without requiring external audio files.
