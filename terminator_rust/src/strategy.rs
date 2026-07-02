@@ -1502,6 +1502,9 @@ impl StrategySupervisor {
                 *s.portfolio.lock().await = crate::portfolio::Portfolio::new();
                 s.has_traded_today = false;
                 s.state = StrategyState::Idle;
+                s.previous_portfolio = None;
+                s.snapshot_trade_count = None;
+                s.cancelled_at = None;
             }
             *self.live_portfolio.lock().await = crate::portfolio::Portfolio::new();
             *self.session_history.lock().await = std::collections::VecDeque::new();
