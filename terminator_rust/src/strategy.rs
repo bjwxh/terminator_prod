@@ -2837,6 +2837,9 @@ impl StrategySupervisor {
                 continue;
             }
 
+            // Accumulate allocated legs per sub-strategy for this broker trade
+            let mut allocated_by_strat: std::collections::HashMap<String, Vec<OptionLeg>> = std::collections::HashMap::new();
+
             // Distribute this trade's legs to waiting strategies
             for leg in &trade.legs {
                 let symbol = &leg.symbol;
@@ -2881,29 +2884,37 @@ impl StrategySupervisor {
                     let alloc = needed_qty.min(remaining_fill);
                     let alloc_qty = alloc * sign;
 
-                    if let Some(s) = strats.get_mut(&sid) {
-                        if let Some(ref mut prev_port) = s.previous_portfolio {
-                            let fill_trade = Trade {
-                                timestamp: trade.timestamp.clone(),
-                                legs: vec![OptionLeg {
-                                    symbol: symbol.clone(),
-                                    strike: leg.strike,
-                                    side: leg.side.clone(),
-                                    quantity: alloc_qty,
-                                    delta,
-                                    theta,
-                                    price: mid_price,
-                                    instruction: leg.instruction.clone(),
-                                }],
-                                credit: -(alloc_qty as f64) * mid_price * 100.0,
-                                commission: 0.0,
-                                purpose: "BROKER_FILL".to_string(),
-                                strategy_id: trade.strategy_id.clone(),
-                            };
-                            prev_port.add_trade(&fill_trade, Some(vec![mid_price]));
-                        }
-                    }
+                    allocated_by_strat.entry(sid).or_default().push(OptionLeg {
+                        symbol: symbol.clone(),
+                        strike: leg.strike,
+                        side: leg.side.clone(),
+                        quantity: alloc_qty,
+                        delta,
+                        theta,
+                        price: mid_price,
+                        instruction: leg.instruction.clone(),
+                    });
+
                     remaining_fill -= alloc;
+                }
+            }
+
+            // Apply aggregated trade fills to each sub-strategy's previous_portfolio
+            for (sid, legs) in allocated_by_strat {
+                if let Some(s) = strats.get_mut(&sid) {
+                    if let Some(ref mut prev_port) = s.previous_portfolio {
+                        let credit = legs.iter().map(|l| -(l.quantity as f64) * l.price).sum::<f64>() * 100.0;
+                        let mid_prices: Vec<f64> = legs.iter().map(|l| l.price).collect();
+                        let fill_trade = Trade {
+                            timestamp: trade.timestamp.clone(),
+                            legs,
+                            credit,
+                            commission: 0.0,
+                            purpose: "BROKER_FILL".to_string(),
+                            strategy_id: trade.strategy_id.clone(),
+                        };
+                        prev_port.add_trade(&fill_trade, Some(mid_prices));
+                    }
                 }
             }
         }
