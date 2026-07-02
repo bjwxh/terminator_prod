@@ -95,7 +95,7 @@ impl Portfolio {
     }
 
     pub fn realized_pnl(&self) -> f64 {
-        self.cash - self.fees()
+        self.net_pnl() - self.unrealized_pnl()
     }
 
     pub fn unrealized_pnl(&self) -> f64 {

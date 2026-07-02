@@ -36,7 +36,7 @@
 *   **Today's PnL Formulas**: 
     *   `net_pnl()` is simply $\text{Current Open Position MV} + \text{Today's Cash Flow} - \text{Fees}$.
     *   `unrealized_pnl()` is $\sum (\text{price} - \text{entry\_price}) \times \text{quantity} \times 100$.
-    *   `realized_pnl()` is $\text{Today's Cash Flow} - \text{Fees}$.
+    *   `realized_pnl()` preserves the accounting identity $\text{net\_pnl} - \text{unrealized\_pnl}$ to avoid phantom realized losses on open positions.
 *   This keeps the codebase minimal, clean, and 100% correct for today's trading.
 
 
