@@ -461,7 +461,7 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
         let tz: chrono_tz::Tz = "America/Chicago".parse().unwrap();
         let now_ct = now_utc.with_timezone(&tz);
         let start_of_day_ct = now_ct.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(tz).unwrap();
-        let from_time = start_of_day_ct.with_timezone(&Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let from_time = (start_of_day_ct - chrono::Duration::hours(24)).with_timezone(&Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let to_time = now_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
         let today_yymmdd = now_ct.format("%y%m%d").to_string();
@@ -491,6 +491,15 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
         for order in orders {
             let status = order.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if status != "FILLED" { continue; }
+
+            // Filter out orders filled before today's start of day (Chicago time)
+            if let Some(close_time_str) = order.get("closeTime").and_then(|v| v.as_str()) {
+                if let Ok(close_dt) = chrono::DateTime::parse_from_rfc3339(&close_time_str.replace("Z", "+00:00")) {
+                    if close_dt.with_timezone(&Utc) < start_of_day_ct.with_timezone(&Utc) {
+                        continue;
+                    }
+                }
+            }
 
             let legs = order.get("orderLegCollection").and_then(|v| v.as_array());
             if let Some(leg_array) = legs {

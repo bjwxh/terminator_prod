@@ -13,3 +13,6 @@
 ## Working Orders Mark Price Fix
 *   **Real-time Combo Mark Pricing**: Replaced the hardcoded `null` value for working order mark prices in `web.rs` with a dynamic calculation. The backend now looks up the current streaming WebSocket mid prices from the options grid `state.grid.quotes` for each active leg of a working order, computing the exact net-mid price of the combo.
 *   **Correct Debit/Credit Signage**: Set the mark price value to `-net_flow` (net debit) to perfectly align with the UI's parsing logic (where negative is rendered as `Cr` and positive as `Db`), restoring accurate real-time mark tracking (e.g. `$3.80 Db` or `$1.30 Cr` instead of `--`) for working orders.
+
+## Live PnL Calibration & Trade Filtering Fix
+*   **Prevent Historical Trade Cash Pollution**: Modified `get_today_filled_orders` in `execution.rs` to look back 24 hours prior to the start of today (to capture yesterday-entered orders filled today), but introduced a strict `closeTime` filter that discards any orders closed/filled before today's start of day (Chicago time). This prevents previous-day filled trade credits/debits from polluting today's Live Portfolio cash calculation, restoring correct PnL matching with the broker.
