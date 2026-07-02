@@ -26,7 +26,8 @@
 *   **Chime on Modal Popup**: Triggered this play call whenever `showTradeModal()` is invoked (indicating a new order confirmation window has popped up), prompting the user to act without requiring external audio files.
 *   **Audio Context Leak & Mute Fix**: Hoisted a single `notificationAudioCtx` to module scope (lazily initialized on first tone, and calling `.resume()` if suspended) to prevent browser AudioContext exhaustion cap limits. Made it strictly respect the existing `isMuted` localStorage/UI setting to avoid playing sounds when the app is muted, and removed the duplicate `playSound('alert')` call from the WebSocket trade signal handler to prevent jarring double-chimes.
 
-## Live PnL Order Flattening & Strategy ID Reconciliation Fix
+## Live PnL Order Flattening & Unique Deduplication Key Fix
 *   **Order Flattening in get_today_filled_orders**: Hoisted `flatten_orders` to module scope in `execution.rs` and integrated it into `get_today_filled_orders`. This recursively processes nested child strategies under `childOrderStrategies` (the standard Schwab API container structure for complex orders like Iron Condors), preventing the parser from silently skipping filled trades and restoring correct live cash and Live PnL values.
-*   **Top Parent Strategy ID Preservation**: Set the `strategy_id` of the parsed Trade to the `top_parent_order_id` (falling back to `orderId`). This ensures that filled child trades are mapped back to their original parent strategy container for correct sub-strategy portfolio tracking and reconciliation.
+*   **Unique Leaf OrderId Deduplication**: Reverted the trade `strategy_id` key back to the unique leaf `orderId` to prevent deduplication collisions inside `apply_broker_fills_to_strategies` (which would have caused subsequent sibling child fills under the same parent to be skipped and permanently dropped).
+*   **Unreachable Dead Code Cleanup**: Removed the dead `strat_type == "FLATTEN"` branch inside `flatten_orders`, since `"FLATTEN"` is our app's internal purpose string rather than a Schwab API strategy value, simplifying the recurse/flatten logic.
 

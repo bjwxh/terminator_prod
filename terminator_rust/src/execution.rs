@@ -53,33 +53,16 @@ fn flatten_orders(orders: Vec<Value>, parent_order_id: Option<String>) -> Vec<Va
                 }
             })
             .unwrap_or_default();
-
-        let strat_type = o.get("orderStrategyType").and_then(|v| v.as_str()).unwrap_or("");
         
         let top_parent_id = parent_order_id.clone().unwrap_or(current_id);
 
         if !children.is_empty() {
-            if strat_type == "FLATTEN" {
-                if let Some(ref p_id) = parent_order_id {
-                    if let Some(obj) = o.as_object_mut() {
-                        obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
-                        obj.insert("top_parent_order_id".to_string(), Value::String(top_parent_id.clone()));
-                    }
-                }
-                flattened.push(o);
-                flattened.extend(flatten_orders(children, Some(top_parent_id)));
-            } else {
-                flattened.extend(flatten_orders(children, Some(top_parent_id)));
-            }
+            // Recurse into child orders under the parent strategy container
+            flattened.extend(flatten_orders(children, Some(top_parent_id)));
         } else {
             if let Some(ref p_id) = parent_order_id {
                 if let Some(obj) = o.as_object_mut() {
                     obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
-                    obj.insert("top_parent_order_id".to_string(), Value::String(top_parent_id.clone()));
-                }
-            } else {
-                if let Some(obj) = o.as_object_mut() {
-                    obj.insert("top_parent_order_id".to_string(), Value::String(top_parent_id.clone()));
                 }
             }
             flattened.push(o);
@@ -603,8 +586,7 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
                         let commission = total_contracts as f64 * commission_per_contract;
 
                         let timestamp = order.get("closeTime").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let order_id = order.get("top_parent_order_id")
-                            .or_else(|| order.get("orderId"))
+                        let order_id = order.get("orderId")
                             .and_then(|v| {
                                 if v.is_number() {
                                     Some(v.to_string())
