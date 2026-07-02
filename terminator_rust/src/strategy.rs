@@ -1442,10 +1442,17 @@ impl StrategySupervisor {
 
         self.bootstrap_from_history(&resolved_hash).await;
 
+        let mut last_working_sync = std::time::Instant::now();
         loop {
             if let Err(e) = self.tick().await {
                 error!("Error in Strategy Supervisor tick: {:?}", e);
             }
+
+            if last_working_sync.elapsed() >= Duration::from_secs(30) {
+                last_working_sync = std::time::Instant::now();
+                let _ = self.fast_sync_tx.try_send(false);
+            }
+
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
