@@ -36,7 +36,7 @@ pub struct ExecutionClient {
     client: Client,
 }
 
-fn flatten_orders(orders: Vec<Value>, parent_order_id: Option<String>) -> Vec<Value> {
+fn flatten_orders(orders: Vec<Value>) -> Vec<Value> {
     let mut flattened = Vec::new();
     for mut o in orders {
         let children = o.get_mut("childOrderStrategies")
@@ -44,27 +44,10 @@ fn flatten_orders(orders: Vec<Value>, parent_order_id: Option<String>) -> Vec<Va
             .map(|arr| std::mem::take(arr))
             .unwrap_or_default();
 
-        let current_id = o.get("orderId")
-            .and_then(|v| {
-                if v.is_number() {
-                    Some(v.to_string())
-                } else {
-                    v.as_str().map(|s| s.to_string())
-                }
-            })
-            .unwrap_or_default();
-        
-        let top_parent_id = parent_order_id.clone().unwrap_or(current_id);
-
         if !children.is_empty() {
             // Recurse into child orders under the parent strategy container
-            flattened.extend(flatten_orders(children, Some(top_parent_id)));
+            flattened.extend(flatten_orders(children));
         } else {
-            if let Some(ref p_id) = parent_order_id {
-                if let Some(obj) = o.as_object_mut() {
-                    obj.insert("_parent_order_id".to_string(), Value::String(p_id.clone()));
-                }
-            }
             flattened.push(o);
         }
     }
@@ -431,7 +414,7 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
         let orders: Vec<Value> = response.json().await?;
         info!("Schwab GET /orders returned {} total orders (before filter).", orders.len());
         
-        let flattened = flatten_orders(orders, None);
+        let flattened = flatten_orders(orders);
         let active_orders: Vec<Value> = flattened.into_iter().filter(|o| {
             let status = o.get("status").and_then(|v| v.as_str()).unwrap_or("");
             status != "FILLED" && status != "CANCELED" && status != "REJECTED" && status != "EXPIRED" && status != "REPLACED"
@@ -475,7 +458,7 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
         }
 
         let orders: Vec<Value> = response.json().await?;
-        let flattened = flatten_orders(orders, None);
+        let flattened = flatten_orders(orders);
         let mut filled_trades = Vec::new();
 
         for order in flattened {
