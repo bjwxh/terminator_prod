@@ -16,8 +16,6 @@ pub struct PositionLeg {
     pub entry_price: f64,
     pub bid: f64,
     pub ask: f64,
-    pub current_day_pnl: f64,
-    pub prev_close: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,7 +40,6 @@ pub struct Portfolio {
     pub positions: Vec<PositionLeg>,
     pub trades: Vec<Trade>,
     pub cash: f64,
-    pub starting_market_value: f64,
 }
 
 #[derive(Serialize, Clone)]
@@ -70,7 +67,6 @@ impl Portfolio {
             positions: Vec::new(),
             trades: Vec::new(),
             cash: 0.0,
-            starting_market_value: 0.0,
         }
     }
 
@@ -95,11 +91,7 @@ impl Portfolio {
     }
 
     pub fn net_pnl(&self) -> f64 {
-        let mv: f64 = self.positions
-            .iter()
-            .map(|p| p.price * (p.quantity as f64) * 100.0)
-            .sum();
-        (mv + self.cash) - self.starting_market_value - self.fees()
+        self.gross_pnl() - self.fees()
     }
 
     pub fn realized_pnl(&self) -> f64 {
@@ -109,7 +101,7 @@ impl Portfolio {
     pub fn unrealized_pnl(&self) -> f64 {
         self.positions
             .iter()
-            .map(|p| p.current_day_pnl)
+            .map(|p| (p.price - p.entry_price) * (p.quantity as f64) * 100.0)
             .sum()
     }
 
@@ -218,8 +210,6 @@ impl Portfolio {
                     entry_price: fill_price,
                     bid: leg.price,
                     ask: leg.price,
-                    current_day_pnl: 0.0,
-                    prev_close: fill_price,
                 });
             }
         }
@@ -241,11 +231,6 @@ impl Portfolio {
                     pos.price = lq.mid;
                     pos.delta = lq.delta;
                     pos.theta = lq.theta;
-                    if pos.prev_close != 0.0 {
-                        pos.current_day_pnl = (pos.price - pos.prev_close) * (pos.quantity as f64) * 100.0;
-                    } else {
-                        pos.current_day_pnl = (pos.price - pos.entry_price) * (pos.quantity as f64) * 100.0;
-                    }
                 }
             }
         }
@@ -278,30 +263,13 @@ impl Portfolio {
                 entry_price: bp.avg_price,
                 bid: 0.0,
                 ask: 0.0,
-                current_day_pnl: 0.0,
-                prev_close: 0.0,
             });
 
             p.quantity = bp.quantity;
-            p.current_day_pnl = bp.current_day_pnl;
-            p.entry_price = bp.avg_price;
             p.price = bp.price;
-            
-            if bp.quantity != 0 {
-                let qty_scale = bp.quantity as f64 * 100.0;
-                p.prev_close = bp.price - (bp.current_day_pnl / qty_scale);
-            } else {
-                p.prev_close = bp.price;
-            }
 
             new_positions.push(p);
         }
-        
-        // Calculate the starting market value baseline of the entire portfolio:
-        // Starting Value = Current MV + Today's Cash Flow - Total Schwab Daily PnL
-        let current_mv: f64 = new_positions.iter().map(|p| p.price * (p.quantity as f64) * 100.0).sum();
-        let total_schwab_pnl: f64 = new_positions.iter().map(|p| p.current_day_pnl).sum();
-        self.starting_market_value = current_mv + self.cash - total_schwab_pnl;
 
         self.positions = new_positions;
     }

@@ -308,9 +308,10 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
         let s_port = s.portfolio.lock().await;
         
         let positions: Vec<serde_json::Value> = s_port.positions.iter().map(|p| {
+            let mtm_pnl = (p.price - p.entry_price) * (p.quantity as f64) * 100.0;
             json!({
                 "symbol": p.symbol, "strike": p.strike, "side": p.side, "qty": p.quantity,
-                "pnl": p.current_day_pnl, "sim_pnl": p.current_day_pnl, "delta": p.delta,
+                "pnl": mtm_pnl, "sim_pnl": mtm_pnl, "delta": p.delta,
                 "bid": p.bid, "ask": p.ask
             })
         }).collect();
