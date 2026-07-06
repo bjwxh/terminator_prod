@@ -1,0 +1,457 @@
+
+Found 31 orders in the last 24h.
+
+================================================================================
+ORDER ID: 1006441741722 | Status: REPLACED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T14:01:07+0000 | Close (UTC): 2026-05-21T14:01:18+0000
+Price: 8.15 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07460000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07510000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07365000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07315000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:01:18+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:01:18+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:01:18+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:01:18+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006441741751 | Status: FILLED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T14:01:18+0000 | Close (UTC): 2026-05-21T14:01:19+0000
+Price: 8.05 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07460000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07510000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07365000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07315000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 4.95 | Qty: 1.0 | Time: 2026-05-21T14:01:19+0000
+    LegId: 2 | Price: 0.57 | Qty: 1.0 | Time: 2026-05-21T14:01:19+0000
+    LegId: 3 | Price: 4.69 | Qty: 1.0 | Time: 2026-05-21T14:01:19+0000
+    LegId: 4 | Price: 1.02 | Qty: 1.0 | Time: 2026-05-21T14:01:19+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006442781387 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T14:17:02+0000 | Close (UTC): 2026-05-21T14:17:03+0000
+Price: 2.3 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07350000
+  [2] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521P07365000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 2 | Price: 6.19 | Qty: 1.0 | Time: 2026-05-21T14:17:03+0000
+    LegId: 1 | Price: 3.89 | Qty: 1.0 | Time: 2026-05-21T14:17:03+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006443875024 | Status: REPLACED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T14:31:19+0000 | Close (UTC): 2026-05-21T14:31:38+0000
+Price: 7.2 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07450000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07500000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:31:38+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:31:38+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:31:38+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T14:31:38+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006443875077 | Status: FILLED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T14:31:38+0000 | Close (UTC): 2026-05-21T14:31:42+0000
+Price: 7.1 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07450000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07500000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 4 | Price: 0.92 | Qty: 1.0 | Time: 2026-05-21T14:31:42+0000
+    LegId: 3 | Price: 4.52 | Qty: 1.0 | Time: 2026-05-21T14:31:42+0000
+    LegId: 1 | Price: 3.92 | Qty: 1.0 | Time: 2026-05-21T14:31:42+0000
+    LegId: 2 | Price: 0.42 | Qty: 1.0 | Time: 2026-05-21T14:31:42+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006444764771 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T14:48:55+0000 | Close (UTC): 2026-05-21T14:49:23+0000
+Price: 2.25 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07345000
+  [2] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521P07360000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 3.36 | Qty: 1.0 | Time: 2026-05-21T14:49:23+0000
+    LegId: 2 | Price: 5.61 | Qty: 1.0 | Time: 2026-05-21T14:49:23+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006444765773 | Status: REPLACED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T15:01:04+0000 | Close (UTC): 2026-05-21T15:02:25+0000
+Price: 5.9 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07450000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07495000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:25+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:25+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:25+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:25+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006444765865 | Status: REPLACED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T15:02:24+0000 | Close (UTC): 2026-05-21T15:02:34+0000
+Price: 5.8 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07450000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07495000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:34+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:34+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:34+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:34+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006444765883 | Status: REPLACED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T15:02:34+0000 | Close (UTC): 2026-05-21T15:02:50+0000
+Price: 5.5 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07450000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07495000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:50+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:50+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:50+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:02:50+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006444765907 | Status: REPLACED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T15:02:49+0000 | Close (UTC): 2026-05-21T15:03:15+0000
+Price: 5.45 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07450000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07495000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:03:15+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:03:15+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:03:15+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:03:15+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006444765941 | Status: FILLED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T15:03:14+0000 | Close (UTC): 2026-05-21T15:03:29+0000
+Price: 5.4 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07450000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07495000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 2.5 | Qty: 1.0 | Time: 2026-05-21T15:03:29+0000
+    LegId: 2 | Price: 0.32 | Qty: 1.0 | Time: 2026-05-21T15:03:29+0000
+    LegId: 3 | Price: 3.92 | Qty: 1.0 | Time: 2026-05-21T15:03:29+0000
+    LegId: 4 | Price: 0.7 | Qty: 1.0 | Time: 2026-05-21T15:03:29+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445806180 | Status: REPLACED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T15:07:10+0000 | Close (UTC): 2026-05-21T15:09:23+0000
+Price: 2.05 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (2):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07345000
+  [2] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521P07360000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:09:23+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:09:23+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445806223 | Status: REPLACED | Strategy: CUSTOM
+Entered (UTC): 2026-05-21T15:07:43+0000 | Close (UTC): 2026-05-21T15:07:59+0000
+Price: 2.6 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07435000
+  [2] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07460000
+  [3] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07485000
+  [4] SELL_TO_CLOSE   | Qty: 1.0 | SPXW  260521C07510000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:07:59+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:07:59+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:07:59+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:07:59+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445806247 | Status: FILLED | Strategy: CUSTOM
+Entered (UTC): 2026-05-21T15:07:59+0000 | Close (UTC): 2026-05-21T15:08:00+0000
+Price: 2.4 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07435000
+  [2] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07460000
+  [3] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07485000
+  [4] SELL_TO_CLOSE   | Qty: 1.0 | SPXW  260521C07510000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 3.54 | Qty: 1.0 | Time: 2026-05-21T15:07:59+0000
+    LegId: 2 | Price: 0.97 | Qty: 1.0 | Time: 2026-05-21T15:08:00+0000
+    LegId: 3 | Price: 0.32 | Qty: 1.0 | Time: 2026-05-21T15:08:00+0000
+    LegId: 4 | Price: 0.15 | Qty: 1.0 | Time: 2026-05-21T15:08:00+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445806336 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T15:09:23+0000 | Close (UTC): 2026-05-21T15:09:24+0000
+Price: 2.55 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521P07360000
+  [2] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07345000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 6.19 | Qty: 1.0 | Time: 2026-05-21T15:09:24+0000
+    LegId: 2 | Price: 3.64 | Qty: 1.0 | Time: 2026-05-21T15:09:24+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445806676 | Status: REPLACED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T15:14:01+0000 | Close (UTC): 2026-05-21T15:17:41+0000
+Price: 1.7 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07435000
+  [2] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07445000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:17:41+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:17:41+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445806941 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T15:17:41+0000 | Close (UTC): 2026-05-21T15:17:52+0000
+Price: 2.0 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07435000
+  [2] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07445000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 5.2 | Qty: 1.0 | Time: 2026-05-21T15:17:52+0000
+    LegId: 2 | Price: 3.2 | Qty: 1.0 | Time: 2026-05-21T15:17:52+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445807712 | Status: REPLACED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T15:31:08+0000 | Close (UTC): 2026-05-21T15:34:22+0000
+Price: 4.75 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07445000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07490000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+    LegId: 3 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+    LegId: 4 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006445807951 | Status: FILLED | Strategy: IRON_CONDOR
+Entered (UTC): 2026-05-21T15:34:21+0000 | Close (UTC): 2026-05-21T15:34:22+0000
+Price: 4.5 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (4):
+  [1] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07445000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07490000
+  [3] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521P07360000
+  [4] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521P07310000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 4 | Price: 0.52 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+    LegId: 3 | Price: 3.43 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+    LegId: 1 | Price: 1.76 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+    LegId: 2 | Price: 0.17 | Qty: 1.0 | Time: 2026-05-21T15:34:22+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006449183859 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:10:51+0000 | Close (UTC): 2026-05-21T17:10:53+0000
+Price: 1.2 | Total Qty: 2.0 | Filled Qty: 2.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 2.0 | SPXW  260521C07445000
+  [2] SELL_TO_OPEN    | Qty: 2.0 | SPXW  260521C07460000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 2.0 | Status: FILL
+    LegId: 1 | Price: 2.07 | Qty: 2.0 | Time: 2026-05-21T17:10:53+0000
+    LegId: 2 | Price: 0.87 | Qty: 2.0 | Time: 2026-05-21T17:10:53+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006449183896 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:11:09+0000 | Close (UTC): 2026-05-21T17:11:46+0000
+Price: 1.1 | Total Qty: 2.0 | Filled Qty: 2.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 2.0 | SPXW  260521C07450000
+  [2] SELL_TO_OPEN    | Qty: 2.0 | SPXW  260521C07460000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 2.0 | Status: FILL
+    LegId: 1 | Price: 2.3 | Qty: 2.0 | Time: 2026-05-21T17:11:46+0000
+    LegId: 2 | Price: 1.2 | Qty: 2.0 | Time: 2026-05-21T17:11:46+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006450394435 | Status: CANCELED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:16:23+0000 | Close (UTC): 2026-05-21T17:17:46+0000
+Price: 0.8 | Total Qty: 4.0 | Filled Qty: 0.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 4.0 | SPXW  260521C07460000
+  [2] SELL_TO_OPEN    | Qty: 4.0 | SPXW  260521C07470000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 4.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 4.0 | Time: 2026-05-21T17:17:46+0000
+    LegId: 2 | Price: 0.0 | Qty: 4.0 | Time: 2026-05-21T17:17:46+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006450394601 | Status: CANCELED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:17:52+0000 | Close (UTC): 2026-05-21T17:17:53+0000
+Price: 2.6 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07460000
+  [2] SELL_TO_CLOSE   | Qty: 1.0 | SPXW  260521C07490000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T17:17:53+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T17:17:53+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006450394603 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:17:53+0000 | Close (UTC): 2026-05-21T17:17:59+0000
+Price: 2.6 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07460000
+  [2] SELL_TO_CLOSE   | Qty: 1.0 | SPXW  260521C07490000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 3.1 | Qty: 1.0 | Time: 2026-05-21T17:17:59+0000
+    LegId: 2 | Price: 0.5 | Qty: 1.0 | Time: 2026-05-21T17:17:59+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006450394635 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:18:08+0000 | Close (UTC): 2026-05-21T17:18:23+0000
+Price: 2.2 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07460000
+  [2] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07490000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 2.65 | Qty: 1.0 | Time: 2026-05-21T17:18:23+0000
+    LegId: 2 | Price: 0.45 | Qty: 1.0 | Time: 2026-05-21T17:18:23+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006450394633 | Status: CANCELED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:18:08+0000 | Close (UTC): 2026-05-21T17:18:08+0000
+Price: 2.2 | Total Qty: 1.0 | Filled Qty: 0.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 1.0 | SPXW  260521C07460000
+  [2] SELL_TO_OPEN    | Qty: 1.0 | SPXW  260521C07490000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T17:18:08+0000
+    LegId: 2 | Price: 0.0 | Qty: 1.0 | Time: 2026-05-21T17:18:08+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006450394684 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:18:35+0000 | Close (UTC): 2026-05-21T17:18:42+0000
+Price: 2.3 | Total Qty: 2.0 | Filled Qty: 2.0
+Legs (2):
+  [1] SELL_TO_CLOSE   | Qty: 2.0 | SPXW  260521C07460000
+  [2] BUY_TO_CLOSE    | Qty: 2.0 | SPXW  260521C07490000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 2.0 | Status: FILL
+    LegId: 1 | Price: 2.77 | Qty: 2.0 | Time: 2026-05-21T17:18:42+0000
+    LegId: 2 | Price: 0.47 | Qty: 2.0 | Time: 2026-05-21T17:18:42+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006451241219 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:51:43+0000 | Close (UTC): 2026-05-21T17:51:43+0000
+Price: 1.75 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] SELL_TO_CLOSE   | Qty: 1.0 | SPXW  260521C07485000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07540000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 2.02 | Qty: 1.0 | Time: 2026-05-21T17:51:43+0000
+    LegId: 2 | Price: 0.22 | Qty: 1.0 | Time: 2026-05-21T17:51:43+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006451241274 | Status: REPLACED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:52:15+0000 | Close (UTC): 2026-05-21T17:52:41+0000
+Price: 0.8 | Total Qty: 3.0 | Filled Qty: 0.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 3.0 | SPXW  260521C07490000
+  [2] SELL_TO_OPEN    | Qty: 3.0 | SPXW  260521C07505000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 3.0 | Status: CANCELED
+    LegId: 1 | Price: 0.0 | Qty: 3.0 | Time: 2026-05-21T17:52:41+0000
+    LegId: 2 | Price: 0.0 | Qty: 3.0 | Time: 2026-05-21T17:52:41+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006451241309 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:52:41+0000 | Close (UTC): 2026-05-21T17:52:43+0000
+Price: 1.1 | Total Qty: 3.0 | Filled Qty: 3.0
+Legs (2):
+  [1] BUY_TO_CLOSE    | Qty: 3.0 | SPXW  260521C07490000
+  [2] SELL_TO_OPEN    | Qty: 3.0 | SPXW  260521C07505000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 3.0 | Status: FILL
+    LegId: 1 | Price: 1.97 | Qty: 3.0 | Time: 2026-05-21T17:52:43+0000
+    LegId: 2 | Price: 0.87 | Qty: 3.0 | Time: 2026-05-21T17:52:43+0000
+================================================================================
+
+================================================================================
+ORDER ID: 1006451241579 | Status: FILLED | Strategy: VERTICAL
+Entered (UTC): 2026-05-21T17:55:11+0000 | Close (UTC): 2026-05-21T17:55:20+0000
+Price: 2.2 | Total Qty: 1.0 | Filled Qty: 1.0
+Legs (2):
+  [1] SELL_TO_CLOSE   | Qty: 1.0 | SPXW  260521C07495000
+  [2] BUY_TO_OPEN     | Qty: 1.0 | SPXW  260521C07555000
+Activities (1):
+  Activity Type: EXECUTION | Quantity: 1.0 | Status: FILL
+    LegId: 1 | Price: 2.42 | Qty: 1.0 | Time: 2026-05-21T17:55:20+0000
+    LegId: 2 | Price: 0.22 | Qty: 1.0 | Time: 2026-05-21T17:55:20+0000
+================================================================================

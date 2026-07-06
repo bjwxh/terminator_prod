@@ -1,0 +1,7 @@
+[Unit]
+Description=Start Terminator trading and downloader services
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/python3 /opt/terminator/is_market_open.py
+ExecStart=/usr/bin/systemctl start terminator-backend.service terminator-downloader.service

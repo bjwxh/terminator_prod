@@ -19,7 +19,7 @@ let latencyHistory = []; // Buffer for SMA
 let lastSeenExchangeTs = 0; // Filter sawtooth jitter
 const SMA_WINDOW = 10;    // Number of real data updates to average
 let lastNewsId = 0;
-let lastDbStatus = null;
+let lastDbAlert = false;
 let lastOptionBookData = null;
 let lastSpxPrice = null;
 let lastServerTs = null;
@@ -184,14 +184,9 @@ function updateUI(state) {
     document.getElementById('broker-status').className = 'value ' + (state.broker_connected ? 'status-connected' : 'status-disconnected');
 
     const serverEl = document.getElementById('server-name');
-    if (serverEl && state.server_name) {
-        if (state.server_name === 'production-server') {
-            serverEl.textContent = 'MAIN';
-        } else {
-            const parts = state.server_name.split('-');
-            serverEl.textContent = parts[parts.length - 1].toUpperCase();
-        }
-        serverEl.className = 'value ' + (state.server_name === 'production-server' ? 'status-connected' : 'primary');
+    if (serverEl && state.cloud_region) {
+        serverEl.textContent = state.cloud_region;
+        serverEl.className = 'value ' + (state.cloud_region.startsWith('AWS:') ? 'status-connected' : 'status-disabled');
     }
 
     const tradingBtn = document.getElementById('toggle-trading-btn');
@@ -208,19 +203,22 @@ function updateUI(state) {
         if (dbs === "Sleep") {
             dbStatusVal.textContent = "SLEEP";
             dbStatusVal.className = "value status-disabled";
-        } else if (dbs === "Lag") {
-            dbStatusVal.textContent = `LAG (${dba}m)`;
-            dbStatusVal.className = "value status-disconnected";
-        } else {
+        } else if (dba <= 1) {
             dbStatusVal.textContent = "HEALTHY";
             dbStatusVal.className = "value status-connected";
+        } else if (dba <= 5) {
+            dbStatusVal.textContent = `LAG (${dba}m)`;
+            dbStatusVal.className = "value status-warning";
+        } else {
+            dbStatusVal.textContent = `LAG (${dba}m)`;
+            dbStatusVal.className = "value status-disconnected";
         }
         
-        // Handle trigger for warning sound on Lag transition
-        if (dbs === "Lag" && state.db_status.should_alert && lastDbStatus !== "Lag") {
+        // Handle trigger for warning sound on Lag/Stale transition when should_alert is set
+        if (state.db_status.should_alert && !lastDbAlert) {
             playSound('error');
         }
-        lastDbStatus = dbs;
+        lastDbAlert = state.db_status.should_alert;
     }
 
     // Exchange Clock (Chicago)

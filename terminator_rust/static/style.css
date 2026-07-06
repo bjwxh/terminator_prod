@@ -66,6 +66,7 @@ body {
 .status-item .value { font-weight: 700; }
 
 .status-connecting { color: var(--accent-orange); }
+.status-warning { color: var(--accent-orange); }
 .status-connected { color: var(--accent-green); }
 .status-disconnected { color: var(--accent-red); }
 .status-disabled { color: var(--text-secondary); }

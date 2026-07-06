@@ -197,12 +197,14 @@ async fn main() -> anyhow::Result<()> {
 
     let (ws_tx, _) = tokio::sync::broadcast::channel(100);
 
+    let cloud_region = terminator_rust::web::fetch_cloud_region().await;
     let app_state = terminator_rust::web::AppState {
         grid: Arc::clone(&grid),
         supervisor: Arc::clone(&supervisor),
         news: news_fetcher,
         logger: ring_logger,
         ws_tx: ws_tx.clone(),
+        cloud_region,
     };
 
     let web_port = app_config.web_port;

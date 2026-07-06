@@ -1,0 +1,8 @@
+[Unit]
+Description=Schwab Credentials Sync from Secrets Manager
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/bin/python3 /opt/terminator/sync_credentials.py

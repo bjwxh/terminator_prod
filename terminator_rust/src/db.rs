@@ -62,6 +62,19 @@ pub fn load_historical_snapshots(
     Ok(snapshots)
 }
 
+pub fn get_latest_db_timestamp(db_path: &str) -> anyhow::Result<String> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT MAX(datetime) FROM stock_options")?;
+    let mut rows = stmt.query([])?;
+    
+    if let Some(row) = rows.next()? {
+        let dt: String = row.get(0)?;
+        Ok(dt)
+    } else {
+        Err(anyhow::anyhow!("No records found in stock_options"))
+    }
+}
+
 pub fn estimate_spx_from_snapshot(quotes: &[OptionQuoteRow]) -> Option<f64> {
     // Find the ATM call (delta closest to 0.50) and ATM put (delta closest to -0.50)
     let mut closest_call = None;

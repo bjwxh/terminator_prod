@@ -81,6 +81,42 @@ pub struct AppState {
     pub news: Arc<NewsFetcher>,
     pub logger: RingLogger,
     pub ws_tx: broadcast::Sender<String>,
+    pub cloud_region: String,
+}
+
+pub async fn fetch_cloud_region() -> String {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let token_res = client.put("http://169.254.169.254/latest/api/token")
+        .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+        .send()
+        .await;
+
+    if let Ok(token_resp) = token_res {
+        if token_resp.status().is_success() {
+            if let Ok(token) = token_resp.text().await {
+                let region_res = client.get("http://169.254.169.254/latest/meta-data/placement/region")
+                    .header("X-aws-ec2-metadata-token", token)
+                    .send()
+                    .await;
+                if let Ok(region_resp) = region_res {
+                    if region_resp.status().is_success() {
+                        if let Ok(region) = region_resp.text().await {
+                            let r = region.trim();
+                            if !r.is_empty() {
+                                return format!("AWS: {}", r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    "Local".to_string()
 }
 
 pub async fn start_server(state: AppState, port: u16) {
@@ -154,13 +190,32 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
 
     let logs = state.logger.get_logs();
     
-    // DB status mirrors WS stream health
-    let db_status = if spx_ts == 0 {
-        json!({ "status": "NoFeed", "age_minutes": 0, "should_alert": true })
-    } else if (now_ms - spx_ts as i64) > 120_000 {
-        json!({ "status": "Lag", "age_minutes": (now_ms - spx_ts as i64) / 60_000, "should_alert": true })
+    let db_status = if state.supervisor.config.db_path.is_empty() {
+        json!({ "status": "Sleep", "age_minutes": 0, "should_alert": false })
     } else {
-        json!({ "status": "Healthy", "age_minutes": 0, "should_alert": false })
+        let now_ct = chrono::Utc::now().with_timezone(&"America/Chicago".parse::<chrono_tz::Tz>().unwrap());
+        let date_str = now_ct.format("%Y%m%d").to_string();
+        let resolved_db_path = state.supervisor.config.db_path.replace("{date}", &date_str);
+
+        match crate::db::get_latest_db_timestamp(&resolved_db_path) {
+            Ok(dt_str) => {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&dt_str) {
+                    let diff_sec = (chrono::Utc::now().timestamp() - dt.with_timezone(&chrono::Utc).timestamp()).max(0);
+                    let age_minutes = (diff_sec as f64 / 60.0).round() as i64;
+                    if age_minutes <= 1 {
+                        json!({ "status": "Healthy", "age_minutes": age_minutes, "should_alert": false })
+                    } else {
+                        let should_alert = age_minutes > 5;
+                        json!({ "status": "Lag", "age_minutes": age_minutes, "should_alert": should_alert })
+                    }
+                } else {
+                    json!({ "status": "Lag", "age_minutes": 9999, "should_alert": true })
+                }
+            }
+            Err(_) => {
+                json!({ "status": "Lag", "age_minutes": 9999, "should_alert": true })
+            }
+        }
     };
 
     let live_snap = {
@@ -439,6 +494,7 @@ async fn build_state_snapshot(state: &AppState, _tick_count: u64) -> serde_json:
             "spx": spx,
             "vix": vix,
             "server_name": state.supervisor.server_name,
+            "cloud_region": state.cloud_region.clone(),
             "status": state.supervisor.status.lock().await.clone(),
             "broker_connected": state.supervisor.broker_connected.load(std::sync::atomic::Ordering::Relaxed),
             "trading_enabled": state.supervisor.trading_enabled.load(std::sync::atomic::Ordering::Relaxed),

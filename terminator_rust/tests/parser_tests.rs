@@ -233,5 +233,3 @@ fn test_sync_from_broker_filtering() {
     assert_eq!(port.positions[0].symbol, "SPXW  260522C05300000");
 }
 
-
-

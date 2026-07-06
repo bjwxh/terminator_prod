@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer to start Terminator services daily at 8:25 AM Chicago time
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:25:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

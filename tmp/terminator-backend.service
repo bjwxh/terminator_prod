@@ -1,0 +1,12 @@
+[Unit]
+Description=Terminator Rust Trading Backend
+After=network.target schwab-sync.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/terminator
+EnvironmentFile=/opt/terminator/terminator.env
+ExecStart=/opt/terminator/terminator_rust
+Restart=on-failure
+RestartSec=5

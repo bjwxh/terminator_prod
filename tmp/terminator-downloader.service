@@ -1,0 +1,11 @@
+[Unit]
+Description=Terminator Python Option Data Downloader
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/terminator/server/downloader
+ExecStart=/usr/bin/python3 downloader.py
+Restart=on-failure
+RestartSec=5

@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop Terminator trading and downloader services
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl stop terminator-backend.service terminator-downloader.service
