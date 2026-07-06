@@ -823,6 +823,7 @@ async fn test_flipping_chunks_are_queued_and_triggered() {
         bid: 5.0,
         ask: 5.0,
         current_day_pnl: 0.0,
+        prev_close: 0.0,
     };
     supervisor.broker_portfolio.lock().await.positions.push(initial_pos.clone());
 
