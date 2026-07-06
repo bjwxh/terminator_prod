@@ -7,7 +7,7 @@ use serde_json::Value;
 use tracing::{info, error, warn, debug};
 
 use crate::token::TokenManager;
-use crate::parser::parse_occ_symbol;
+use crate::parser::{parse_occ_symbol, is_0dte_spx};
 use crate::strategy::{Trade, OptionLeg};
 use chrono::{Utc, TimeZone};
 
@@ -489,14 +489,7 @@ fn get_order_mark(order: &Value, grid: &crate::grid::OptionsGrid) -> Option<f64>
                             _ => quantity,
                         };
 
-                        let is_0dte_spx = if let Some(code) = symbol.split_whitespace().last() {
-                            if code.len() >= 15 {
-                                let date_str = &code[code.len() - 15..code.len() - 9];
-                                date_str == today_yymmdd
-                            } else { false }
-                        } else { false };
-
-                        if !is_0dte_spx {
+                        if !is_0dte_spx(&symbol, &today_yymmdd) {
                             continue;
                         }
 

@@ -345,4 +345,19 @@ pub fn parse_streaming_value(
     new_spx
 }
 
-
+pub fn is_0dte_spx(symbol: &str, today_yymmdd: &str) -> bool {
+    if !symbol.starts_with("SPX") {
+        return false;
+    }
+    
+    if let Some(code) = symbol.split_whitespace().last() {
+        if code.len() >= 15 {
+            let date_str = &code[code.len() - 15..code.len() - 9];
+            date_str == today_yymmdd
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}

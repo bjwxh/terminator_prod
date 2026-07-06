@@ -1,6 +1,7 @@
 use serde::Serialize;
 use crate::strategy::Trade;
 use crate::grid::OptionsGrid;
+use crate::parser::is_0dte_spx;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionLeg {
@@ -253,7 +254,17 @@ impl Portfolio {
     pub fn sync_from_broker(&mut self, broker_positions: &[crate::execution::BrokerPosition]) {
         let mut new_positions = Vec::new();
         
+        let today_yymmdd = if std::env::var("TERMINATOR_TEST_ENV").is_ok() {
+            "260522".to_string()
+        } else {
+            let tz: chrono_tz::Tz = "America/Chicago".parse().unwrap();
+            chrono::Utc::now().with_timezone(&tz).format("%y%m%d").to_string()
+        };
+
         for bp in broker_positions {
+            if !is_0dte_spx(&bp.symbol, &today_yymmdd) {
+                continue;
+            }
             let existing = self.positions.iter().find(|p| p.symbol == bp.symbol);
             
             let mut p = existing.cloned().unwrap_or_else(|| PositionLeg {

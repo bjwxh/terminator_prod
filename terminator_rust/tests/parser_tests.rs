@@ -4,7 +4,7 @@ use ordered_float::OrderedFloat;
 use terminator_rust::{
     grid::OptionsGrid,
     options_chain::StrikeAndSide,
-    parser::parse_streaming_message,
+    parser::{parse_streaming_message, is_0dte_spx},
 };
 
 #[test]
@@ -175,4 +175,63 @@ fn test_parse_acct_activity_message() {
     assert_eq!(ev2.message_type, "ExecutionCreated");
     assert_eq!(ev2.status, "Cancelled");
 }
+
+#[test]
+fn test_is_0dte_spx_helper() {
+    assert!(is_0dte_spx("SPXW  260522C05300000", "260522"));
+    assert!(is_0dte_spx("SPXW  260522P05300000", "260522"));
+    assert!(!is_0dte_spx("SPXW  260522C05300000", "260523"));
+    assert!(!is_0dte_spx("AAPL  260522C05300000", "260522"));
+    assert!(is_0dte_spx("SPX   260522C05300000", "260522"));
+}
+
+#[test]
+fn test_sync_from_broker_filtering() {
+    use terminator_rust::portfolio::Portfolio;
+    use terminator_rust::execution::BrokerPosition;
+
+    unsafe {
+        std::env::set_var("TERMINATOR_TEST_ENV", "1");
+    }
+
+    let mut port = Portfolio::new();
+
+    let positions = vec![
+        BrokerPosition {
+            symbol: "SPXW  260522C05300000".to_string(), // Matches test clock date (260522)
+            strike: 5300.0,
+            side: "CALL".to_string(),
+            quantity: 1,
+            price: 12.5,
+            avg_price: 12.5,
+            current_day_pnl: 0.0,
+        },
+        BrokerPosition {
+            symbol: "SPXW  260523C05300000".to_string(), // Non-matching date (260523)
+            strike: 5300.0,
+            side: "CALL".to_string(),
+            quantity: 1,
+            price: 12.5,
+            avg_price: 12.5,
+            current_day_pnl: 0.0,
+        },
+        BrokerPosition {
+            symbol: "AAPL  260522C05300000".to_string(), // Non-SPX position
+            strike: 150.0,
+            side: "CALL".to_string(),
+            quantity: 10,
+            price: 2.5,
+            avg_price: 2.5,
+            current_day_pnl: 0.0,
+        },
+    ];
+
+    port.sync_from_broker(&positions);
+
+    // Verify only the 0DTE SPX option was added to the portfolio
+    assert_eq!(port.positions.len(), 1);
+    assert_eq!(port.positions[0].symbol, "SPXW  260522C05300000");
+}
+
+
 
