@@ -24,6 +24,7 @@ pub fn load_historical_snapshots(
     end_ts: &str,
 ) -> anyhow::Result<Vec<OptionsSnapshot>> {
     let conn = Connection::open(db_path)?;
+    conn.busy_timeout(std::time::Duration::from_millis(1000))?;
     let mut stmt = conn.prepare(
         "SELECT datetime, strike_price, side, bidprice, askprice, delta, theta, symbol \
          FROM stock_options \
@@ -64,6 +65,7 @@ pub fn load_historical_snapshots(
 
 pub fn get_latest_db_timestamp(db_path: &str) -> anyhow::Result<String> {
     let conn = Connection::open(db_path)?;
+    conn.busy_timeout(std::time::Duration::from_millis(500))?;
     let mut stmt = conn.prepare("SELECT MAX(datetime) FROM stock_options")?;
     let mut rows = stmt.query([])?;
     
