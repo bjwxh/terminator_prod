@@ -2407,6 +2407,8 @@ impl StrategySupervisor {
                                 }
                             }
 
+                            let fill_price = leg.price.filter(|&p| p > 0.0).unwrap_or(mid_price);
+                            let commission = self.config.commission_per_contract * alloc_qty.abs() as f64;
                             let fill_trade = Trade {
                                 timestamp: now_ct.to_rfc3339(),
                                 legs: vec![OptionLeg {
@@ -2416,15 +2418,15 @@ impl StrategySupervisor {
                                     quantity: alloc_qty,
                                     delta: 0.0,
                                     theta: 0.0,
-                                    price: mid_price,
+                                    price: fill_price,
                                     instruction: None,
                                 }],
-                                credit: -(alloc_qty as f64) * mid_price * 100.0,
-                                commission: 0.0,
+                                credit: -(alloc_qty as f64) * fill_price * 100.0,
+                                commission,
                                 purpose: "BROKER_FILL".to_string(),
                                 strategy_id: sid.clone(),
                             };
-                            prev_port.add_trade(&fill_trade, Some(vec![mid_price]));
+                            prev_port.add_trade(&fill_trade, Some(vec![fill_price]));
                         }
                     }
                     remaining_fill -= alloc;
@@ -2847,8 +2849,8 @@ impl StrategySupervisor {
                 continue;
             }
 
-            // Accumulate allocated legs per sub-strategy for this broker trade
-            let mut allocated_by_strat: std::collections::HashMap<String, Vec<OptionLeg>> = std::collections::HashMap::new();
+            // Accumulate allocated legs and their fill prices per sub-strategy for this broker trade
+            let mut allocated_by_strat: std::collections::HashMap<String, (Vec<OptionLeg>, Vec<f64>)> = std::collections::HashMap::new();
 
             // Distribute this trade's legs to waiting strategies
             for leg in &trade.legs {
@@ -2894,36 +2896,40 @@ impl StrategySupervisor {
                     let alloc = needed_qty.min(remaining_fill);
                     let alloc_qty = alloc * sign;
 
-                    allocated_by_strat.entry(sid).or_default().push(OptionLeg {
+                    let fill_price = if leg.price > 0.0 { leg.price } else { mid_price };
+                    let entry = allocated_by_strat.entry(sid).or_default();
+                    entry.0.push(OptionLeg {
                         symbol: symbol.clone(),
                         strike: leg.strike,
                         side: leg.side.clone(),
                         quantity: alloc_qty,
                         delta,
                         theta,
-                        price: mid_price,
+                        price: fill_price,
                         instruction: leg.instruction.clone(),
                     });
+                    entry.1.push(fill_price);
 
                     remaining_fill -= alloc;
                 }
             }
 
             // Apply aggregated trade fills to each sub-strategy's previous_portfolio
-            for (sid, legs) in allocated_by_strat {
+            for (sid, (legs, fill_prices)) in allocated_by_strat {
                 if let Some(s) = strats.get_mut(&sid) {
                     if let Some(ref mut prev_port) = s.previous_portfolio {
+                        let total_alloc_qty: i32 = legs.iter().map(|l| l.quantity.abs()).sum();
+                        let commission = self.config.commission_per_contract * total_alloc_qty as f64;
                         let credit = legs.iter().map(|l| -(l.quantity as f64) * l.price).sum::<f64>() * 100.0;
-                        let mid_prices: Vec<f64> = legs.iter().map(|l| l.price).collect();
                         let fill_trade = Trade {
                             timestamp: trade.timestamp.clone(),
                             legs,
                             credit,
-                            commission: 0.0,
+                            commission,
                             purpose: "BROKER_FILL".to_string(),
                             strategy_id: trade.strategy_id.clone(),
                         };
-                        prev_port.add_trade(&fill_trade, Some(mid_prices));
+                        prev_port.add_trade(&fill_trade, Some(fill_prices));
                     }
                 }
             }

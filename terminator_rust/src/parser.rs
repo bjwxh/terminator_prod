@@ -14,6 +14,7 @@ pub struct OrderActivityLeg {
     pub symbol: String,
     pub buy_sell: String, // "Buy", "Sell", "BuyToOpen", "SellToOpen", etc.
     pub quantity: f64,
+    pub price: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -108,7 +109,7 @@ pub fn parse_acct_activity_data(
             let symbol = leg_val.pointer("/Security/Symbol").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let buy_sell = leg_val.get("BuySellCode").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let quantity = leg_val.get("Quantity").and_then(parse_schwab_decimal).unwrap_or(0.0);
-            legs.push(OrderActivityLeg { leg_id, symbol, buy_sell, quantity });
+            legs.push(OrderActivityLeg { leg_id, symbol, buy_sell, quantity, price: None });
         }
     }
     
@@ -124,6 +125,7 @@ pub fn parse_acct_activity_data(
                     symbol,
                     buy_sell: String::new(),
                     quantity: 0.0,
+                    price: None,
                 });
             }
         }
@@ -170,11 +172,14 @@ pub fn parse_acct_activity_data(
                 let qty = data.pointer("/BaseEvent/ExecutionCreatedEventExecutionInfo/ExecutionInfo/ExecutionQuantity")
                     .and_then(parse_schwab_decimal)
                     .unwrap_or(0.0);
+                let price_val = data.pointer("/BaseEvent/ExecutionCreatedEventExecutionInfo/ExecutionInfo/ExecutionPrice")
+                    .and_then(parse_schwab_decimal);
                 legs.push(OrderActivityLeg {
                     leg_id,
                     symbol: String::new(),
                     buy_sell: String::new(),
                     quantity: qty,
+                    price: price_val,
                 });
             }
         }

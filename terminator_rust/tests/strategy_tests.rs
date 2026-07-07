@@ -339,6 +339,7 @@ async fn test_process_account_event_order_id_matching() {
             symbol: opt_sym.clone(),
             buy_sell: "Buy".to_string(),
             quantity: 1.0,
+            price: None,
         }],
         limit_price: None,
     };
@@ -361,6 +362,7 @@ async fn test_process_account_event_order_id_matching() {
             symbol: opt_sym.clone(),
             buy_sell: "Buy".to_string(),
             quantity: 1.0,
+            price: None,
         }],
         limit_price: None,
     };
@@ -546,6 +548,7 @@ async fn test_cancel_event_symbol_overlap_filtering() {
             symbol: "SPXW  260522C99999999".to_string(),
             buy_sell: "Buy".to_string(),
             quantity: 1.0,
+            price: None,
         }],
         limit_price: None,
     };
@@ -591,6 +594,7 @@ async fn test_cancel_event_symbol_overlap_filtering() {
             symbol: opt_sym.clone(),
             buy_sell: "Buy".to_string(),
             quantity: 1.0,
+            price: None,
         }],
         limit_price: None,
     };
@@ -822,8 +826,6 @@ async fn test_flipping_chunks_are_queued_and_triggered() {
         entry_price: 5.0,
         bid: 5.0,
         ask: 5.0,
-        current_day_pnl: 0.0,
-        prev_close: 0.0,
     };
     supervisor.broker_portfolio.lock().await.positions.push(initial_pos.clone());
 
