@@ -2122,6 +2122,22 @@ impl StrategySupervisor {
                 ui_legs: remaining_legs,
                 to_cancel,
             });
+            
+            // Send email alert via python script
+            let script_path = if std::path::Path::new("/home/fw/terminator_prod/terminator_rust/send_alert_email.py").exists() {
+                "/home/fw/terminator_prod/terminator_rust/send_alert_email.py"
+            } else {
+                "send_alert_email.py"
+            };
+            let python_bin = if std::path::Path::new("/home/fw/terminator_prod/.venv/bin/python").exists() {
+                "/home/fw/terminator_prod/.venv/bin/python"
+            } else {
+                "python3"
+            };
+            let _ = std::process::Command::new(python_bin)
+                .arg(script_path)
+                .arg("GAP_RECON")
+                .spawn();
         }
 
         Ok(())

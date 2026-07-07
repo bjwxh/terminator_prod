@@ -138,6 +138,7 @@ pub async fn start_server(state: AppState, port: u16) {
         .route("/api/orders/:order_id/cancel", post(api_cancel_order))
         .route("/api/orders/:order_id/chase", post(api_chase_order))
         .route("/api/orders/cancel_all", post(api_cancel_all_orders))
+        .route("/api/session", get(api_get_session))
         .fallback_service(serve_dir)
         .with_state(state.clone())
         .layer(cors);
@@ -766,6 +767,19 @@ async fn api_working_orders(State(state): State<AppState>) -> impl IntoResponse 
     (StatusCode::OK, axum::Json(orders))
 }
 
+async fn api_get_session(State(state): State<AppState>) -> impl IntoResponse {
+    let port = state.supervisor.broker_portfolio.lock().await;
+    let res = json!({
+        "live_combined_portfolio": {
+            "trades": port.trades,
+            "total_contracts": port.total_contracts(),
+            "gross_pnl": port.gross_pnl(),
+            "net_pnl": port.net_pnl(),
+        }
+    });
+    (StatusCode::OK, axum::Json(res))
+}
+
 async fn api_cancel_order(
     State(state): State<AppState>,
     Path(order_id): Path<String>,
@@ -807,7 +821,7 @@ async fn api_chase_order(
             if success {
                 (StatusCode::OK, axum::Json(json!({ "msg": format!("Order {} chase/improvement requested", order_id) })))
             } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "detail": "Chase failed to match quotes" })))
+                (StatusCode::OK, axum::Json(json!({ "msg": "Chase not completed: order may have been filled or quotes matched." })))
             }
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "detail": format!("Chase failed: {:?}", e) }))),

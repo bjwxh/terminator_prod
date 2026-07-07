@@ -15,11 +15,11 @@ echo "--- Terminator EOD Report Flow ---"
 echo "Date: $DATE_STR"
 
 # 1. Pull session state from VM
-echo "Step 1: Pulling session_state.json from $VM_HOST..."
-if scp "$VM_HOST:$REMOTE_SESSION_DIR/session_state.json" "$TEMP_SESSION"; then
-    echo "  Success: Pulled to $TEMP_SESSION"
+echo "Step 1: Pulling session state from $VM_HOST API..."
+if curl -s "http://$VM_HOST:8000/api/session" > "$TEMP_SESSION"; then
+    echo "  Success: Fetched to $TEMP_SESSION"
 else
-    echo "  ERROR: Could not pull session from VM. Ensure VM is up and Tailscale is active."
+    echo "  ERROR: Could not fetch session from VM. Ensure VM and API are running."
     exit 1
 fi
 

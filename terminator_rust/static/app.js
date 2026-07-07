@@ -1470,11 +1470,22 @@ function confirmChaseOrder(orderId, symbol) {
         "Chase Working Order",
         `Are you sure you want to <strong>Chase</strong> order <strong>#${orderId}</strong> (${symbol})?<br><br>Price will be improved to the nearest 5c of current mark on the less aggressive side.`,
         () => {
+            closeConfirmModal();
+            const toast = document.createElement('div');
+            toast.className = 'status-banner';
+            toast.style.backgroundColor = '#1e3a8a';
+            toast.style.color = '#bfdbfe';
+            toast.innerHTML = `Chase requested for order #${orderId}...`;
+            document.body.prepend(toast);
+            setTimeout(() => { if(toast.parentNode) toast.parentNode.removeChild(toast); }, 3000);
+
             fetch(`/api/orders/${orderId}/chase`, { method: 'POST' })
-                .then(resp => {
-                    if (!resp.ok) throw new Error("Chase failed");
+                .then(async resp => {
+                    if (!resp.ok) {
+                        const errData = await resp.json().catch(() => ({}));
+                        throw new Error(errData.detail || "Chase failed");
+                    }
                     console.log(`Chase requested for order ${orderId}`);
-                    closeConfirmModal();
                     // Refetch working orders immediately for snappy UI
                     fetch(`/api/orders/working`).then(r => r.json()).then(data => updateOrdersTable(data));
                 })
