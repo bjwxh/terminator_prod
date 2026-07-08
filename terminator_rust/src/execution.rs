@@ -31,6 +31,13 @@ pub struct BrokerOrder {
     pub price: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChaseResult {
+    Replaced(String),
+    AlreadyAtTarget,
+    NotFound,
+}
+
 pub struct ExecutionClient {
     token_manager: Arc<TokenManager>,
     client: Client,
@@ -293,7 +300,7 @@ impl ExecutionClient {
         account_hash: &str,
         order_id: &str,
         grid: &crate::grid::OptionsGrid,
-    ) -> Result<bool> {
+    ) -> Result<ChaseResult> {
         let working = self.get_working_orders(account_hash).await?;
         let order = working.into_iter().find(|o| {
             o.get("orderId")
@@ -315,7 +322,7 @@ impl ExecutionClient {
                     "Cannot chase order {}: Not found in working orders.",
                     order_id
                 );
-                return Ok(false);
+                return Ok(ChaseResult::NotFound);
             }
         };
 
@@ -323,7 +330,7 @@ impl ExecutionClient {
             Some(m) => m,
             None => {
                 error!("Cannot chase order {}: Could not calculate mark.", order_id);
-                return Ok(false);
+                return Ok(ChaseResult::NotFound);
             }
         };
 
@@ -345,7 +352,7 @@ impl ExecutionClient {
                 "Order {} price ${} is already at target ${:.2}. Skipping.",
                 order_id, old_price, new_abs_price
             );
-            return Ok(true);
+            return Ok(ChaseResult::AlreadyAtTarget);
         }
 
         info!(
@@ -410,8 +417,16 @@ impl ExecutionClient {
             .context("Failed HTTP request to replace order")?;
 
         if response.status().is_success() {
-            info!("Order replacement request accepted for ID: {}", order_id);
-            Ok(true)
+            let mut new_order_id = String::new();
+            if let Some(loc_header) = response.headers().get(reqwest::header::LOCATION) {
+                if let Ok(loc_str) = loc_header.to_str() {
+                    if let Some(oid) = loc_str.split('/').last() {
+                        new_order_id = oid.to_string();
+                    }
+                }
+            }
+            info!("Order replacement request accepted for ID: {}. New ID: {}", order_id, new_order_id);
+            Ok(ChaseResult::Replaced(new_order_id))
         } else {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();

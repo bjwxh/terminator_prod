@@ -816,14 +816,47 @@ async fn api_chase_order(
             axum::Json(json!({ "detail": "Account hash not yet resolved, retry in a moment" })),
         );
     }
+    // Capture the pre-replace strategy_id before issuing the PUT, so this isn't racing
+    // against run_fast_sync_loop pruning the old order out of working_orders in the meantime.
+    let old_strat_id = {
+        let working = state.supervisor.working_orders.lock().await;
+        working.iter().find(|o| {
+            let oid = o.get("orderId").or_else(|| o.get("id"));
+            let oid_str = oid.and_then(|id| {
+                if id.is_number() {
+                    Some(id.to_string())
+                } else {
+                    id.as_str().map(|s| s.to_string())
+                }
+            });
+            oid_str.as_deref() == Some(&order_id)
+        }).and_then(|o| o.get("strategy_id").cloned())
+    };
+
     match state.supervisor.execution_client.chase_order(&hash, &order_id, &state.supervisor.grid).await {
-        Ok(success) => {
-            if success {
+        Ok(res) => match res {
+            crate::execution::ChaseResult::Replaced(new_oid) => {
+                if new_oid.is_empty() {
+                    warn!("Order {} replaced but Schwab response had no parseable Location header; strategy_id mapping not propagated to new order.", order_id);
+                } else if let Some(strat_id) = old_strat_id {
+                    info!("Propagating strategy_id {} to new replacement order ID {}", strat_id, new_oid);
+                    let mut working = state.supervisor.working_orders.lock().await;
+                    working.push(json!({
+                        "orderId": new_oid,
+                        "strategy_id": strat_id,
+                        "status": "WORKING",
+                        "local_stub_ts": chrono::Utc::now().timestamp()
+                    }));
+                }
                 (StatusCode::OK, axum::Json(json!({ "msg": format!("Order {} chase/improvement requested", order_id) })))
-            } else {
+            }
+            crate::execution::ChaseResult::AlreadyAtTarget => {
+                (StatusCode::OK, axum::Json(json!({ "msg": "Chase not completed: order is already at target price." })))
+            }
+            crate::execution::ChaseResult::NotFound => {
                 (StatusCode::OK, axum::Json(json!({ "msg": "Chase not completed: order may have been filled or quotes matched." })))
             }
-        }
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "detail": format!("Chase failed: {:?}", e) }))),
     }
 }
