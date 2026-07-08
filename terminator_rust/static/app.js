@@ -945,34 +945,7 @@ function togglePortfolioFold(type) {
 let notificationAudioCtx = null;
 
 function playNotificationSound() {
-    if (isMuted) return; // Respect mute state
-    try {
-        if (!notificationAudioCtx) {
-            notificationAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        if (notificationAudioCtx.state === 'suspended') {
-            notificationAudioCtx.resume();
-        }
-        const playTone = (freq, startTime, duration) => {
-            const osc = notificationAudioCtx.createOscillator();
-            const gainNode = notificationAudioCtx.createGain();
-            osc.connect(gainNode);
-            gainNode.connect(notificationAudioCtx.destination);
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(freq, startTime);
-            gainNode.gain.setValueAtTime(0, startTime);
-            gainNode.gain.linearRampToValueAtTime(0.3, startTime + 0.05);
-            gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
-            osc.start(startTime);
-            osc.stop(startTime + duration);
-        };
-        const now = notificationAudioCtx.currentTime;
-        // Premium two-tone notification chime
-        playTone(880, now, 0.4);
-        playTone(1100, now + 0.15, 0.5);
-    } catch (e) {
-        console.error("Web Audio API failed to play sound:", e);
-    }
+    playSound('info');
 }
 
 function showTradeModal(tradeData) {

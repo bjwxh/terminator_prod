@@ -84,3 +84,11 @@ If the Rust backend logs show `401 Unauthorized` or token expired messages, or i
 3. **Access Web UI:**
    The Web UI runs on port `8081` and is accessible via Tailscale:
    `http://<TAILSCALE_IP>:8081`
+
+---
+
+## 4. Dependencies & Automated Deploy Notes
+
+- **`send_alert_email.py` Dependency**: The alert email script imports `CONFIG` from `server.core.config` (located in `/opt/terminator/server`).
+- **Deploy Path**: `deploy/deploy.sh` compiles and deploys the Rust binary, static assets, and the `send_alert_email.py` script. It does *not* sync the `server/` directory to `/opt/terminator/server` to avoid copying large database and log files.
+- **One-time Setup**: If deploying to a fresh EC2 instance, you must copy the `server/` directory (specifically `server/core` and `server/downloader` configurations) from the repository to `/opt/terminator/server` manually.

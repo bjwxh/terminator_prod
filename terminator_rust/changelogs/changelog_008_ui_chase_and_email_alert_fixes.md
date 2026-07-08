@@ -21,3 +21,14 @@ This changelog documents the fixes made to address user-reported issues with the
 4. **EOD Report Compatibility:**
    - **Backend Integration (`web.rs`):** Implemented a new `GET /api/session` endpoint. This endpoint constructs the exact `"live_combined_portfolio"` payload (real trades, contract counts, gross/net PnL) expected by the legacy EOD reporting logic, dynamically serializing `broker_portfolio`.
    - **Reporting Script (`run_terminator_eod.sh`):** Swapped out the brittle `scp` logic for a clean `curl` request to the Rust VM's API, decoupling the report script from physical JSON state files.
+
+## Post-Deployment Fixes & Refinements (2026-07-08)
+
+1. **Audio Alert Redirection:**
+   - **Frontend (`app.js`):** Modified `playNotificationSound()` to play the `chime.mp3` file (via `playSound('info')`) instead of synthesizing custom Web Audio API oscillator beeps, ensuring the custom-amplified `chime.mp3` file is actually played on modal popups.
+
+2. **Email Alert & Path Fixes:**
+   - **Credentials Sync**: Synced the local Gmail credentials `fw_trd_key.json` to `/home/ubuntu/.api_keys/gmail/fw_trd_key.json` on the EC2 server (run under the `ubuntu` user).
+   - **Python Path Resolution (`send_alert_email.py`):** Fixed `root_dir` resolution to correctly handle the production `/opt/terminator` directory layout and avoid `ModuleNotFoundError: No module named 'server'`. Cleaned up duplicate config paths.
+   - **Rust Backend Path Priority (`strategy.rs`):** Updated the binary to look for `send_alert_email.py` in `/opt/terminator` first to avoid executing stale versions in other locations.
+   - **Automated Deploy (`deploy.sh`):** Updated the deployment script to copy and move `send_alert_email.py` to `/opt/terminator/` on the server during automated deploy.

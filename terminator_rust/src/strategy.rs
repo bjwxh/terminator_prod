@@ -2124,8 +2124,12 @@ impl StrategySupervisor {
             });
             
             // Send email alert via python script
-            let script_path = if std::path::Path::new("/home/fw/terminator_prod/terminator_rust/send_alert_email.py").exists() {
+            let script_path = if std::path::Path::new("/opt/terminator/send_alert_email.py").exists() {
+                "/opt/terminator/send_alert_email.py"
+            } else if std::path::Path::new("/home/fw/terminator_prod/terminator_rust/send_alert_email.py").exists() {
                 "/home/fw/terminator_prod/terminator_rust/send_alert_email.py"
+            } else if std::path::Path::new("terminator_rust/send_alert_email.py").exists() {
+                "terminator_rust/send_alert_email.py"
             } else {
                 "send_alert_email.py"
             };

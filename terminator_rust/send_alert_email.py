@@ -1,4 +1,4 @@
-#!/Users/fw/anaconda3/envs/terminator/bin/python
+#!/usr/bin/env python3
 import os
 import sys
 import json
@@ -9,8 +9,17 @@ import logging
 
 # Add project root to sys.path
 dir_path = os.path.dirname(os.path.realpath(__file__))
-# If running locally, root is parent. On server, root is /home/fw/terminator_prod
-root_dir = "/home/fw/terminator_prod" if os.path.exists("/home/fw/terminator_prod/server") else os.path.abspath(os.path.join(dir_path, ".."))
+# Check standard layouts
+if os.path.exists(os.path.join(dir_path, "server")):
+    # E.g. /opt/terminator
+    root_dir = dir_path
+elif os.path.exists(os.path.join(dir_path, "..", "server")):
+    # E.g. terminator_rust/
+    root_dir = os.path.abspath(os.path.join(dir_path, ".."))
+else:
+    # Fallback
+    root_dir = "/opt/terminator"
+
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
@@ -22,11 +31,24 @@ logger = logging.getLogger("send_alert_email")
 def main():
     strat_id = sys.argv[1] if len(sys.argv) > 1 else "Unknown Strategy"
     
-    config_path = CONFIG.get('email_config_path', os.path.join(root_dir, 'server', 'email_config.json'))
+    config_path = CONFIG.get('email_config_path')
+    paths_to_try = [
+        config_path,
+        os.path.join(root_dir, '.api_keys', 'gmail', 'fw_trd_key.json'),
+        "/home/fw/.api_keys/gmail/fw_trd_key.json"
+    ]
     
-    if not os.path.exists(config_path):
-        logger.error(f"Email config not found at {config_path}")
+    found_path = None
+    for p in paths_to_try:
+        if p and os.path.exists(p):
+            found_path = p
+            break
+            
+    if not found_path:
+        logger.error(f"Email config not found. Tried paths: {paths_to_try}")
         return
+        
+    config_path = found_path
 
     try:
         with open(config_path, 'r') as f:
