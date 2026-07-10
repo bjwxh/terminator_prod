@@ -62,10 +62,6 @@ pub struct SubStrategy {
     pub init_s_delta: f64,
     pub init_l_delta: f64,
     pub portfolio: Arc<Mutex<crate::portfolio::Portfolio>>,
-    pub previous_portfolio: Option<crate::portfolio::Portfolio>,
-    pub last_update_ts: Option<chrono::DateTime<chrono_tz::Tz>>,
-    pub snapshot_trade_count: Option<usize>,
-    pub cancelled_at: Option<std::time::Instant>,
 }
 
 impl SubStrategy {
@@ -79,91 +75,7 @@ impl SubStrategy {
             init_s_delta,
             init_l_delta,
             portfolio: Arc::new(Mutex::new(crate::portfolio::Portfolio::new())),
-            previous_portfolio: None,
-            last_update_ts: None,
-            snapshot_trade_count: None,
-            cancelled_at: None,
         }
-    }
-
-    pub async fn check_and_finalize_fill(&mut self) -> bool {
-        let prev = match &self.previous_portfolio {
-            Some(p) => p,
-            None => return true,
-        };
-
-        if let Some(snap_count) = self.snapshot_trade_count {
-            if prev.trades.len() <= snap_count {
-                return false;
-            }
-        }
-        
-        let fully_filled = {
-            let port = self.portfolio.lock().await;
-            let mut fully_filled = true;
-            for pos in &port.positions {
-                let prev_qty = prev.position_qty_for(&pos.symbol);
-                if pos.quantity != prev_qty {
-                    fully_filled = false;
-                    break;
-                }
-            }
-            if fully_filled {
-                for pos in &prev.positions {
-                    let port_qty = port.position_qty_for(&pos.symbol);
-                    if pos.quantity != port_qty {
-                        fully_filled = false;
-                        break;
-                    }
-                }
-            }
-            fully_filled
-        };
-        
-        if fully_filled {
-            let prev_port = self.previous_portfolio.take().unwrap();
-            {
-                let mut port = self.portfolio.lock().await;
-                port.positions = prev_port.positions;
-                port.cash = prev_port.cash;
-                port.trades = prev_port.trades;
-            }
-            self.last_update_ts = None;
-            self.snapshot_trade_count = None;
-            self.cancelled_at = None;
-            
-            let has_positions = !self.portfolio.lock().await.positions.is_empty();
-            if has_positions {
-                self.state = StrategyState::Working;
-                self.has_traded_today = true;
-            } else {
-                self.state = StrategyState::Idle;
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    pub async fn revert_optimistic_update(&mut self) {
-        if let Some(prev) = self.previous_portfolio.take() {
-            *self.portfolio.lock().await = prev;
-            self.last_update_ts = None;
-            self.snapshot_trade_count = None;
-            self.cancelled_at = None;
-            let has_positions = !self.portfolio.lock().await.positions.is_empty();
-            if has_positions {
-                self.state = StrategyState::Working;
-            } else {
-                self.state = StrategyState::Idle;
-            }
-        }
-    }
-
-    pub async fn finalize_partial_fill(&mut self) {
-        // Identical to revert_optimistic_update: commits whatever fills landed in
-        // previous_portfolio and transitions state accordingly.
-        self.revert_optimistic_update().await;
     }
 }
 
@@ -1223,6 +1135,7 @@ pub struct StrategySupervisor {
     pub execution_queue: Arc<tokio::sync::Mutex<Vec<DeferredChunk>>>,
     pub fast_sync_tx: tokio::sync::mpsc::Sender<bool>,
     pub fast_sync_rx: Mutex<Option<tokio::sync::mpsc::Receiver<bool>>>,
+    pub last_dismissed_at: tokio::sync::Mutex<Option<std::time::Instant>>,
 }
 
 /// Split gap legs into close (reducing/exiting existing broker positions) and open (new positions).
@@ -1358,6 +1271,7 @@ impl StrategySupervisor {
             execution_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             fast_sync_tx,
             fast_sync_rx: Mutex::new(Some(fast_sync_rx)),
+            last_dismissed_at: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -1509,9 +1423,6 @@ impl StrategySupervisor {
                 *s.portfolio.lock().await = crate::portfolio::Portfolio::new();
                 s.has_traded_today = false;
                 s.state = StrategyState::Idle;
-                s.previous_portfolio = None;
-                s.snapshot_trade_count = None;
-                s.cancelled_at = None;
             }
             *self.live_portfolio.lock().await = crate::portfolio::Portfolio::new();
             *self.session_history.lock().await = std::collections::VecDeque::new();
@@ -1876,139 +1787,15 @@ impl StrategySupervisor {
             port.update_pricing(&self.grid);
         }
 
+        if let Some(dismissed_time) = *self.last_dismissed_at.lock().await {
+            if dismissed_time.elapsed() < Duration::from_secs(10) {
+                return Ok(());
+            }
+        }
+
         let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
         if !enabled {
             return Ok(());
-        }
-
-        // 1. Internal Netting math
-        let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
-        {
-            let mut strats = self.sub_strategies.lock().await;
-
-            // Gather all symbols that sub-strategies want to trade
-            let mut desired_changes: HashMap<String, Vec<(String, i32, chrono::DateTime<chrono_tz::Tz>)>> = HashMap::new();
-
-            for (sid, s) in strats.iter() {
-                if let Some(prev) = &s.previous_portfolio {
-                    let port = s.portfolio.lock().await;
-                    let mut symbols = std::collections::HashSet::new();
-                    for pos in &port.positions { symbols.insert(pos.symbol.clone()); }
-                    for pos in &prev.positions { symbols.insert(pos.symbol.clone()); }
-
-                    for sym in symbols {
-                        let target_qty = port.position_qty_for(&sym);
-                        let current_qty = prev.position_qty_for(&sym);
-                        let diff = target_qty - current_qty;
-                        if diff != 0 {
-                            desired_changes.entry(sym)
-                                .or_default()
-                                .push((sid.clone(), diff, s.last_update_ts.unwrap_or(now_ct)));
-                        }
-                    }
-                }
-            }
-
-            for (symbol, mut changes) in desired_changes {
-                let mut buys: Vec<(String, i32, chrono::DateTime<chrono_tz::Tz>)> = changes.iter().filter(|&&(_, diff, _)| diff > 0).cloned().collect();
-                let mut sells: Vec<(String, i32, chrono::DateTime<chrono_tz::Tz>)> = changes.iter().filter(|&&(_, diff, _)| diff < 0).cloned().collect();
-
-                buys.sort_by_key(|&(_, _, ts)| ts);
-                sells.sort_by_key(|&(_, _, ts)| ts);
-
-                let mut buy_idx = 0;
-                let mut sell_idx = 0;
-
-                while buy_idx < buys.len() && sell_idx < sells.len() {
-                    let (b_sid, mut b_diff, b_ts) = buys[buy_idx].clone();
-                    let (s_sid, mut s_diff, s_ts) = sells[sell_idx].clone();
-                    let s_diff_abs = -s_diff;
-
-                    let match_qty = b_diff.min(s_diff_abs);
-
-                    let mut mid_price = 0.0;
-                    let mut strike = 0.0;
-                    let mut side = "CALL".to_string();
-                    if let Some(parsed) = parse_occ_symbol(&symbol) {
-                        strike = parsed.strike;
-                        side = parsed.side;
-                        if let Some(quote) = self.grid.quotes.get(&OrderedFloat(strike)) {
-                            let leg_quote = if side == "CALL" { &quote.call } else { &quote.put };
-                            if let Some(lq) = leg_quote {
-                                mid_price = lq.mid;
-                            }
-                        }
-                    }
-
-                    info!("🤝 Internal netting match: {} (wants +{}) and {} (wants {}) net {} contracts of {} at ${:.2}",
-                          b_sid, b_diff, s_sid, s_diff, match_qty, symbol, mid_price);
-
-                    if let Some(b_strat) = strats.get_mut(&b_sid) {
-                        if let Some(ref mut prev_port) = b_strat.previous_portfolio {
-                            let fill_trade = Trade {
-                                timestamp: now_ct.to_rfc3339(),
-                                legs: vec![OptionLeg {
-                                    symbol: symbol.clone(),
-                                    strike,
-                                    side: side.clone(),
-                                    quantity: match_qty,
-                                    delta: 0.0,
-                                    theta: 0.0,
-                                    price: mid_price,
-                                    instruction: None,
-                                }],
-                                credit: -(match_qty as f64) * mid_price * 100.0,
-                                commission: 0.0,
-                                purpose: "INTERNAL_NETTING".to_string(),
-                                strategy_id: b_sid.clone(),
-                            };
-                            prev_port.add_trade(&fill_trade, Some(vec![mid_price]));
-                        }
-                    }
-
-                    if let Some(s_strat) = strats.get_mut(&s_sid) {
-                        if let Some(ref mut prev_port) = s_strat.previous_portfolio {
-                            let fill_trade = Trade {
-                                timestamp: now_ct.to_rfc3339(),
-                                legs: vec![OptionLeg {
-                                    symbol: symbol.clone(),
-                                    strike,
-                                    side: side.clone(),
-                                    quantity: -match_qty,
-                                    delta: 0.0,
-                                    theta: 0.0,
-                                    price: mid_price,
-                                    instruction: None,
-                                }],
-                                credit: (match_qty as f64) * mid_price * 100.0,
-                                commission: 0.0,
-                                purpose: "INTERNAL_NETTING".to_string(),
-                                strategy_id: s_sid.clone(),
-                            };
-                            prev_port.add_trade(&fill_trade, Some(vec![mid_price]));
-                        }
-                    }
-
-                    buys[buy_idx].1 -= match_qty;
-                    sells[sell_idx].1 += match_qty;
-
-                    if buys[buy_idx].1 == 0 { buy_idx += 1; }
-                    if sells[sell_idx].1 == 0 { sell_idx += 1; }
-                }
-            }
-
-            for s in strats.values_mut() {
-                if s.previous_portfolio.is_some() {
-                    if let Some(cancelled_time) = s.cancelled_at {
-                        if cancelled_time.elapsed() >= std::time::Duration::from_secs(5) {
-                            s.cancelled_at = None;
-                            s.finalize_partial_fill().await;
-                            continue;
-                        }
-                    }
-                    s.check_and_finalize_fill().await;
-                }
-            }
         }
 
         let combined = self.get_simulated_combined_portfolio().await;
@@ -2147,22 +1934,7 @@ impl StrategySupervisor {
         Ok(())
     }
 
-    /// Process sub-strategy optimistic updates and pending fill finalizations.
-    pub async fn process_pending_finalizations(&self) {
-        let mut strats = self.sub_strategies.lock().await;
-        for s in strats.values_mut() {
-            if s.previous_portfolio.is_some() {
-                if let Some(cancelled_time) = s.cancelled_at {
-                    if cancelled_time.elapsed() >= std::time::Duration::from_secs(5) {
-                        s.cancelled_at = None;
-                        s.finalize_partial_fill().await;
-                        continue;
-                    }
-                }
-                s.check_and_finalize_fill().await;
-            }
-        }
-    }
+
 
     /// Execute a single strategy check tick.
     pub async fn tick(&self) -> Result<()> {
@@ -2263,23 +2035,10 @@ impl StrategySupervisor {
                 if let Some(trade) = check_entry(&self.grid, s, now_ct, self.config.max_spread_diff, self.config.commission_per_contract) {
                     info!("🎯 Entry signal triggered for {}! Net credit: ${:.2}. Executing...", sid, trade.credit);
 
-                    if s.previous_portfolio.is_some() {
-                        info!("Skipping entry re-firing for {} because a prior optimistic update is still unconfirmed.", sid);
-                        continue;
-                    }
-
-                    let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed) || self.config.dry_run;
-                    if enabled {
-                        s.previous_portfolio = Some((*s.portfolio.lock().await).clone());
-                        s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
-                        s.last_update_ts = Some(now_ct);
-                        s.state = StrategyState::EnteringSpread;
-                    } else {
-                        s.state = StrategyState::Working;
-                    }
-
+                    s.state = StrategyState::Working;
+                    s.has_traded_today = true;
                     s.portfolio.lock().await.add_trade(&trade, None);
-                    info!("Updated sim portfolio for entry of {} (Live trading enabled: {})", sid, enabled);
+                    info!("Updated sim portfolio for entry of {}", sid);
                     continue;
                 }
             } else if s.state == StrategyState::Working {
@@ -2292,24 +2051,11 @@ impl StrategySupervisor {
                         let spx = self.grid.get_underlying_price();
 
                         if let Some(exit_trade) = check_exit(&self.grid, &*s_port, now_ct, &s.sid, self.config.commission_per_contract, spx) {
-                            if s.previous_portfolio.is_some() {
-                                info!("Skipping exit re-firing for {} because a prior optimistic update is still unconfirmed.", sid);
-                                continue;
-                            }
-
-                            let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed) || self.config.dry_run;
-                            if enabled {
-                                s.previous_portfolio = Some((*s_port).clone());
-                                s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
-                                s.last_update_ts = Some(now_ct);
-                                s.state = StrategyState::Exiting;
-                            } else {
-                                s.state = StrategyState::Idle;
-                                s.has_traded_today = true;
-                            }
+                            s.state = StrategyState::Idle;
+                            s.has_traded_today = true;
 
                             s_port.add_trade(&exit_trade, None);
-                            info!("Updated sim portfolio for exit of {} (Live trading enabled: {})", sid, enabled);
+                            info!("Updated sim portfolio for exit of {}", sid);
                             continue;
                         }
                     }
@@ -2318,28 +2064,15 @@ impl StrategySupervisor {
                     let rebal_trades = check_rebalance(&self.grid, s, &*s_port, now_ct, start_time, end_time, &self.config);
 
                     if !rebal_trades.is_empty() {
-                        if s.previous_portfolio.is_some() {
-                            info!("Skipping rebalance re-firing for {} because a prior optimistic update is still unconfirmed.", sid);
-                            continue;
-                        }
-
-                        let enabled = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed) || self.config.dry_run;
-                        if enabled {
-                            s.previous_portfolio = Some((*s_port).clone());
-                            s.snapshot_trade_count = Some(s.previous_portfolio.as_ref().unwrap().trades.len());
-                            s.last_update_ts = Some(now_ct);
-                        }
-
                         for trade in rebal_trades {
                             s_port.add_trade(&trade, None);
                         }
-                        info!("Updated sim portfolio for rebalance of {} (Live trading enabled: {})", sid, enabled);
+                        info!("Updated sim portfolio for rebalance of {}", sid);
                     }
                 }
             }
         }
         drop(strats);
-        self.process_pending_finalizations().await;
 
         // Keep live_portfolio position prices in sync with sub-strategy portfolios.
         // Sub-strategies call update_pricing() above; without this, live_portfolio.gross_pnl()
@@ -2354,112 +2087,6 @@ impl StrategySupervisor {
         info!("💼 Strategy Supervisor processing event: Order ID = {}, Type = {}, Status = {}, Legs count = {}",
             event.order_id, event.message_type, event.status, event.legs.len());
 
-        let mut strats = self.sub_strategies.lock().await;
-
-        if event.status == "Cancelled" || event.status == "Rejected" {
-            warn!("⚠️ Order {} was cancelled/rejected. Finalizing partial fills or reverting.", event.order_id);
-            if event.legs.is_empty() {
-                // No leg data (e.g. OrderUROutCompleted) — cannot determine which strategies
-                // are affected. Skip to avoid reverting unrelated optimistic updates.
-                // The paired ExecutionCreated event (which does carry legs) already handled any
-                // needed revert for this order.
-            } else {
-                let cancelled_symbols: std::collections::HashSet<&str> =
-                    event.legs.iter().map(|l| l.symbol.as_str()).collect();
-                for s in strats.values_mut() {
-                    if let Some(ref prev) = s.previous_portfolio {
-                        let port = s.portfolio.lock().await;
-                        let affects_this_strategy = cancelled_symbols.iter().any(|sym| {
-                            port.position_qty_for(sym) != prev.position_qty_for(sym)
-                        });
-                        drop(port);
-                        if affects_this_strategy {
-                            s.cancelled_at = Some(std::time::Instant::now());
-                        }
-                    }
-                }
-            }
-        } else if event.status == "Filled" || event.message_type == "ExecutionCreated" {
-            let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
-            for leg in &event.legs {
-                let symbol = &leg.symbol;
-                let is_buy = leg.buy_sell.to_lowercase().contains("buy");
-                let sign = if is_buy { 1 } else { -1 };
-                let mut remaining_fill = leg.quantity as i32;
-
-                // Find all strats waiting for fills in this direction
-                let mut waiting = Vec::new();
-                for (sid, s) in strats.iter() {
-                    if let Some(prev) = &s.previous_portfolio {
-                        let port = s.portfolio.lock().await;
-                        let target_qty = port.position_qty_for(symbol);
-                        let current_qty = prev.position_qty_for(symbol);
-                        let diff = target_qty - current_qty;
-                        if diff != 0 && (diff > 0) == is_buy {
-                            waiting.push((sid.clone(), diff.abs(), s.last_update_ts.unwrap_or(now_ct)));
-                        }
-                    }
-                }
-
-                // Sort FIFO
-                waiting.sort_by_key(|&(_, _, ts)| ts);
-
-                for (sid, needed_qty, _) in waiting {
-                    if remaining_fill <= 0 {
-                        break;
-                    }
-                    let alloc = needed_qty.min(remaining_fill);
-                    let alloc_qty = alloc * sign;
-
-                    if let Some(s) = strats.get_mut(&sid) {
-                        if let Some(ref mut prev_port) = s.previous_portfolio {
-                            let mut strike = 0.0;
-                            let mut side = "CALL".to_string();
-                            let mut mid_price = 0.0;
-                            if let Some(parsed) = parse_occ_symbol(symbol) {
-                                strike = parsed.strike;
-                                side = parsed.side;
-                                if let Some(quote) = self.grid.quotes.get(&OrderedFloat(strike)) {
-                                    let leg_quote = if side == "CALL" { &quote.call } else { &quote.put };
-                                    if let Some(lq) = leg_quote {
-                                        mid_price = lq.mid;
-                                    }
-                                }
-                            }
-
-                            let fill_price = leg.price.filter(|&p| p > 0.0).unwrap_or(mid_price);
-                            let commission = self.config.commission_per_contract * alloc_qty.abs() as f64;
-                            let fill_trade = Trade {
-                                timestamp: now_ct.to_rfc3339(),
-                                legs: vec![OptionLeg {
-                                    symbol: symbol.clone(),
-                                    strike,
-                                    side: side.clone(),
-                                    quantity: alloc_qty,
-                                    delta: 0.0,
-                                    theta: 0.0,
-                                    price: fill_price,
-                                    instruction: None,
-                                }],
-                                credit: -(alloc_qty as f64) * fill_price * 100.0,
-                                commission,
-                                purpose: "BROKER_FILL".to_string(),
-                                strategy_id: sid.clone(),
-                            };
-                            prev_port.add_trade(&fill_trade, Some(vec![fill_price]));
-                        }
-                    }
-                    remaining_fill -= alloc;
-                }
-            }
-
-            for s in strats.values_mut() {
-                if s.previous_portfolio.is_some() {
-                    s.check_and_finalize_fill().await;
-                }
-            }
-        }
-        
         // Handle execution_queue updates
         let mut chunks_to_submit = Vec::new();
         if event.status == "Filled" {
@@ -2485,9 +2112,6 @@ impl StrategySupervisor {
                 }
             }
         }
-
-        // Drop the strats lock before making async REST calls to prevent blocking
-        drop(strats);
 
         // Submit any deferred chunks that have been freed
         if !chunks_to_submit.is_empty() {
@@ -2600,69 +2224,6 @@ impl StrategySupervisor {
                 ).await;
 
                 if is_dry_run {
-                    let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
-                    let mut strats = self.sub_strategies.lock().await;
-                    for leg in &adjusted_trade.legs {
-                        let symbol = &leg.symbol;
-                        let is_buy = leg.quantity > 0;
-                        let sign = if is_buy { 1 } else { -1 };
-                        let mut remaining_fill = leg.quantity.abs();
-
-                        let mut waiting = Vec::new();
-                        for (sid, s) in strats.iter() {
-                            if let Some(prev) = &s.previous_portfolio {
-                                let port = s.portfolio.lock().await;
-                                let target_qty = port.position_qty_for(symbol);
-                                let current_qty = prev.position_qty_for(symbol);
-                                let diff = target_qty - current_qty;
-                                if diff != 0 && (diff > 0) == is_buy {
-                                    waiting.push((sid.clone(), diff.abs(), s.last_update_ts.unwrap_or(now_ct)));
-                                }
-                            }
-                        }
-
-                        waiting.sort_by_key(|&(_, _, ts)| ts);
-
-                        for (sid, needed_qty, _) in waiting {
-                            if remaining_fill <= 0 {
-                                break;
-                            }
-                            let alloc = needed_qty.min(remaining_fill);
-                            let alloc_qty = alloc * sign;
-
-                            if let Some(s) = strats.get_mut(&sid) {
-                                if let Some(ref mut prev_port) = s.previous_portfolio {
-                                    let fill_trade = Trade {
-                                        timestamp: now_ct.to_rfc3339(),
-                                        legs: vec![OptionLeg {
-                                            symbol: symbol.clone(),
-                                            strike: leg.strike,
-                                            side: leg.side.clone(),
-                                            quantity: alloc_qty,
-                                            delta: leg.delta,
-                                            theta: leg.theta,
-                                            price: leg.price,
-                                            instruction: None,
-                                        }],
-                                        credit: -(alloc_qty as f64) * leg.price * 100.0,
-                                        commission: 0.0,
-                                        purpose: "DRY_RUN_FILL".to_string(),
-                                        strategy_id: sid.clone(),
-                                    };
-                                    prev_port.add_trade(&fill_trade, Some(vec![leg.price]));
-                                }
-                            }
-                            remaining_fill -= alloc;
-                        }
-                    }
-
-                    for s in strats.values_mut() {
-                        if s.previous_portfolio.is_some() {
-                            s.check_and_finalize_fill().await;
-                        }
-                    }
-
-                    drop(strats);
                     let combined = self.get_simulated_combined_portfolio().await;
                     {
                         let mut live_port = self.live_portfolio.lock().await;
@@ -2722,18 +2283,15 @@ impl StrategySupervisor {
     }
 
     pub async fn dismiss_trade(&self, strat_id: &str) {
-        let _ = self.pending_trade.lock().await.take();
-        let mut strats = self.sub_strategies.lock().await;
         if strat_id == "GAP_RECON" {
-            for s in strats.values_mut() {
-                if s.previous_portfolio.is_some() {
-                    s.revert_optimistic_update().await;
-                }
+            let mut pending = self.pending_trade.lock().await;
+            if pending.is_some() {
+                *pending = None;
+                *self.last_dismissed_at.lock().await = Some(std::time::Instant::now());
+                info!("Manual GAP_RECON trade dismissal received. Suppressing popups for 10 seconds.");
             }
-        } else if let Some(s) = strats.get_mut(strat_id) {
-            if s.previous_portfolio.is_some() {
-                s.revert_optimistic_update().await;
-            }
+        } else {
+            let _ = self.pending_trade.lock().await.take();
         }
     }
 
@@ -2835,7 +2393,6 @@ impl StrategySupervisor {
                                 }
                             }
                             info!("🔄 Fast-synced filled trades into broker portfolio (cleared and rebuilt to avoid duplicates)");
-                            self.apply_broker_fills_to_strategies(&trades).await;
                         }
                         Err(e) => warn!("Failed to fast-sync filled trades: {:?}", e),
                     }
@@ -2844,122 +2401,5 @@ impl StrategySupervisor {
         }
     }
 
-    pub async fn apply_broker_fills_to_strategies(&self, trades: &[Trade]) {
-        let mut strats = self.sub_strategies.lock().await;
-        let now_ct = Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc());
 
-        for trade in trades {
-            // Check if this trade (order ID) has already been applied to any sub-strategy
-            let mut already_applied = false;
-            for s in strats.values() {
-                let port = s.portfolio.lock().await;
-                if port.trades.iter().any(|t| t.strategy_id == trade.strategy_id) {
-                    already_applied = true;
-                    break;
-                }
-                if let Some(prev) = &s.previous_portfolio {
-                    if prev.trades.iter().any(|t| t.strategy_id == trade.strategy_id) {
-                        already_applied = true;
-                        break;
-                    }
-                }
-            }
-
-            if already_applied {
-                continue;
-            }
-
-            // Accumulate allocated legs and their fill prices per sub-strategy for this broker trade
-            let mut allocated_by_strat: std::collections::HashMap<String, (Vec<OptionLeg>, Vec<f64>)> = std::collections::HashMap::new();
-
-            // Distribute this trade's legs to waiting strategies
-            for leg in &trade.legs {
-                let symbol = &leg.symbol;
-                let is_buy = leg.quantity > 0;
-                let sign = if is_buy { 1 } else { -1 };
-                let mut remaining_fill = leg.quantity.abs();
-
-                let mut mid_price = 0.0;
-                let mut delta = 0.0;
-                let mut theta = 0.0;
-                if let Some(quote) = self.grid.quotes.get(&OrderedFloat(leg.strike)) {
-                    let leg_quote = if leg.side == "CALL" { &quote.call } else { &quote.put };
-                    if let Some(lq) = leg_quote {
-                        mid_price = lq.mid;
-                        delta = lq.delta;
-                        theta = lq.theta;
-                    }
-                }
-                if mid_price == 0.0 {
-                    mid_price = 0.05;
-                }
-
-                let mut waiting = Vec::new();
-                for (sid, s) in strats.iter() {
-                    if let Some(prev) = &s.previous_portfolio {
-                        let port = s.portfolio.lock().await;
-                        let target_qty = port.position_qty_for(symbol);
-                        let current_qty = prev.position_qty_for(symbol);
-                        let diff = target_qty - current_qty;
-                        if diff != 0 && (diff > 0) == is_buy {
-                            waiting.push((sid.clone(), diff.abs(), s.last_update_ts.unwrap_or(now_ct)));
-                        }
-                    }
-                }
-
-                waiting.sort_by_key(|&(_, _, ts)| ts);
-
-                for (sid, needed_qty, _) in waiting {
-                    if remaining_fill <= 0 {
-                        break;
-                    }
-                    let alloc = needed_qty.min(remaining_fill);
-                    let alloc_qty = alloc * sign;
-
-                    let fill_price = if leg.price > 0.0 { leg.price } else { mid_price };
-                    let entry = allocated_by_strat.entry(sid).or_default();
-                    entry.0.push(OptionLeg {
-                        symbol: symbol.clone(),
-                        strike: leg.strike,
-                        side: leg.side.clone(),
-                        quantity: alloc_qty,
-                        delta,
-                        theta,
-                        price: fill_price,
-                        instruction: leg.instruction.clone(),
-                    });
-                    entry.1.push(fill_price);
-
-                    remaining_fill -= alloc;
-                }
-            }
-
-            // Apply aggregated trade fills to each sub-strategy's previous_portfolio
-            for (sid, (legs, fill_prices)) in allocated_by_strat {
-                if let Some(s) = strats.get_mut(&sid) {
-                    if let Some(ref mut prev_port) = s.previous_portfolio {
-                        let total_alloc_qty: i32 = legs.iter().map(|l| l.quantity.abs()).sum();
-                        let commission = self.config.commission_per_contract * total_alloc_qty as f64;
-                        let credit = legs.iter().map(|l| -(l.quantity as f64) * l.price).sum::<f64>() * 100.0;
-                        let fill_trade = Trade {
-                            timestamp: trade.timestamp.clone(),
-                            legs,
-                            credit,
-                            commission,
-                            purpose: "BROKER_FILL".to_string(),
-                            strategy_id: trade.strategy_id.clone(),
-                        };
-                        prev_port.add_trade(&fill_trade, Some(fill_prices));
-                    }
-                }
-            }
-        }
-
-        // Finalize any sub-strategies that are now fully filled
-        for s in strats.values_mut() {
-            if s.previous_portfolio.is_some() {
-                s.check_and_finalize_fill().await;
-            }
-        }
-    }
 }
