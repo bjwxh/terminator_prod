@@ -2556,6 +2556,9 @@ impl StrategySupervisor {
                                 }
                             }
                             info!("🔄 Fast-synced filled trades into broker portfolio (cleared and rebuilt to avoid duplicates)");
+                            info!("⚡ Triggering immediate reconciliation pass following filled trades sync.");
+                            self.force_reconciliation.store(true, std::sync::atomic::Ordering::Relaxed);
+                            let _ = self.reconcile_tx.try_send(());
                         }
                         Err(e) => warn!("Failed to fast-sync filled trades: {:?}", e),
                     }
