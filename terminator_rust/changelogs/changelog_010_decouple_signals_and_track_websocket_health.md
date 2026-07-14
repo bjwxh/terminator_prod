@@ -24,3 +24,8 @@
 ### 5. Schwab Timestamp Parsing Fix
 - Implemented `parse_schwab_timestamp` helper to gracefully handle Schwab ISO8601 timestamps that have missing colons in their timezone offset (e.g. `+0000`).
 - Updated the soft bootstrap matching loops in `bootstrap_from_history` to use this helper, resolving a bug where live trades were silently skipped during bootstrap.
+
+### 6. Concurrent Bootstrap Race Condition Fix
+- Added `bootstrap_complete` atomic boolean flag to `StrategySupervisor`.
+- Gated the `evaluate_signals` ticker to exit early if bootstrap is still active (`!bootstrap_complete`). This prevents the fast background ticker task from racing with and preempting the bootstrap snapshot replay (which previously caused sub-strategies to prematurely transition to missed/skipped states during replay).
+- Updated remaining Schwab timestamp parsing calls in `bootstrap_from_history` to use `parse_schwab_timestamp` helper.

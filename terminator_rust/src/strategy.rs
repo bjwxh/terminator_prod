@@ -1139,6 +1139,7 @@ pub struct StrategySupervisor {
     pub ws_client: Option<Arc<crate::websocket::WebsocketClient>>,
     pub last_reconciled_at: tokio::sync::Mutex<Option<std::time::Instant>>,
     pub last_stream_healthy: std::sync::atomic::AtomicBool,
+    pub bootstrap_complete: std::sync::atomic::AtomicBool,
 }
 
 /// Split gap legs into close (reducing/exiting existing broker positions) and open (new positions).
@@ -1279,6 +1280,7 @@ impl StrategySupervisor {
             ws_client,
             last_reconciled_at: tokio::sync::Mutex::new(None),
             last_stream_healthy: std::sync::atomic::AtomicBool::new(true),
+            bootstrap_complete: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1591,7 +1593,7 @@ impl StrategySupervisor {
                             
                             // Inject trades that happened BEFORE this snapshot into historical_broker_port
                             for t in &live_trades {
-                                if let Ok(t_ts) = chrono::DateTime::parse_from_rfc3339(&t.timestamp) {
+                                if let Some(t_ts) = Self::parse_schwab_timestamp(&t.timestamp) {
                                     if t_ts.with_timezone(&tz) <= snap_ct {
                                         // Ensure we don't add the same trade twice (by checking strategy_id/order_id or just relying on a robust check).
                                         // Wait, the easiest way is to re-evaluate what trades were filled before `snap_ct` and build the portfolio from scratch.
@@ -1603,7 +1605,7 @@ impl StrategySupervisor {
                             historical_broker_port.cash = 0.0;
                             historical_broker_port.trades.clear();
                             for t in &live_trades {
-                                if let Ok(t_ts) = chrono::DateTime::parse_from_rfc3339(&t.timestamp) {
+                                if let Some(t_ts) = Self::parse_schwab_timestamp(&t.timestamp) {
                                     if t_ts.with_timezone(&tz) <= snap_ct {
                                         historical_broker_port.add_trade(t, None);
                                     }
@@ -1637,6 +1639,7 @@ impl StrategySupervisor {
             }
         }
         
+        self.bootstrap_complete.store(true, std::sync::atomic::Ordering::Relaxed);
         info!("Bootstrap complete. Transitioning to live ticking.");
     }
 
@@ -2088,6 +2091,9 @@ impl StrategySupervisor {
 
     /// Extract entry/exit/rebalance block from tick() for decoupled signal checking.
     pub async fn evaluate_signals(&self) {
+        if std::env::var("TERMINATOR_TEST_ENV").is_err() && !self.bootstrap_complete.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let now_ct = if std::env::var("TERMINATOR_TEST_ENV").is_ok() {
             Chicago.with_ymd_and_hms(2026, 5, 22, 9, 0, 0).unwrap()
         } else {
