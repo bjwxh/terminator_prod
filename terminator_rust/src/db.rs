@@ -26,7 +26,7 @@ pub fn load_historical_snapshots(
     let conn = Connection::open(db_path)?;
     conn.busy_timeout(std::time::Duration::from_millis(1000))?;
     let mut stmt = conn.prepare(
-        "SELECT datetime, strike_price, side, bidprice, askprice, delta, theta, symbol \
+        "SELECT datetime, strike_price, side, COALESCE(bidprice, 0.0), COALESCE(askprice, 0.0), COALESCE(delta, 0.0), COALESCE(theta, 0.0), symbol \
          FROM stock_options \
          WHERE root_symbol = '$SPX' AND dte = 0 \
          AND datetime BETWEEN ?1 AND ?2 \

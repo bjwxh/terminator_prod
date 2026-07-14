@@ -1379,3 +1379,77 @@ fn test_case_study_vertical_spread_recon_split() {
     check_open(7295.0, "PUT",  -1);
     check_open(7305.0, "PUT",  -2);
 }
+
+#[tokio::test]
+async fn test_immediate_reconciliation_trigger() {
+    use std::sync::Arc;
+    use std::collections::HashMap;
+    use chrono::NaiveTime;
+    use ordered_float::OrderedFloat;
+    use terminator_rust::strategy::{StrategySupervisor, StrategyState, SubStrategy};
+
+    let temp_token_path = std::env::temp_dir().join("test_token_immediate.json");
+    let _ = std::fs::write(&temp_token_path, r#"{"creation_timestamp":1716300000,"token":{"expires_in":1800,"token_type":"Bearer","scope":"readonly","refresh_token":"dummy","access_token":"dummy","id_token":"dummy","expires_at":1800000000000}}"#);
+
+    let config = AppConfig {
+        schwab_token_path: temp_token_path.clone(),
+        schwab_account: "mock_hash".to_string(),
+        schwab_api_key: "key".to_string(),
+        schwab_api_secret: "secret".to_string(),
+        schwab_callback_url: "http://localhost".to_string(),
+        dry_run: true,
+        max_spread_diff: 50.0,
+        ..Default::default()
+    };
+    let tm = Arc::new(TokenManager::new(config.clone()).unwrap());
+    let client = Arc::new(ExecutionClient::new(tm));
+
+    // Let's set up the grid with option symbols and prices
+    let mut symbol_map = HashMap::new();
+    symbol_map.insert(StrikeAndSide { strike: OrderedFloat(5310.0), is_call: true }, "SPXW  260522C05310000".to_string());
+    symbol_map.insert(StrikeAndSide { strike: OrderedFloat(5320.0), is_call: true }, "SPXW  260522C05320000".to_string());
+    symbol_map.insert(StrikeAndSide { strike: OrderedFloat(5290.0), is_call: false }, "SPXW  260522P05290000".to_string());
+    symbol_map.insert(StrikeAndSide { strike: OrderedFloat(5280.0), is_call: false }, "SPXW  260522P05280000".to_string());
+
+    let grid = Arc::new(OptionsGrid::new(symbol_map));
+    grid.set_underlying_price(5300.0);
+    grid.update_option("SPXW  260522C05310000", Some(3.40), Some(3.60), None, 5300.0);
+    grid.update_option("SPXW  260522C05320000", Some(0.50), Some(0.70), None, 5300.0);
+    grid.update_option("SPXW  260522P05290000", Some(3.40), Some(3.60), None, 5300.0);
+    grid.update_option("SPXW  260522P05280000", Some(0.50), Some(0.70), None, 5300.0);
+
+    let supervisor = StrategySupervisor::new(config, client, grid, None);
+
+    // Extract reconcile_rx from supervisor so we can read from it
+    let mut reconcile_rx = {
+        let mut opt: tokio::sync::MutexGuard<'_, Option<tokio::sync::mpsc::Receiver<()>>> = supervisor.reconcile_rx.lock().await;
+        opt.take().expect("reconcile_rx already taken")
+    };
+
+    unsafe {
+        std::env::set_var("TERMINATOR_TEST_ENV", "1");
+        std::env::set_var("TERMINATOR_TEST_T", "0.005");
+    }
+
+    // Set one sub-strategy's trade_start_time to 09:00:00 (matching the test env time 09:00:00)
+    {
+        let mut strats: tokio::sync::MutexGuard<'_, HashMap<String, SubStrategy>> = supervisor.sub_strategies.lock().await;
+        let s = strats.get_mut("strat_0911").unwrap();
+        s.trade_start_time = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+    }
+
+    // Verify force_reconciliation is false and reconcile_rx has nothing yet
+    assert!(!supervisor.force_reconciliation.load(std::sync::atomic::Ordering::Relaxed));
+
+    // Run evaluate_signals - this should trigger the entry trade!
+    supervisor.evaluate_signals().await;
+
+    // Verify force_reconciliation is true
+    assert!(supervisor.force_reconciliation.load(std::sync::atomic::Ordering::Relaxed));
+
+    // Verify a signal is waiting in reconcile_rx
+    assert!(reconcile_rx.try_recv().is_ok());
+
+    let _ = std::fs::remove_file(temp_token_path);
+}
+

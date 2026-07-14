@@ -29,3 +29,12 @@
 - Added `bootstrap_complete` atomic boolean flag to `StrategySupervisor`.
 - Gated the `evaluate_signals` ticker to exit early if bootstrap is still active (`!bootstrap_complete`). This prevents the fast background ticker task from racing with and preempting the bootstrap snapshot replay (which previously caused sub-strategies to prematurely transition to missed/skipped states during replay).
 - Updated remaining Schwab timestamp parsing calls in `bootstrap_from_history` to use `parse_schwab_timestamp` helper.
+
+### 7. Immediate Trade Reconciliation & Delayed Email Alerts
+- **Immediate Signaling & Cooldown**: Added MPSC channel signaling (`reconcile_tx` / `reconcile_rx`) and an atomic `force_reconciliation` flag to `StrategySupervisor`.
+- **Supervisor Wakeup**: Modified the 5-second sleep in `run_supervisor_loop()` to wait on both the sleep timer and `reconcile_rx` using `tokio::select!`. This wakes up the supervisor loop immediately when a simulated trade is registered in `evaluate_signals()`.
+- **Bypassing the Cooldown**: Configured the healthy-stream branch of `should_reconcile` in `tick()` to intercept and clear the `force_reconciliation` flag, triggering an immediate reconciliation pass and updating `last_reconciled_at` to the current time, which resets the 60-second cooldown timer.
+- **Configurable Email Alert Delay**: Added `email_alert_delay_seconds` configuration parameter to `config.json` and parsed it inside `config.rs`.
+- **Email Alert Suppression**: Updated `check_reconciliation()` to delay spawning the email script by the configured delay duration. After the delay, the task borrows `pending_trade` using `.as_ref()` and compares the pending trade's unique timestamp string against the proposed trade's timestamp. If the user has confirmed or dismissed the trade (clearing the option), the email alert is successfully suppressed.
+- **Unit Testing**: Added the `test_immediate_reconciliation_trigger` integration test to `tests/strategy_tests.rs` to verify the signaling and immediate reconciliation trigger flow.
+

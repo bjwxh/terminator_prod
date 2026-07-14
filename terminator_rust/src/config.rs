@@ -35,6 +35,7 @@ pub struct AppConfig {
     pub otm_offset: f64,
     pub buffer_zone: f64,
     pub web_port: u16,
+    pub email_alert_delay_seconds: u32,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +85,7 @@ struct ConfigJson {
     buffer_zone: f64,
     dry_run: bool,
     web_port: u16,
+    email_alert_delay_seconds: Option<u32>,
 }
 
 impl AppConfig {
@@ -175,6 +177,7 @@ impl AppConfig {
             buffer_zone: config_json.buffer_zone,
             dry_run: config_json.dry_run,
             web_port: config_json.web_port,
+            email_alert_delay_seconds: config_json.email_alert_delay_seconds.unwrap_or(5),
         })
     }
 }
@@ -212,6 +215,7 @@ impl Default for AppConfig {
             otm_offset: 50.0,
             buffer_zone: 10.0,
             web_port: 8080,
+            email_alert_delay_seconds: 5,
         }
     }
 }

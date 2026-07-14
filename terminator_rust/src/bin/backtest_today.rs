@@ -112,8 +112,14 @@ fn main() -> Result<()> {
     let cfg: ConfigJson = serde_json::from_str(&raw).context("Bad config.json")?;
 
     let tz = Chicago;
-    let now_utc = chrono::Utc::now();
-    let now_ct = now_utc.with_timezone(&tz);
+    let now_ct = if let Ok(val) = std::env::var("BACKTEST_END") {
+        chrono::DateTime::parse_from_rfc3339(&val)
+            .expect("Failed to parse BACKTEST_END as RFC3339")
+            .with_timezone(&tz)
+    } else {
+        let now_utc = chrono::Utc::now();
+        now_utc.with_timezone(&tz)
+    };
 
     let date_str = now_ct.format("%Y%m%d").to_string();
     let db_path = cfg.db_path.replace("{date}", &date_str);
@@ -176,6 +182,7 @@ fn main() -> Result<()> {
         otm_offset: cfg.otm_offset,
         buffer_zone: cfg.buffer_zone,
         web_port: cfg.web_port,
+        email_alert_delay_seconds: 5,
     };
 
     println!("================================================================================");

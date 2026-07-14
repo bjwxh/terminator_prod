@@ -1123,7 +1123,7 @@ pub struct StrategySupervisor {
     /// Used to populate the Live panel in the UI.
     pub broker_portfolio: Arc<Mutex<crate::portfolio::Portfolio>>,
     pub working_orders: tokio::sync::Mutex<Vec<serde_json::Value>>,
-    pub pending_trade: tokio::sync::Mutex<Option<PendingTrade>>,
+    pub pending_trade: Arc<tokio::sync::Mutex<Option<PendingTrade>>>,
     pub server_name: String,
     pub status: tokio::sync::Mutex<String>,
     pub broker_connected: std::sync::atomic::AtomicBool,
@@ -1140,6 +1140,9 @@ pub struct StrategySupervisor {
     pub last_reconciled_at: tokio::sync::Mutex<Option<std::time::Instant>>,
     pub last_stream_healthy: std::sync::atomic::AtomicBool,
     pub bootstrap_complete: std::sync::atomic::AtomicBool,
+    pub reconcile_tx: tokio::sync::mpsc::Sender<()>,
+    pub reconcile_rx: Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
+    pub force_reconciliation: std::sync::atomic::AtomicBool,
 }
 
 /// Split gap legs into close (reducing/exiting existing broker positions) and open (new positions).
@@ -1254,6 +1257,7 @@ impl StrategySupervisor {
         }
 
         let (fast_sync_tx, fast_sync_rx) = tokio::sync::mpsc::channel::<bool>(100);
+        let (reconcile_tx, reconcile_rx) = tokio::sync::mpsc::channel::<()>(100);
 
         Self {
             config: config.clone(),
@@ -1264,7 +1268,7 @@ impl StrategySupervisor {
             live_portfolio: Arc::new(Mutex::new(crate::portfolio::Portfolio::new())),
             broker_portfolio: Arc::new(Mutex::new(crate::portfolio::Portfolio::new())),
             working_orders: Mutex::new(Vec::new()),
-            pending_trade: Mutex::new(None),
+            pending_trade: Arc::new(Mutex::new(None)),
             server_name: config.server_name.clone(),
             status: Mutex::new("Initializing".to_string()),
             broker_connected: std::sync::atomic::AtomicBool::new(false),
@@ -1281,6 +1285,9 @@ impl StrategySupervisor {
             last_reconciled_at: tokio::sync::Mutex::new(None),
             last_stream_healthy: std::sync::atomic::AtomicBool::new(true),
             bootstrap_complete: std::sync::atomic::AtomicBool::new(false),
+            reconcile_tx,
+            reconcile_rx: Mutex::new(Some(reconcile_rx)),
+            force_reconciliation: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1383,6 +1390,11 @@ impl StrategySupervisor {
 
         self.bootstrap_from_history(&resolved_hash).await;
 
+        let mut reconcile_rx = {
+            let mut opt = self.reconcile_rx.lock().await;
+            opt.take().expect("reconcile_rx already taken")
+        };
+
         let mut last_working_sync = std::time::Instant::now();
         loop {
             if let Err(e) = self.tick().await {
@@ -1394,7 +1406,12 @@ impl StrategySupervisor {
                 let _ = self.fast_sync_tx.try_send(false);
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = reconcile_rx.recv() => {
+                    info!("Immediate reconciliation signal received.");
+                }
+            }
         }
     }
 
@@ -1935,6 +1952,7 @@ impl StrategySupervisor {
                 return Ok(());
             }
 
+            let proposed_trade_timestamp = trade.timestamp.clone();
             info!("Routing reconciliation trade to pending_trade for confirmation: {:?}", trade);
             *self.pending_trade.lock().await = Some(PendingTrade {
                 strat_id: "GAP_RECON".to_string(),
@@ -1943,25 +1961,48 @@ impl StrategySupervisor {
                 to_cancel,
             });
             
-            // Send email alert via python script
+            // Send email alert via python script (delayed to allow user confirmation/suppression)
             let script_path = if std::path::Path::new("/opt/terminator/send_alert_email.py").exists() {
-                "/opt/terminator/send_alert_email.py"
+                "/opt/terminator/send_alert_email.py".to_string()
             } else if std::path::Path::new("/home/fw/terminator_prod/terminator_rust/send_alert_email.py").exists() {
-                "/home/fw/terminator_prod/terminator_rust/send_alert_email.py"
+                "/home/fw/terminator_prod/terminator_rust/send_alert_email.py".to_string()
             } else if std::path::Path::new("terminator_rust/send_alert_email.py").exists() {
-                "terminator_rust/send_alert_email.py"
+                "terminator_rust/send_alert_email.py".to_string()
             } else {
-                "send_alert_email.py"
+                "send_alert_email.py".to_string()
             };
             let python_bin = if std::path::Path::new("/home/fw/terminator_prod/.venv/bin/python").exists() {
-                "/home/fw/terminator_prod/.venv/bin/python"
+                "/home/fw/terminator_prod/.venv/bin/python".to_string()
             } else {
-                "python3"
+                "python3".to_string()
             };
-            let _ = std::process::Command::new(python_bin)
-                .arg(script_path)
-                .arg("GAP_RECON")
-                .spawn();
+
+            let pending_trade_lock = Arc::clone(&self.pending_trade);
+            let delay_sec = self.config.email_alert_delay_seconds;
+
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(delay_sec as u64)).await;
+
+                // Lock and query pending_trade without consuming it
+                let is_still_pending = {
+                    let pending = pending_trade_lock.lock().await;
+                    if let Some(ref p) = *pending {
+                        p.strat_id == "GAP_RECON" && p.trade.timestamp == proposed_trade_timestamp
+                    } else {
+                        false
+                    }
+                };
+
+                if is_still_pending {
+                    info!("Email alert delay elapsed ({}s). Spawning send_alert_email.py", delay_sec);
+                    let _ = std::process::Command::new(python_bin)
+                        .arg(script_path)
+                        .arg("GAP_RECON")
+                        .spawn();
+                } else {
+                    info!("Reconciliation trade was confirmed/dismissed within {}s. Suppressing email alert.", delay_sec);
+                }
+            });
         }
 
         Ok(())
@@ -2062,9 +2103,13 @@ impl StrategySupervisor {
                 true
             } else {
                 // Stream is healthy: check if 60s elapsed, or if we just transitioned back to healthy (resync)
+                let force = self.force_reconciliation.swap(false, std::sync::atomic::Ordering::Relaxed);
                 let transitioned_back = !was_healthy && is_healthy;
                 if transitioned_back {
                     info!("🟢 Schwab WebSocket stream recovered. Triggering immediate resync pass.");
+                }
+                if force {
+                    info!("Forcing immediate reconciliation pass due to simulated trade signal.");
                 }
 
                 let mut last_rec = self.last_reconciled_at.lock().await;
@@ -2074,7 +2119,7 @@ impl StrategySupervisor {
                         true
                     }
                     Some(last) => {
-                        if transitioned_back || last.elapsed() >= Duration::from_secs(60) {
+                        if transitioned_back || force || last.elapsed() >= Duration::from_secs(60) {
                             *last_rec = Some(std::time::Instant::now());
                             true
                         } else {
@@ -2099,6 +2144,7 @@ impl StrategySupervisor {
         if std::env::var("TERMINATOR_TEST_ENV").is_err() && !self.bootstrap_complete.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
+        let mut triggered_trade = false;
         let now_ct = if std::env::var("TERMINATOR_TEST_ENV").is_ok() {
             Chicago.with_ymd_and_hms(2026, 5, 22, 9, 0, 0).unwrap()
         } else {
@@ -2142,6 +2188,7 @@ impl StrategySupervisor {
                     s.has_traded_today = true;
                     s.portfolio.lock().await.add_trade(&trade, None);
                     info!("Updated sim portfolio for entry of {}", sid);
+                    triggered_trade = true;
                     continue;
                 }
             } else if s.state == StrategyState::Working {
@@ -2159,6 +2206,7 @@ impl StrategySupervisor {
 
                             s_port.add_trade(&exit_trade, None);
                             info!("Updated sim portfolio for exit of {}", sid);
+                            triggered_trade = true;
                             continue;
                         }
                     }
@@ -2171,6 +2219,7 @@ impl StrategySupervisor {
                             s_port.add_trade(&trade, None);
                         }
                         info!("Updated sim portfolio for rebalance of {}", sid);
+                        triggered_trade = true;
                     }
                 }
             }
@@ -2179,6 +2228,12 @@ impl StrategySupervisor {
 
         // Keep live_portfolio position prices in sync with sub-strategy portfolios.
         self.live_portfolio.lock().await.update_pricing(&self.grid);
+
+        if triggered_trade {
+            info!("⚡ Simulated trade registered. Requesting immediate reconciliation pass.");
+            self.force_reconciliation.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = self.reconcile_tx.try_send(());
+        }
     }
 
     /// Spawns a background task running evaluate_signals() every 500ms.
