@@ -2464,8 +2464,14 @@ impl StrategySupervisor {
 
     pub fn toggle_trading_enabled(&self) -> bool {
         let current = self.trading_enabled.load(std::sync::atomic::Ordering::Relaxed);
-        self.trading_enabled.store(!current, std::sync::atomic::Ordering::Relaxed);
-        !current
+        let new_state = !current;
+        self.trading_enabled.store(new_state, std::sync::atomic::Ordering::Relaxed);
+        if new_state {
+            info!("⚡ Live trading enabled. Requesting immediate reconciliation pass.");
+            self.force_reconciliation.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = self.reconcile_tx.try_send(());
+        }
+        new_state
     }
 
     pub async fn run_fast_sync_loop(self: Arc<Self>) {
