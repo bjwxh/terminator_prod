@@ -165,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         app_config.clone(),
         execution_client,
         Arc::clone(&grid),
+        Some(Arc::clone(&ws_client)),
     ));
 
     // 13. Start background Strategy Supervisor / Order Processor task
@@ -180,6 +181,12 @@ async fn main() -> anyhow::Result<()> {
     let supervisor_loop_clone = Arc::clone(&supervisor);
     tokio::spawn(async move {
         supervisor_loop_clone.run_supervisor_loop().await;
+    });
+
+    // 14.1 Spawn supervisor background signal ticker loop
+    let supervisor_signal_clone = Arc::clone(&supervisor);
+    tokio::spawn(async move {
+        supervisor_signal_clone.run_signal_loop().await;
     });
 
     // 14.2. Spawn supervisor background fast sync loop

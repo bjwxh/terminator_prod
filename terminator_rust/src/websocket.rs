@@ -68,6 +68,8 @@ pub struct WebsocketClient {
     active_streamer_info: Arc<Mutex<Option<StreamerInfo>>>,
     // Persistent HTTP client for REST calls
     http_client: reqwest::Client,
+    // Stream liveness tracking
+    last_stream_frame_at: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl WebsocketClient {
@@ -90,12 +92,22 @@ impl WebsocketClient {
             active_cmd_tx: Arc::new(Mutex::new(None)),
             active_streamer_info: Arc::new(Mutex::new(None)),
             http_client,
+            last_stream_frame_at: Arc::new(std::sync::atomic::AtomicI64::new(
+                chrono::Utc::now().timestamp_millis()
+            )),
         }
     }
 
     /// Exposes thread-safe pointer to currently active subscribed symbols list.
     pub fn get_subscribed_symbols(&self) -> Arc<Mutex<HashSet<String>>> {
         Arc::clone(&self.subscribed_symbols)
+    }
+
+    /// Returns true if we received any frame within the last 15 seconds
+    pub fn is_healthy(&self) -> bool {
+        let last_time = self.last_stream_frame_at.load(std::sync::atomic::Ordering::Relaxed);
+        let now = chrono::Utc::now().timestamp_millis();
+        now - last_time < 15000
     }
 
     /// Fetches streamer parameters from User Preferences REST API
@@ -435,6 +447,10 @@ impl WebsocketClient {
                             return Err(e.into());
                         }
                         Ok(Some(Ok(msg))) => {
+                            self.last_stream_frame_at.store(
+                                chrono::Utc::now().timestamp_millis(),
+                                std::sync::atomic::Ordering::Relaxed
+                            );
                             match msg {
                                 Message::Text(text) => {
                                     debug!("Received WebSocket message: {}", text);

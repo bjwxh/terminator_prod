@@ -175,7 +175,7 @@ async fn test_strategy_supervisor_tick() {
     grid.update_option("SPXW  260522P05280000", Some(0.50), Some(0.70), None, 5300.0);
 
     // 4. Construct StrategySupervisor
-    let supervisor = StrategySupervisor::new(config, execution_client, grid);
+    let supervisor = StrategySupervisor::new(config, execution_client, grid, None);
 
     // Set resolved account hash
     {
@@ -208,6 +208,7 @@ async fn test_strategy_supervisor_tick() {
 
     let tick_result = supervisor.tick().await;
     assert!(tick_result.is_ok());
+    supervisor.evaluate_signals().await;
 
     {
         let strats = supervisor.sub_strategies.lock().await;
@@ -269,7 +270,7 @@ async fn test_startup_position_reconciliation() {
     let execution_client = Arc::new(ExecutionClient::new(token_manager));
     let grid = Arc::new(OptionsGrid::new(HashMap::new()));
     
-    let supervisor = StrategySupervisor::new(config, execution_client, grid);
+    let supervisor = StrategySupervisor::new(config, execution_client, grid, None);
     
     // Verify initial states are Idle and has_traded_today is false
     {
@@ -395,7 +396,7 @@ async fn test_flipping_chunks_are_queued_and_triggered() {
     let client = Arc::new(ExecutionClient::new(tm));
     let grid = Arc::new(OptionsGrid::new(HashMap::new()));
     
-    let supervisor = StrategySupervisor::new(config, client, grid);
+    let supervisor = StrategySupervisor::new(config, client, grid, None);
     *supervisor.account_hash.lock().await = Some("mock_hash".to_string());
 
     // Setup active broker positions: we are Long 1 contract of SPXW  260522C05300000

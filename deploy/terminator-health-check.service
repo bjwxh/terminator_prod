@@ -1,0 +1,9 @@
+[Unit]
+Description=Terminator Downstream Health Verification
+After=terminator-backend.service
+
+[Service]
+Type=oneshot
+User=fw
+WorkingDirectory=/home/fw/terminator_prod
+ExecStart=/usr/bin/python3 /opt/terminator/health_check.py

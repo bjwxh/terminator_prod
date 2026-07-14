@@ -1136,6 +1136,9 @@ pub struct StrategySupervisor {
     pub fast_sync_tx: tokio::sync::mpsc::Sender<bool>,
     pub fast_sync_rx: Mutex<Option<tokio::sync::mpsc::Receiver<bool>>>,
     pub last_dismissed_at: tokio::sync::Mutex<Option<std::time::Instant>>,
+    pub ws_client: Option<Arc<crate::websocket::WebsocketClient>>,
+    pub last_reconciled_at: tokio::sync::Mutex<Option<std::time::Instant>>,
+    pub last_stream_healthy: std::sync::atomic::AtomicBool,
 }
 
 /// Split gap legs into close (reducing/exiting existing broker positions) and open (new positions).
@@ -1230,6 +1233,7 @@ impl StrategySupervisor {
         config: crate::config::AppConfig,
         execution_client: Arc<ExecutionClient>,
         grid: Arc<OptionsGrid>,
+        ws_client: Option<Arc<crate::websocket::WebsocketClient>>,
     ) -> Self {
         let mut sub_strategies = HashMap::new();
         let mut t = config.portfolio_start_time;
@@ -1272,6 +1276,9 @@ impl StrategySupervisor {
             fast_sync_tx,
             fast_sync_rx: Mutex::new(Some(fast_sync_rx)),
             last_dismissed_at: tokio::sync::Mutex::new(None),
+            ws_client,
+            last_reconciled_at: tokio::sync::Mutex::new(None),
+            last_stream_healthy: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -2006,8 +2013,75 @@ impl StrategySupervisor {
         if account_hash.is_empty() {
             return Ok(());
         }
-        if let Err(e) = self.check_reconciliation(&account_hash).await {
-            error!("Failed to check reconciliation: {:?}", e);
+
+        // --- Stream Health Tracking & Reconciliation Routing ---
+        let mut is_healthy = true;
+        if let Some(ref ws) = self.ws_client {
+            is_healthy = ws.is_healthy();
+        }
+
+        // Detect transition from healthy -> unhealthy to increment heartbeat_failures
+        let was_healthy = self.last_stream_healthy.swap(is_healthy, std::sync::atomic::Ordering::Relaxed);
+        if was_healthy && !is_healthy {
+            self.heartbeat_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            warn!("⚠️ Schwab WebSocket stream went unhealthy. Falling back to 5s REST reconciliation poll.");
+        }
+
+        // Check if we need to run reconciliation
+        let should_reconcile = {
+            if std::env::var("TERMINATOR_TEST_ENV").is_ok() {
+                true
+            } else if !is_healthy {
+                // Stream is unhealthy: poll every tick (5s)
+                true
+            } else {
+                // Stream is healthy: check if 60s elapsed, or if we just transitioned back to healthy (resync)
+                let transitioned_back = !was_healthy && is_healthy;
+                if transitioned_back {
+                    info!("🟢 Schwab WebSocket stream recovered. Triggering immediate resync pass.");
+                }
+
+                let mut last_rec = self.last_reconciled_at.lock().await;
+                match *last_rec {
+                    None => {
+                        *last_rec = Some(std::time::Instant::now());
+                        true
+                    }
+                    Some(last) => {
+                        if transitioned_back || last.elapsed() >= Duration::from_secs(60) {
+                            *last_rec = Some(std::time::Instant::now());
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+        };
+
+        if should_reconcile {
+            if let Err(e) = self.check_reconciliation(&account_hash).await {
+                error!("Failed to check reconciliation: {:?}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract entry/exit/rebalance block from tick() for decoupled signal checking.
+    pub async fn evaluate_signals(&self) {
+        let now_ct = if std::env::var("TERMINATOR_TEST_ENV").is_ok() {
+            Chicago.with_ymd_and_hms(2026, 5, 22, 9, 0, 0).unwrap()
+        } else {
+            Chicago.from_utc_datetime(&chrono::Utc::now().naive_utc())
+        };
+        let current_time = now_ct.time();
+
+        let start_time = self.config.start_time;
+        let end_time = self.config.end_time;
+
+        if current_time < start_time || current_time > end_time {
+            return;
         }
 
         let mut strats = self.sub_strategies.lock().await;
@@ -2075,11 +2149,16 @@ impl StrategySupervisor {
         drop(strats);
 
         // Keep live_portfolio position prices in sync with sub-strategy portfolios.
-        // Sub-strategies call update_pricing() above; without this, live_portfolio.gross_pnl()
-        // would use stale entry prices, making the Sim Total PnL card wrong.
         self.live_portfolio.lock().await.update_pricing(&self.grid);
+    }
 
-        Ok(())
+    /// Spawns a background task running evaluate_signals() every 500ms.
+    pub async fn run_signal_loop(self: Arc<Self>) {
+        info!("🚦 Strategy Signal Ticker task started (500ms intervals).");
+        loop {
+            self.evaluate_signals().await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     /// Process parsed order events from the ACCT_ACTIVITY feed.
