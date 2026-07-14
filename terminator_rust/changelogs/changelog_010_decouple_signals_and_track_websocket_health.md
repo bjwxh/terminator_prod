@@ -20,3 +20,7 @@
 - Modified `StrategySupervisor::new` to accept `Option<Arc<WebsocketClient>>` for health checking.
 - Updated `src/main.rs` to wire the WebSocket client into the supervisor and spawn the new `run_signal_loop` task.
 - Updated `tests/strategy_tests.rs` to use the new constructor signature and explicitly call `evaluate_signals()` in tests.
+
+### 5. Schwab Timestamp Parsing Fix
+- Implemented `parse_schwab_timestamp` helper to gracefully handle Schwab ISO8601 timestamps that have missing colons in their timezone offset (e.g. `+0000`).
+- Updated the soft bootstrap matching loops in `bootstrap_from_history` to use this helper, resolving a bug where live trades were silently skipped during bootstrap.

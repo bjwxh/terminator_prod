@@ -1293,6 +1293,24 @@ impl StrategySupervisor {
         sync_trade
     }
 
+    pub fn parse_schwab_timestamp(ts_str: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        let mut normalized = ts_str.replace("Z", "+00:00");
+        if let Some(pos) = normalized.rfind('+') {
+            if pos + 5 == normalized.len() && !normalized[pos..].contains(':') {
+                let mut temp = normalized.clone();
+                temp.insert(pos + 3, ':');
+                normalized = temp;
+            }
+        } else if let Some(pos) = normalized.rfind('-') {
+            if pos > 10 && pos + 5 == normalized.len() && !normalized[pos..].contains(':') {
+                let mut temp = normalized.clone();
+                temp.insert(pos + 3, ':');
+                normalized = temp;
+            }
+        }
+        chrono::DateTime::parse_from_rfc3339(&normalized).ok()
+    }
+
     pub async fn get_simulated_combined_portfolio(&self) -> crate::portfolio::Portfolio {
         let mut combined = crate::portfolio::Portfolio::new();
         let strats = self.sub_strategies.lock().await;
@@ -1450,7 +1468,7 @@ impl StrategySupervisor {
             let mut trade_strats = std::collections::HashMap::new();
 
             for lt in &live_trades {
-                if let Ok(lt_ts) = chrono::DateTime::parse_from_rfc3339(&lt.timestamp) {
+                if let Some(lt_ts) = Self::parse_schwab_timestamp(&lt.timestamp) {
                     let lt_ct = lt_ts.with_timezone(&tz);
                     for (sid, s) in self.sub_strategies.lock().await.iter() {
                         let win_start = start_time.date_naive().and_time(s.trade_start_time).and_local_timezone(tz).unwrap();
@@ -1503,7 +1521,7 @@ impl StrategySupervisor {
                             if !s.has_traded_today {
                                 if mode == "soft" {
                                     if let Some(lt) = assigned_live_entry.get(sid) {
-                                        if let Ok(lt_ts) = chrono::DateTime::parse_from_rfc3339(&lt.timestamp) {
+                                        if let Some(lt_ts) = Self::parse_schwab_timestamp(&lt.timestamp) {
                                             if lt_ts.with_timezone(&tz) <= snap_ct {
                                                 info!("Soft Bootstrap: Seeding {} with live trade {} at {}", sid, lt.strategy_id, snap_ct);
                                                 let sync_trade = Self::create_sync_entry(lt, snap_ct, sid);
