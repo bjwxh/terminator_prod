@@ -1400,10 +1400,14 @@ impl StrategySupervisor {
 
     pub async fn bootstrap_from_history(&self, account_hash: &str) {
         if self.config.db_path.is_empty() {
+            self.bootstrap_complete.store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         let mode = self.config.bootstrap_mode.to_lowercase();
-        if mode == "none" { return; }
+        if mode == "none" {
+            self.bootstrap_complete.store(true, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
 
         info!("Starting historical bootstrap replay (Mode: {})", mode);
 
@@ -1418,6 +1422,7 @@ impl StrategySupervisor {
 
         if now_ct < start_time {
             info!("Skipping bootstrap (before 8:30 AM)");
+            self.bootstrap_complete.store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
 
