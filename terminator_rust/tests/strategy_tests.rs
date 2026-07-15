@@ -54,7 +54,7 @@ fn test_find_closest_option_and_stale_guards() {
     grid.update_option("SPXW  260522C05310000", Some(5.0), Some(6.0), None, 5305.0);
     
     // Verify find closest option (target delta = 0.6)
-    let closest = find_closest_option(&grid, 0.6, true, None, None);
+    let closest = find_closest_option(&grid, 0.6, true, None, None, None);
     assert!(closest.is_some());
     assert_eq!(closest.unwrap().symbol, "SPXW  260522C05300000");
 
@@ -69,7 +69,7 @@ fn test_find_closest_option_and_stale_guards() {
     }
     
     // Now call for 5300 strike is stale and should be filtered out by the Stale Quote Guard!
-    let closest_after_stale = find_closest_option(&grid, 0.6, true, None, None);
+    let closest_after_stale = find_closest_option(&grid, 0.6, true, None, None, None);
     assert_eq!(closest_after_stale.unwrap().symbol, "SPXW  260522C05310000"); // should fall back to 5310!
 }
 
@@ -107,7 +107,7 @@ fn test_iron_condor_generation() {
     
     let s = SubStrategy::new("strat_0900".to_string(), NaiveTime::from_hms_opt(9, 0, 0).unwrap(), 0.25, 0.05, 2);
     
-    let entry_trade = check_entry(&grid, &s, now, 50.0, 1.13);
+    let entry_trade = check_entry(&grid, &s, now, 50.0, 1.13, None);
     assert!(entry_trade.is_some());
     
     let trade = entry_trade.unwrap();

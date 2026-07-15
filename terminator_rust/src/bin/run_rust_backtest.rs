@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         println!("Checking Entry for {} at {} CT (Chicago)...", sid, time_str);
         println!("-------------------------------------------------------------------------------");
 
-        if let Some(trade) = check_entry(&grid, &s, now_ct, 50.0, 1.13) {
+        if let Some(trade) = check_entry(&grid, &s, now_ct, 50.0, 1.13, None) {
             println!("🎯 Rust Trade triggered successfully!");
             println!("  Net Entry Credit: ${:.2}", trade.credit);
             println!("  Commission: ${:.2}", trade.commission);

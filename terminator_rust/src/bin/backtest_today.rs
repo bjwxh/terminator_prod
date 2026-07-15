@@ -53,6 +53,7 @@ struct ConfigJson {
     dry_run: bool,
     web_port: u16,
     min_credit: f64,
+    stale_quote_threshold_secs: Option<u64>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -183,6 +184,7 @@ fn main() -> Result<()> {
         buffer_zone: cfg.buffer_zone,
         web_port: cfg.web_port,
         email_alert_delay_seconds: 5,
+        stale_quote_threshold_secs: cfg.stale_quote_threshold_secs.unwrap_or(60),
     };
 
     println!("================================================================================");
@@ -216,7 +218,7 @@ fn main() -> Result<()> {
 
             if matches!(state, StrategyState::Idle) {
                 if let Some(trade) =
-                    check_entry(&grid, s, snap_ct, cfg.max_spread_diff, cfg.commission_per_contract)
+                    check_entry(&grid, s, snap_ct, cfg.max_spread_diff, cfg.commission_per_contract, None)
                 {
                     println!(
                         "[{}] {} ENTRY  credit=${:.2}  {}",

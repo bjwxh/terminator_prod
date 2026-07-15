@@ -36,6 +36,7 @@ pub struct AppConfig {
     pub buffer_zone: f64,
     pub web_port: u16,
     pub email_alert_delay_seconds: u32,
+    pub stale_quote_threshold_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +87,7 @@ struct ConfigJson {
     dry_run: bool,
     web_port: u16,
     email_alert_delay_seconds: Option<u32>,
+    stale_quote_threshold_secs: Option<u64>,
 }
 
 impl AppConfig {
@@ -178,6 +180,7 @@ impl AppConfig {
             dry_run: config_json.dry_run,
             web_port: config_json.web_port,
             email_alert_delay_seconds: config_json.email_alert_delay_seconds.unwrap_or(5),
+            stale_quote_threshold_secs: config_json.stale_quote_threshold_secs.unwrap_or(60),
         })
     }
 }
@@ -216,6 +219,7 @@ impl Default for AppConfig {
             buffer_zone: 10.0,
             web_port: 8080,
             email_alert_delay_seconds: 5,
+            stale_quote_threshold_secs: 60,
         }
     }
 }

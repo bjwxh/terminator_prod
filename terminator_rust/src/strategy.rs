@@ -108,6 +108,7 @@ pub fn find_closest_option(
     is_call: bool,
     max_diff: Option<f64>,
     short_strike: Option<f64>,
+    stale_quote_threshold: Option<Duration>,
 ) -> Option<OptionLegQuote> {
     let mut best_leg: Option<OptionLegQuote> = None;
     let mut min_diff = f64::MAX;
@@ -115,15 +116,14 @@ pub fn find_closest_option(
     let mut min_diff_fallback = f64::MAX;
     
     let abs_target = target_delta.abs();
+    let threshold = stale_quote_threshold.unwrap_or_else(|| Duration::from_secs(5));
 
     for entry in grid.quotes.iter() {
         let strike = entry.key().0;
         let quote = entry.value();
 
-        // Stale quote guard: skip strikes that haven't received a WS tick in 5s.
-        // 500ms was too aggressive — WS ticks arrive at ~1Hz so half the time a
-        // strike would be falsely excluded.
-        if quote.last_updated.elapsed() > Duration::from_millis(5000) {
+        // Stale quote guard: skip strikes that haven't received a WS tick in the threshold period.
+        if quote.last_updated.elapsed() > threshold {
             continue;
         }
 
@@ -148,7 +148,7 @@ pub fn find_closest_option(
 
         let leg_quote_opt = if is_call { &quote.call } else { &quote.put };
         if let Some(leg) = leg_quote_opt {
-            if leg.mid <= 0.0 || leg.last_update.elapsed() > Duration::from_millis(5000) {
+            if leg.mid <= 0.0 || leg.last_update.elapsed() > threshold {
                 continue;
             }
             let abs_delta = leg.delta.abs();
@@ -178,6 +178,7 @@ pub fn check_entry(
     now: chrono::DateTime<Tz>,
     max_diff: f64,
     commission_per_contract: f64,
+    stale_quote_threshold: Option<Duration>,
 ) -> Option<Trade> {
     let start_time = NaiveTime::from_hms_opt(8, 30, 0)?;
     let end_time = NaiveTime::from_hms_opt(15, 0, 0)?;
@@ -187,14 +188,14 @@ pub fn check_entry(
     let target_lc_delta = calculate_delta_decay(now, s.init_l_delta, start_time, end_time);
     let target_lp_delta = calculate_delta_decay(now, s.init_l_delta, start_time, end_time);
 
-    let sc = find_closest_option(grid, target_sc_delta, true, None, None)?;
-    let sp = find_closest_option(grid, target_sp_delta, false, None, None)?;
+    let sc = find_closest_option(grid, target_sc_delta, true, None, None, stale_quote_threshold)?;
+    let sp = find_closest_option(grid, target_sp_delta, false, None, None, stale_quote_threshold)?;
 
     let parsed_sc = parse_occ_symbol(&sc.symbol)?.strike;
     let parsed_sp = parse_occ_symbol(&sp.symbol)?.strike;
 
-    let lc = find_closest_option(grid, target_lc_delta, true, Some(max_diff), Some(parsed_sc))?;
-    let lp = find_closest_option(grid, target_lp_delta, false, Some(max_diff), Some(parsed_sp))?;
+    let lc = find_closest_option(grid, target_lc_delta, true, Some(max_diff), Some(parsed_sc), stale_quote_threshold)?;
+    let lp = find_closest_option(grid, target_lp_delta, false, Some(max_diff), Some(parsed_sp), stale_quote_threshold)?;
 
     let parsed_lc = parse_occ_symbol(&lc.symbol)?.strike;
     let parsed_lp = parse_occ_symbol(&lp.symbol)?.strike;
@@ -299,10 +300,11 @@ fn create_new_spread_trade(
     now: chrono::DateTime<Tz>,
     config: &crate::config::AppConfig,
 ) -> Option<Trade> {
-    let opt_s = find_closest_option(grid, t_short, is_call, None, None)?;
+    let stale_threshold = Some(Duration::from_secs(config.stale_quote_threshold_secs));
+    let opt_s = find_closest_option(grid, t_short, is_call, None, None, stale_threshold)?;
     let parsed_s = parse_occ_symbol(&opt_s.symbol)?.strike;
 
-    let opt_l = find_closest_option(grid, t_long, is_call, Some(config.max_spread_diff), Some(parsed_s))?;
+    let opt_l = find_closest_option(grid, t_long, is_call, Some(config.max_spread_diff), Some(parsed_s), stale_threshold)?;
     let parsed_l = parse_occ_symbol(&opt_l.symbol)?.strike;
 
     let side_str = if is_call { "CALL" } else { "PUT" };
@@ -353,10 +355,11 @@ fn create_rebalance_short(
     now: chrono::DateTime<Tz>,
     config: &crate::config::AppConfig,
 ) -> Option<Trade> {
+    let stale_threshold = Some(Duration::from_secs(config.stale_quote_threshold_secs));
     let side_str = if is_call { "CALL" } else { "PUT" };
     let old_short = portfolio.positions.iter().find(|p| p.side == side_str && p.quantity < 0)?;
 
-    let new_short = find_closest_option(grid, t_short, is_call, None, None)?;
+    let new_short = find_closest_option(grid, t_short, is_call, None, None, stale_threshold)?;
     let parsed_new_short = parse_occ_symbol(&new_short.symbol)?.strike;
 
     let mut legs = vec![
@@ -387,7 +390,7 @@ fn create_rebalance_short(
     if let Some(ol) = old_long {
         let width = if is_call { ol.strike - parsed_new_short } else { parsed_new_short - ol.strike };
         if width > config.max_spread_diff {
-            let new_long = find_closest_option(grid, t_long, is_call, Some(config.max_spread_diff), Some(parsed_new_short))?;
+            let new_long = find_closest_option(grid, t_long, is_call, Some(config.max_spread_diff), Some(parsed_new_short), stale_threshold)?;
             let parsed_new_long = parse_occ_symbol(&new_long.symbol)?.strike;
 
             legs.push(OptionLeg {
@@ -442,11 +445,12 @@ fn create_rebalance_long(
     short_call_strike: Option<f64>,
     short_put_strike: Option<f64>,
 ) -> Option<Trade> {
+    let stale_threshold = Some(Duration::from_secs(config.stale_quote_threshold_secs));
     let side_str = if is_call { "CALL" } else { "PUT" };
     let old_long = portfolio.positions.iter().find(|p| p.side == side_str && p.quantity > 0)?;
     let short_strike = if is_call { short_call_strike } else { short_put_strike };
 
-    let new_long = find_closest_option(grid, t_long, is_call, Some(config.max_spread_diff), short_strike)?;
+    let new_long = find_closest_option(grid, t_long, is_call, Some(config.max_spread_diff), short_strike, stale_threshold)?;
     let parsed_new_long = parse_occ_symbol(&new_long.symbol)?.strike;
 
     let legs = vec![
@@ -1560,7 +1564,7 @@ impl StrategySupervisor {
                                 }
 
                                 // Hard simulation entry
-                                if let Some(trade) = check_entry(&self.grid, s, snap_ct, self.config.max_spread_diff, self.config.commission_per_contract) {
+                                if let Some(trade) = check_entry(&self.grid, s, snap_ct, self.config.max_spread_diff, self.config.commission_per_contract, Some(Duration::from_secs(self.config.stale_quote_threshold_secs))) {
                                     info!("Bootstrap [HARD]: Entry for {} via sim logic at {}", sid, snap_ct);
                                     s.portfolio.lock().await.add_trade(&trade, None);
                                     self.live_portfolio.lock().await.add_trade(&trade, None);
@@ -2181,7 +2185,7 @@ impl StrategySupervisor {
                 }
 
                 info!("🔔 Sub-strategy {} start time reached ({}). Checking entry...", sid, s.trade_start_time);
-                if let Some(trade) = check_entry(&self.grid, s, now_ct, self.config.max_spread_diff, self.config.commission_per_contract) {
+                if let Some(trade) = check_entry(&self.grid, s, now_ct, self.config.max_spread_diff, self.config.commission_per_contract, Some(Duration::from_secs(self.config.stale_quote_threshold_secs))) {
                     info!("🎯 Entry signal triggered for {}! Net credit: ${:.2}. Executing...", sid, trade.credit);
 
                     s.state = StrategyState::Working;
