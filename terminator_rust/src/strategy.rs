@@ -179,9 +179,9 @@ pub fn check_entry(
     max_diff: f64,
     commission_per_contract: f64,
     stale_quote_threshold: Option<Duration>,
+    start_time: NaiveTime,
+    end_time: NaiveTime,
 ) -> Option<Trade> {
-    let start_time = NaiveTime::from_hms_opt(8, 30, 0)?;
-    let end_time = NaiveTime::from_hms_opt(15, 0, 0)?;
 
     let target_sc_delta = calculate_delta_decay(now, s.init_s_delta, start_time, end_time);
     let target_sp_delta = calculate_delta_decay(now, s.init_s_delta, start_time, end_time);
@@ -1249,7 +1249,7 @@ impl StrategySupervisor {
         while t <= config.portfolio_end_time {
             let sid = format!("strat_{}", t.format("%H%M"));
             let init_s = config.initial_sum_delta / 2.0;
-            let init_l = (init_s - config.init_wing_delta).max(0.025);
+            let init_l = (init_s - config.init_wing_delta).max(config.min_long_delta);
             let s = SubStrategy::new(sid.clone(), t, init_s, init_l, config.default_unit_size);
             sub_strategies.insert(sid, s);
 
@@ -1564,7 +1564,7 @@ impl StrategySupervisor {
                                 }
 
                                 // Hard simulation entry
-                                if let Some(trade) = check_entry(&self.grid, s, snap_ct, self.config.max_spread_diff, self.config.commission_per_contract, Some(Duration::from_secs(self.config.stale_quote_threshold_secs))) {
+                                if let Some(trade) = check_entry(&self.grid, s, snap_ct, self.config.max_spread_diff, self.config.commission_per_contract, Some(Duration::from_secs(self.config.stale_quote_threshold_secs)), self.config.start_time, self.config.end_time) {
                                     info!("Bootstrap [HARD]: Entry for {} via sim logic at {}", sid, snap_ct);
                                     s.portfolio.lock().await.add_trade(&trade, None);
                                     self.live_portfolio.lock().await.add_trade(&trade, None);
@@ -2185,7 +2185,7 @@ impl StrategySupervisor {
                 }
 
                 info!("🔔 Sub-strategy {} start time reached ({}). Checking entry...", sid, s.trade_start_time);
-                if let Some(trade) = check_entry(&self.grid, s, now_ct, self.config.max_spread_diff, self.config.commission_per_contract, Some(Duration::from_secs(self.config.stale_quote_threshold_secs))) {
+                if let Some(trade) = check_entry(&self.grid, s, now_ct, self.config.max_spread_diff, self.config.commission_per_contract, Some(Duration::from_secs(self.config.stale_quote_threshold_secs)), self.config.start_time, self.config.end_time) {
                     info!("🎯 Entry signal triggered for {}! Net credit: ${:.2}. Executing...", sid, trade.credit);
 
                     s.state = StrategyState::Working;

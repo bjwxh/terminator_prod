@@ -107,7 +107,7 @@ fn test_iron_condor_generation() {
     
     let s = SubStrategy::new("strat_0900".to_string(), NaiveTime::from_hms_opt(9, 0, 0).unwrap(), 0.25, 0.05, 2);
     
-    let entry_trade = check_entry(&grid, &s, now, 50.0, 1.13, None);
+    let entry_trade = check_entry(&grid, &s, now, 50.0, 1.13, None, NaiveTime::from_hms_opt(8, 30, 0).unwrap(), NaiveTime::from_hms_opt(15, 0, 0).unwrap());
     assert!(entry_trade.is_some());
     
     let trade = entry_trade.unwrap();

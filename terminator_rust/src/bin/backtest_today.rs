@@ -138,7 +138,7 @@ fn main() -> Result<()> {
 
     // Build sub-strategies
     let init_s = cfg.initial_sum_delta / 2.0;
-    let init_l = (init_s - cfg.init_wing_delta).max(0.025);
+    let init_l = (init_s - cfg.init_wing_delta).max(cfg.min_long_delta);
     let mut sub_strats: Vec<(SubStrategy, Portfolio, StrategyState)> = {
         let mut v = Vec::new();
         let mut t = portfolio_start;
@@ -218,7 +218,7 @@ fn main() -> Result<()> {
 
             if matches!(state, StrategyState::Idle) {
                 if let Some(trade) =
-                    check_entry(&grid, s, snap_ct, cfg.max_spread_diff, cfg.commission_per_contract, None)
+                    check_entry(&grid, s, snap_ct, cfg.max_spread_diff, cfg.commission_per_contract, None, trading_start, trading_end)
                 {
                     println!(
                         "[{}] {} ENTRY  credit=${:.2}  {}",

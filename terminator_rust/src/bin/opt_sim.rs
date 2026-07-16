@@ -230,7 +230,7 @@ fn main() -> Result<()> {
                 }
 
                 if matches!(state, StrategyState::Idle) {
-                    if let Some(trade) = check_entry(&grid, s, snap_ct, app_cfg.max_spread_diff, app_cfg.commission_per_contract, None) {
+                    if let Some(trade) = check_entry(&grid, s, snap_ct, app_cfg.max_spread_diff, app_cfg.commission_per_contract, None, app_cfg.start_time, app_cfg.end_time) {
                         port.add_trade(&trade, None);
                         *state = StrategyState::Working;
                     }

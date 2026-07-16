@@ -95,7 +95,9 @@ async fn main() -> Result<()> {
         println!("Checking Entry for {} at {} CT (Chicago)...", sid, time_str);
         println!("-------------------------------------------------------------------------------");
 
-        if let Some(trade) = check_entry(&grid, &s, now_ct, 50.0, 1.13, None) {
+        let start_time = chrono::NaiveTime::from_hms_opt(8, 30, 0).unwrap();
+        let end_time = chrono::NaiveTime::from_hms_opt(15, 0, 0).unwrap();
+        if let Some(trade) = check_entry(&grid, &s, now_ct, 50.0, 1.13, None, start_time, end_time) {
             println!("🎯 Rust Trade triggered successfully!");
             println!("  Net Entry Credit: ${:.2}", trade.credit);
             println!("  Commission: ${:.2}", trade.commission);
