@@ -1,3 +1,5 @@
+const INV_SQRT_2PI: f64 = 0.3989422804014327; // Precomputed 1.0 / (2.0 * PI).sqrt()
+
 /// Highly accurate approximation of the cumulative standard normal distribution N(x).
 fn ndtr(x: f64) -> f64 {
     let a1 = 0.319381530;
@@ -7,8 +9,10 @@ fn ndtr(x: f64) -> f64 {
     let a5 = 1.330274429;
     let l = x.abs();
     let k = 1.0 / (1.0 + 0.2316419 * l);
-    let mut w = 1.0 - 1.0 / (2.0 * std::f64::consts::PI).sqrt() * (-l * l / 2.0).exp() 
-        * (a1 * k + a2 * k.powi(2) + a3 * k.powi(3) + a4 * k.powi(4) + a5 * k.powi(5));
+    
+    // Horner's method for polynomial evaluation reduces multiplications and avoids power calls.
+    let poly = k * (a1 + k * (a2 + k * (a3 + k * (a4 + k * a5))));
+    let mut w = 1.0 - INV_SQRT_2PI * (-l * l / 2.0).exp() * poly;
     if x < 0.0 {
         w = 1.0 - w;
     }
@@ -44,8 +48,11 @@ pub fn implied_volatility(market_price: f64, s: f64, k: f64, t: f64, r: f64, is_
         return low;
     }
 
-    // 40 iterations of Bisection converges to very high precision
-    for _ in 0..40 {
+    // Converge to high precision (1e-6) or max 25 bisection iterations.
+    for _ in 0..25 {
+        if (high - low) < 1e-6 {
+            break;
+        }
         let mid = (low + high) / 2.0;
         let price = black_scholes_price(s, k, t, r, mid, is_call);
         if price < market_price {

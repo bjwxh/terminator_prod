@@ -110,19 +110,18 @@ pub fn find_closest_option(
     short_strike: Option<f64>,
     stale_quote_threshold: Option<Duration>,
 ) -> Option<OptionLegQuote> {
-    let mut best_leg: Option<OptionLegQuote> = None;
-    let mut min_diff = f64::MAX;
-    let mut best_leg_fallback: Option<OptionLegQuote> = None;
-    let mut min_diff_fallback = f64::MAX;
-    
     let abs_target = target_delta.abs();
     let threshold = stale_quote_threshold.unwrap_or_else(|| Duration::from_secs(5));
 
+    // Pre-allocate to avoid allocations
+    let mut candidates = Vec::with_capacity(128);
+
+    // Acquire locks briefly to extract only the necessary search primitive data
     for entry in grid.quotes.iter() {
         let strike = entry.key().0;
         let quote = entry.value();
-
-        // Stale quote guard: skip strikes that haven't received a WS tick in the threshold period.
+        
+        // Stale quote guard (grid-level)
         if quote.last_updated.elapsed() > threshold {
             continue;
         }
@@ -148,27 +147,45 @@ pub fn find_closest_option(
 
         let leg_quote_opt = if is_call { &quote.call } else { &quote.put };
         if let Some(leg) = leg_quote_opt {
+            // Stale quote guard (leg-level) and midprice guard
             if leg.mid <= 0.0 || leg.last_update.elapsed() > threshold {
                 continue;
             }
-            let abs_delta = leg.delta.abs();
-            let diff = (abs_delta - abs_target).abs();
-            
-            if diff < min_diff_fallback {
-                min_diff_fallback = diff;
-                best_leg_fallback = Some(leg.clone());
-            }
+            candidates.push((strike, leg.delta));
+        }
+    }
 
-            if abs_delta >= abs_target {
-                if diff < min_diff {
-                    min_diff = diff;
-                    best_leg = Some(leg.clone());
-                }
+    // Now perform the search on the local candidates vector (no locks held!)
+    let mut best_strike: Option<f64> = None;
+    let mut min_diff = f64::MAX;
+    let mut best_strike_fallback: Option<f64> = None;
+    let mut min_diff_fallback = f64::MAX;
+
+    for (strike, delta) in candidates {
+        let abs_delta = delta.abs();
+        let diff = (abs_delta - abs_target).abs();
+
+        if diff < min_diff_fallback {
+            min_diff_fallback = diff;
+            best_strike_fallback = Some(strike);
+        }
+
+        if abs_delta >= abs_target {
+            if diff < min_diff {
+                min_diff = diff;
+                best_strike = Some(strike);
             }
         }
     }
 
-    best_leg.or(best_leg_fallback)
+    let final_strike = best_strike.or(best_strike_fallback)?;
+    
+    // Retrieve and clone the final selected option leg quote
+    grid.quotes.get(&OrderedFloat(final_strike)).and_then(|entry| {
+        let quote = entry.value();
+        let leg_opt = if is_call { &quote.call } else { &quote.put };
+        leg_opt.clone()
+    })
 }
 
 /// Core Iron Condor check entry logic
@@ -724,7 +741,7 @@ pub fn classify_order_type(legs: &[OptionLeg]) -> (&'static str, Option<bool>) {
 
 fn extract_chunk<F>(remaining: &mut Vec<OptionLeg>, num_legs: usize, constraint_func: F) -> Option<Vec<OptionLeg>>
 where
-    F: Fn(&[OptionLeg]) -> bool,
+    F: Fn(&[&OptionLeg]) -> bool,
 {
     let len = remaining.len();
     if len < num_legs {
@@ -733,33 +750,39 @@ where
 
     if num_legs == 4 {
         for i in 0..len {
+            let leg_i = &remaining[i];
             for j in (i + 1)..len {
+                let leg_j = &remaining[j];
+                if leg_i.side == leg_j.side && (leg_i.strike - leg_j.strike).abs() < 1e-5 {
+                    continue;
+                }
                 for k in (j + 1)..len {
+                    let leg_k = &remaining[k];
+                    if (leg_i.side == leg_k.side && (leg_i.strike - leg_k.strike).abs() < 1e-5) ||
+                       (leg_j.side == leg_k.side && (leg_j.strike - leg_k.strike).abs() < 1e-5) {
+                        continue;
+                    }
                     for l in (k + 1)..len {
-                        let combo = vec![
-                            remaining[i].clone(),
-                            remaining[j].clone(),
-                            remaining[k].clone(),
-                            remaining[l].clone(),
-                        ];
-                        let mut unique = true;
-                        for x in 0..4 {
-                            for y in (x + 1)..4 {
-                                if combo[x].side == combo[y].side && (combo[x].strike - combo[y].strike).abs() < 1e-5 {
-                                    unique = false;
-                                    break;
-                                }
-                            }
-                            if !unique { break; }
+                        let leg_l = &remaining[l];
+                        if (leg_i.side == leg_l.side && (leg_i.strike - leg_l.strike).abs() < 1e-5) ||
+                           (leg_j.side == leg_l.side && (leg_j.strike - leg_l.strike).abs() < 1e-5) ||
+                           (leg_k.side == leg_l.side && (leg_k.strike - leg_l.strike).abs() < 1e-5) {
+                            continue;
                         }
-                        if !unique { continue; }
 
+                        let combo = [leg_i, leg_j, leg_k, leg_l];
                         if constraint_func(&combo) {
+                            let res = vec![
+                                leg_i.clone(),
+                                leg_j.clone(),
+                                leg_k.clone(),
+                                leg_l.clone(),
+                            ];
                             remaining.remove(l);
                             remaining.remove(k);
                             remaining.remove(j);
                             remaining.remove(i);
-                            return Some(combo);
+                            return Some(res);
                         }
                     }
                 }
@@ -767,19 +790,22 @@ where
         }
     } else if num_legs == 2 {
         for i in 0..len {
+            let leg_i = &remaining[i];
             for j in (i + 1)..len {
-                let combo = vec![
-                    remaining[i].clone(),
-                    remaining[j].clone(),
-                ];
-                if combo[0].side == combo[1].side && (combo[0].strike - combo[1].strike).abs() < 1e-5 {
+                let leg_j = &remaining[j];
+                if leg_i.side == leg_j.side && (leg_i.strike - leg_j.strike).abs() < 1e-5 {
                     continue;
                 }
 
+                let combo = [leg_i, leg_j];
                 if constraint_func(&combo) {
+                    let res = vec![
+                        leg_i.clone(),
+                        leg_j.clone(),
+                    ];
                     remaining.remove(j);
                     remaining.remove(i);
-                    return Some(combo);
+                    return Some(res);
                 }
             }
         }

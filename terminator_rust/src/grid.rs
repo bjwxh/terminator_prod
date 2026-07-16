@@ -36,7 +36,6 @@ pub struct OptionsGrid {
     pub underlying_price: std::sync::atomic::AtomicU64,
     pub vix: std::sync::atomic::AtomicU64,
     pub exchange_ts_ms: std::sync::atomic::AtomicU64,
-    pub subscribed_option_symbols: std::sync::RwLock<std::collections::HashSet<String>>,
 }
 
 impl OptionsGrid {
@@ -55,7 +54,6 @@ impl OptionsGrid {
             underlying_price: std::sync::atomic::AtomicU64::new(0.0f64.to_bits()),
             vix: std::sync::atomic::AtomicU64::new(0.0f64.to_bits()),
             exchange_ts_ms: std::sync::atomic::AtomicU64::new(0),
-            subscribed_option_symbols: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -173,7 +171,6 @@ impl OptionsGrid {
                 quote.put = Some(leg);
             }
             quote.last_updated = Instant::now();
-            self.subscribed_option_symbols.write().unwrap().insert(symbol.to_string());
         }
     }
     pub fn inject_snapshot(&self, quotes: &[OptionQuoteRow], spx: f64) {
