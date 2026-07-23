@@ -54,8 +54,13 @@
         </div>
         <div class="actions">
             <button id="mute-toggle-btn" class="btn btn-secondary" title="Mute/Unmute Sounds"
-                style="padding: 0.5rem 0.7rem; font-size: 1.1rem; display: flex; align-items: center; justify-content: center;">
+                style="padding: 0.5rem 0.7rem; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; gap: 6px;">
                 <span id="mute-icon">🔔</span>
+                <span id="volume-dots-indicator" style="display: flex; flex-direction: column; gap: 2px;">
+                    <span class="vol-dot" id="dot-top" style="width: 4px; height: 4px; border-radius: 50%; background-color: currentColor; display: block; opacity: 1; transition: opacity 0.15s ease;"></span>
+                    <span class="vol-dot" id="dot-middle" style="width: 4px; height: 4px; border-radius: 50%; background-color: currentColor; display: block; opacity: 1; transition: opacity 0.15s ease;"></span>
+                    <span class="vol-dot" id="dot-bottom" style="width: 4px; height: 4px; border-radius: 50%; background-color: currentColor; display: block; opacity: 1; transition: opacity 0.15s ease;"></span>
+                </span>
             </button>
             <button id="toggle-trading-btn" class="btn btn-secondary">Enable Trading</button>
             <button id="reconnect-broker-btn" class="btn btn-secondary">Reconnect Broker</button>

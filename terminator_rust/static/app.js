@@ -13,7 +13,25 @@ let currentTradeOrders = []; // Task #28: Global store for adjustments
 const TRADE_TIMEOUT_SEC = 10;
 let spxChart, pnlChart;
 let lastChartUpdate = 0;
-let isMuted = localStorage.getItem('isMuted') === 'true';
+// Volume Control State
+const VOLUME_LEVELS = [1.0, 0.5, 0.1, 0.0];
+let currentVolumeIdx = 0; // Default: 1.0 (100% volume)
+
+// Migration support for legacy isMuted setting
+const legacyMute = localStorage.getItem('isMuted');
+const savedVol = localStorage.getItem('volumeLevel');
+
+if (savedVol !== null) {
+    const parsedVol = parseFloat(savedVol);
+    const idx = VOLUME_LEVELS.indexOf(parsedVol);
+    if (idx !== -1) {
+        currentVolumeIdx = idx;
+    }
+} else if (legacyMute === 'true') {
+    currentVolumeIdx = VOLUME_LEVELS.indexOf(0.0);
+}
+
+let currentVolume = VOLUME_LEVELS[currentVolumeIdx];
 let currentVersion = null; // Track backend version for auto-refresh
 let latencyHistory = []; // Buffer for SMA
 let lastSeenExchangeTs = 0; // Filter sawtooth jitter
@@ -24,19 +42,89 @@ let lastOptionBookData = null;
 let lastSpxPrice = null;
 let lastServerTs = null;
 
+// Ambient Audio Session (iOS/Mobile Browser background music mixing)
+if (navigator.audioSession) {
+    navigator.audioSession.type = 'ambient';
+}
 
-// Initialize Mute UI
-function initMuteUI() {
+// Preload audio elements to prevent latency and allow gesture unlocking
+const chimeAudio = new Audio('chime.mp3');
+const errorAudio = new Audio('error.mp3');
+
+// Unlock audio elements via first user gesture
+let isAudioUnlocked = false;
+function unlockAudio() {
+    if (isAudioUnlocked) return;
+    
+    // Play and immediately pause/stop to unlock browser restrictions
+    chimeAudio.play().then(() => {
+        chimeAudio.pause();
+        chimeAudio.currentTime = 0;
+    }).catch(e => console.log("Audio unlock chime blocked/failed:", e));
+    
+    errorAudio.play().then(() => {
+        errorAudio.pause();
+        errorAudio.currentTime = 0;
+    }).catch(e => console.log("Audio unlock error blocked/failed:", e));
+    
+    isAudioUnlocked = true;
+    // Clean up listeners
+    document.removeEventListener('click', unlockAudio);
+    document.removeEventListener('touchstart', unlockAudio);
+    console.log("Audio elements unlocked successfully");
+}
+document.addEventListener('click', unlockAudio);
+document.addEventListener('touchstart', unlockAudio);
+
+function updateVolumeDots(volume) {
+    const dotTop = document.getElementById('dot-top');
+    const dotMiddle = document.getElementById('dot-middle');
+    const dotBottom = document.getElementById('dot-bottom');
     const icon = document.getElementById('mute-icon');
-    if (icon) icon.textContent = isMuted ? '🔕' : '🔔';
+
+    if (icon) {
+        icon.textContent = volume === 0.0 ? '🔕' : '🔔';
+    }
+
+    // Bottom-to-top representation:
+    // 1.0 (100%): 3 dots lit
+    // 0.5 (50%): bottom 2 dots lit (middle, bottom)
+    // 0.1 (10%): bottom 1 dot lit (bottom)
+    // 0.0 (Muted): 0 dots lit
+    if (dotTop && dotMiddle && dotBottom) {
+        if (volume >= 1.0) {
+            dotTop.style.opacity = '1';
+            dotMiddle.style.opacity = '1';
+            dotBottom.style.opacity = '1';
+        } else if (volume >= 0.5) {
+            dotTop.style.opacity = '0.2';
+            dotMiddle.style.opacity = '1';
+            dotBottom.style.opacity = '1';
+        } else if (volume >= 0.1) {
+            dotTop.style.opacity = '0.2';
+            dotMiddle.style.opacity = '0.2';
+            dotBottom.style.opacity = '1';
+        } else {
+            dotTop.style.opacity = '0.2';
+            dotMiddle.style.opacity = '0.2';
+            dotBottom.style.opacity = '0.2';
+        }
+    }
+}
+
+// Initialize Mute/Volume UI
+function initMuteUI() {
+    updateVolumeDots(currentVolume);
 
     const btn = document.getElementById('mute-toggle-btn');
     if (btn) {
         btn.addEventListener('click', () => {
-            isMuted = !isMuted;
-            localStorage.setItem('isMuted', isMuted);
-            icon.textContent = isMuted ? '🔕' : '🔔';
-            console.log(`Sounds ${isMuted ? 'muted' : 'unmuted'}`);
+            currentVolumeIdx = (currentVolumeIdx + 1) % VOLUME_LEVELS.length;
+            currentVolume = VOLUME_LEVELS[currentVolumeIdx];
+            localStorage.setItem('volumeLevel', currentVolume);
+            localStorage.setItem('isMuted', currentVolume === 0.0);
+            updateVolumeDots(currentVolume);
+            console.log(`Volume set to ${currentVolume * 100}%`);
         });
     }
 }
@@ -149,9 +237,10 @@ function connect() {
 }
 
 function playSound(level) {
-    if (isMuted) return; // Task: Respect mute state
-    const soundPath = level === 'error' ? 'error.mp3' : 'chime.mp3';
-    const audio = new Audio(soundPath);
+    if (currentVolume === 0.0) return; // Muted
+    const audio = level === 'error' ? errorAudio : chimeAudio;
+    audio.volume = currentVolume;
+    audio.currentTime = 0;
     audio.play().catch(e => console.warn("Audio play blocked (needs user interaction):", e));
 }
 
